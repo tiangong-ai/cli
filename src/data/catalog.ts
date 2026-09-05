@@ -130,6 +130,9 @@ function registerConnector(source: DataConnectorDefinition): RegisteredDataConne
         digest: sha256CanonicalJson(operation.outputSchema),
       },
       limits,
+      ...(operation.features === undefined
+        ? {}
+        : { features: [...operation.features].sort(codePointOrder) }),
       ...(operation.artifactOutput === undefined
         ? {}
         : { artifactOutput: structuredClone(operation.artifactOutput) }),
@@ -176,6 +179,14 @@ function registerConnector(source: DataConnectorDefinition): RegisteredDataConne
       })),
     limits: structuredClone(definition.limits),
     diagnostics: structuredClone(definition.diagnostics),
+    ...(definition.availability === undefined
+      ? {}
+      : {
+          availability: {
+            status: definition.availability.status,
+            reasonCode: definition.availability.reasonCode,
+          },
+        }),
     operations: operationManifests,
   };
   const published: DataCapabilityManifest = {
@@ -214,6 +225,9 @@ function registerConnector(source: DataConnectorDefinition): RegisteredDataConne
     },
     freshness: structuredClone(definition.freshness),
     limitations: [...definition.limitations].sort(codePointOrder),
+    ...(definition.availability === undefined
+      ? {}
+      : { availability: structuredClone(definition.availability) }),
     operations: operationDiscoveries,
   };
   const discovery: DataCapabilityDiscovery = {
@@ -239,6 +253,9 @@ function cloneAndFreezeConnector(source: DataConnectorDefinition): DataConnector
     credentials: source.credentials.map((credential) => structuredClone(credential)),
     limits: structuredClone(source.limits),
     diagnostics: structuredClone(source.diagnostics),
+    ...(source.availability === undefined
+      ? {}
+      : { availability: structuredClone(source.availability) }),
     freshness: structuredClone(source.freshness),
     limitations: [...source.limitations],
     discovery: structuredClone(source.discovery),
@@ -246,6 +263,7 @@ function cloneAndFreezeConnector(source: DataConnectorDefinition): DataConnector
       ...operation,
       inputSchema: structuredClone(operation.inputSchema),
       outputSchema: structuredClone(operation.outputSchema),
+      ...(operation.features === undefined ? {} : { features: [...operation.features] }),
       ...(operation.limits === undefined ? {} : { limits: structuredClone(operation.limits) }),
       ...(operation.artifactOutput === undefined
         ? {}
@@ -316,6 +334,25 @@ function assertConnectorDefinition(definition: DataConnectorDefinition): void {
       "Live doctor support must match the connector diagnostics declaration.",
     );
   }
+  if (
+    definition.availability &&
+    (definition.availability.status !== "suspended" ||
+      !definition.availability.reasonCode ||
+      !definition.availability.description ||
+      definition.availability.resumeCriteria.length === 0)
+  ) {
+    throw new DataRuntimeError("internal-error", "Suspended capability metadata is invalid.");
+  }
+  for (const operation of definition.operations) {
+    if (
+      operation.features &&
+      (operation.features.length === 0 ||
+        new Set(operation.features).size !== operation.features.length ||
+        operation.features.some((feature) => !/^[a-z0-9]+(?:[._-][a-z0-9]+)*$/.test(feature)))
+    ) {
+      throw new DataRuntimeError("internal-error", "Data operation features are invalid.");
+    }
+  }
 }
 
 function assertLimits(limits: DataExecutionLimits): void {
@@ -385,6 +422,7 @@ function toCatalogCapability(connector: RegisteredDataConnector): DataCatalogCap
     summary: discovery.summary,
     provides: [...discovery.provides],
     doesNotProvide: [...discovery.doesNotProvide],
+    availability: definitionAvailability(connector),
     manifestDigest: manifest.manifestDigest,
     discoveryDigest: discovery.discoveryDigest,
     operations: manifest.operations.map((operation) => ({
@@ -393,10 +431,23 @@ function toCatalogCapability(connector: RegisteredDataConnector): DataCatalogCap
       summary:
         discovery.operations.find((item) => item.operationId === operation.operationId)?.summary ??
         operation.operationId,
+      ...(operation.features === undefined ? {} : { features: [...operation.features] }),
       inputSchemaDigest: operation.inputSchema.digest,
       outputSchemaDigest: operation.outputSchema.digest,
     })),
   };
+}
+
+function definitionAvailability(connector: RegisteredDataConnector) {
+  const suspended = connector.definition.availability;
+  return suspended
+    ? structuredClone(suspended)
+    : {
+        status: "available" as const,
+        reasonCode: null,
+        description: null,
+        resumeCriteria: [],
+      };
 }
 
 function codePointOrder(left: string, right: string): number {

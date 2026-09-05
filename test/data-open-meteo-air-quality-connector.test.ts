@@ -15,9 +15,9 @@ function request(inputOverrides: Record<string, unknown> = {}): DataRunRequest {
   return {
     schemaVersion: "tiangong.data.run-request.v1",
     capabilityId: "open-meteo.air-quality",
-    capabilityVersion: "1.0.0",
+    capabilityVersion: "1.0.1",
     operationId: "fetch-hourly",
-    operationVersion: "1.0.0",
+    operationVersion: "1.0.1",
     input: {
       locations: [{ latitude: 52.52, longitude: 13.41 }],
       startDate: "2026-03-17",
@@ -196,6 +196,7 @@ describe("Open-Meteo air-quality connector", () => {
     assert.equal(result.status, "partial");
     assert.equal(result.summary.recordCount, 24);
     assert.equal(result.errors[0]?.code, "partial-result");
+    assert.deepEqual(result.errors[0]?.details?.issueCodes, ["series-missing"]);
     assert.deepEqual(result.summary.missing, [
       { kind: "field", identifiers: ["$[0].hourly.pm10"] },
     ]);
@@ -206,6 +207,36 @@ describe("Open-Meteo air-quality connector", () => {
         }
       ).locations[0]?.variables.map((variable) => variable.variable),
       ["pm2_5"],
+    );
+  });
+
+  it("preserves a returned all-null series and distinguishes it from a missing series", async () => {
+    const payload = await fixture();
+    const hourly = payload.hourly as Record<string, unknown>;
+    hourly.pm10 = new Array((hourly.time as unknown[]).length).fill(null);
+    const result = await executeDataRun(request(), {
+      registry: createDataRegistry([openMeteoAirQualityConnector]),
+      environment: {},
+      fetchImpl: (async () => jsonResponse(payload)) as typeof fetch,
+    });
+
+    assert.equal(result.status, "partial");
+    assert.deepEqual(result.errors[0]?.details?.issueCodes, ["series-all-null"]);
+    const data = result.data as {
+      validation: { issues: Array<{ code: string; path: string }> };
+      locations: Array<{ variables: Array<{ variable: string; values: unknown[] }> }>;
+    };
+    assert.deepEqual(data.validation.issues, [
+      {
+        code: "series-all-null",
+        path: "$[0].hourly.pm10",
+        message: "Requested air-quality series was returned but contains no usable numeric values.",
+      },
+    ]);
+    assert.ok(
+      data.locations[0]?.variables
+        .find((variable) => variable.variable === "pm10")
+        ?.values.every((value) => value === null),
     );
   });
 

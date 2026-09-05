@@ -12,9 +12,9 @@ function request(input: unknown, limits?: DataRunRequest["limits"]): DataRunRequ
   return {
     schemaVersion: "tiangong.data.run-request.v1",
     capabilityId: "epa.eis-records",
-    capabilityVersion: "1.0.0",
+    capabilityVersion: "1.0.1",
     operationId: "search",
-    operationVersion: "1.0.0",
+    operationVersion: "1.0.1",
     input,
     ...(limits ? { limits } : {}),
   };
@@ -108,6 +108,32 @@ describe("EPA EIS records connector", () => {
       sourcePageUrl:
         "https://cdxapps.epa.gov/cdx-enepa-II/public/action/eis/search?search=&commonSearch=openComment",
     });
+  });
+
+  it("follows the provider session redirect with memory-only same-origin cookies", async () => {
+    const cookies: Array<string | null> = [];
+    const result = await executeDataRun(request({ commonSearches: ["openComment"] }), {
+      registry: createDataRegistry([epaEisRecordsConnector]),
+      environment: {},
+      fetchImpl: (async (_target, init) => {
+        cookies.push(new Headers(init?.headers).get("cookie"));
+        if (cookies.length === 1) {
+          return new Response(null, {
+            status: 302,
+            headers: {
+              location:
+                "/cdx-enepa-II/public/action/eis/search?search=&commonSearch=openComment&__fsk=synthetic",
+              "set-cookie": "JSESSIONID=synthetic-session; Path=/cdx-enepa-II; HttpOnly; Secure",
+            },
+          });
+        }
+        return htmlResponse(resultHtml());
+      }) as typeof fetch,
+    });
+
+    assert.equal(result.status, "success");
+    assert.deepEqual(cookies, [null, "JSESSIONID=synthetic-session"]);
+    assert.doesNotMatch(JSON.stringify(result), /synthetic-session/);
   });
 
   it("accepts only explicit official HTTPS search URLs and preserves their query", async () => {

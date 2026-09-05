@@ -96,6 +96,7 @@
       }
     },
     "limitations": { "$ref": "#/$defs/nonEmptyStringArray" },
+    "availability": { "$ref": "#/$defs/suspendedAvailability" },
     "operations": {
       "type": "array",
       "minItems": 1,
@@ -125,6 +126,17 @@
       "minItems": 1,
       "uniqueItems": true,
       "items": { "$ref": "#/$defs/nonEmptyString" }
+    },
+    "suspendedAvailability": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["status", "reasonCode", "description", "resumeCriteria"],
+      "properties": {
+        "status": { "const": "suspended" },
+        "reasonCode": { "$ref": "#/$defs/id" },
+        "description": { "$ref": "#/$defs/nonEmptyString" },
+        "resumeCriteria": { "$ref": "#/$defs/nonEmptyStringArray" }
+      }
     }
   }
 }

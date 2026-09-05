@@ -15,9 +15,9 @@ function request(inputOverrides: Record<string, unknown> = {}): DataRunRequest {
   return {
     schemaVersion: "tiangong.data.run-request.v1",
     capabilityId: "open-meteo.historical-weather",
-    capabilityVersion: "1.0.0",
+    capabilityVersion: "1.0.1",
     operationId: "fetch",
-    operationVersion: "1.0.0",
+    operationVersion: "1.0.1",
     input: {
       locations: [{ latitude: 52.52, longitude: 13.41 }],
       startDate: "2024-01-01",
@@ -212,6 +212,12 @@ describe("Open-Meteo historical weather connector", () => {
     assert.deepEqual(result.summary.missing, [
       { kind: "field", identifiers: ["$[0].hourly.precipitation"] },
     ]);
+    assert.deepEqual(
+      (result.data as { validation: { issues: Array<{ code: string }> } }).validation.issues.map(
+        (issue) => issue.code,
+      ),
+      ["series-missing"],
+    );
     const location = (
       result.data as {
         locations: Array<{
@@ -225,6 +231,53 @@ describe("Open-Meteo historical weather connector", () => {
       ["temperature_2m"],
     );
     assert.equal(location?.daily.variables.length, 3);
+  });
+
+  it("marks requested series with no usable numeric values as partial", async () => {
+    const payload = await fixture();
+    (payload.hourly as Record<string, unknown>).precipitation = Array.from(
+      { length: 24 },
+      () => null,
+    );
+    (payload.daily as Record<string, unknown>).precipitation_sum = [null];
+    const result = await executeDataRun(request(), {
+      registry: createDataRegistry([openMeteoHistoricalWeatherConnector]),
+      environment: {},
+      fetchImpl: (async () => jsonResponse(payload)) as typeof fetch,
+    });
+
+    assert.equal(result.status, "partial");
+    assert.equal(result.summary.completeness, "partial");
+    assert.deepEqual(result.summary.missing, [
+      {
+        kind: "field",
+        identifiers: ["$[0].hourly.precipitation", "$[0].daily.precipitation_sum"],
+      },
+    ]);
+    assert.deepEqual(
+      (result.data as { validation: { issues: Array<{ code: string }> } }).validation.issues.map(
+        (issue) => issue.code,
+      ),
+      ["series-all-null", "series-all-null"],
+    );
+    const location = (
+      result.data as {
+        locations: Array<{
+          hourly: { variables: Array<{ variable: string; values: Array<number | null> }> };
+          daily: { variables: Array<{ variable: string; values: Array<number | null> }> };
+        }>;
+      }
+    ).locations[0];
+    assert.ok(
+      location?.hourly.variables
+        .find((variable) => variable.variable === "precipitation")
+        ?.values.every((value) => value === null),
+    );
+    assert.deepEqual(
+      location?.daily.variables.find((variable) => variable.variable === "precipitation_sum")
+        ?.values,
+      [null],
+    );
   });
 
   it("marks an incomplete GMT hourly axis as partial while preserving daily data", async () => {

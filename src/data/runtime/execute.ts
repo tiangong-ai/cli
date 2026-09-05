@@ -97,6 +97,26 @@ export async function executeDataRun(
       generatedAt: clock().toISOString(),
     });
   }
+  if (connector.definition.availability?.status === "suspended") {
+    return blockedResult({
+      cliVersion,
+      request,
+      manifest: connector.manifest,
+      operation: operation.manifest,
+      error: new DataRuntimeError(
+        "capability-unavailable",
+        "The requested data capability is temporarily suspended.",
+        {
+          userActionRequired: true,
+          details: {
+            capabilityId: request.capabilityId,
+            reasonCode: connector.definition.availability.reasonCode,
+          },
+        },
+      ),
+      generatedAt: clock().toISOString(),
+    });
+  }
   const contractError = checkCompatibility(request, connector, operation.manifest, cliVersion);
   if (contractError) {
     return blockedResult({

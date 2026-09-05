@@ -39,6 +39,7 @@ export function createBoundedHttpClient(options: BoundedHttpClientOptions): Data
   const resolved = resolveDataCredentials(options.credentials, options.environment);
   const secrets = [...resolved.values.values()];
   const fetchImpl = options.fetchImpl ?? globalThis.fetch;
+  const cookieJars = new Map<string, Map<string, string>>();
 
   return {
     configuredSecrets: () => [...secrets],
@@ -105,7 +106,7 @@ export function createBoundedHttpClient(options: BoundedHttpClientOptions): Data
         query: sortedQuery(safeTarget),
         bodyDigest: body === undefined ? null : sha256Bytes(Buffer.from(body, "utf8")),
       });
-      const { response, attempts } = await performBoundedFetch({
+      const fetchResult = await performBoundedFetch({
         endpoint,
         initialTarget: target,
         method: request.method,
@@ -114,17 +115,32 @@ export function createBoundedHttpClient(options: BoundedHttpClientOptions): Data
         timeoutMs,
         limits: options.limits,
         fetchImpl,
+        cookieJar:
+          endpoint.sessionCookies === "same-origin-memory"
+            ? sessionCookieJar(cookieJars, endpoint.endpointId)
+            : null,
       });
+      const { response, attempts } = fetchResult;
       const announcedLength = parseContentLength(response.headers.get("content-length"));
       if (announcedLength !== null && announcedLength > maxResponseBytes) {
         await response.body?.cancel();
         throw new DataRuntimeError(
           "response-too-large",
           "The provider response exceeds the declared byte limit.",
-          { details: { maxResponseBytes } },
+          {
+            details: {
+              ...httpAttemptDetails(fetchResult, "response"),
+              maxResponseBytes,
+            },
+          },
         );
       }
-      const bytes = await readBoundedResponse(response, maxResponseBytes);
+      let bytes: Buffer;
+      try {
+        bytes = await readBoundedResponse(response, maxResponseBytes);
+      } catch (error) {
+        throw withHttpAttemptDetails(error, fetchResult, "response");
+      }
       if (containsConfiguredSecret(bytes, secrets)) {
         throw new DataRuntimeError(
           "provider-response-invalid",
@@ -132,7 +148,7 @@ export function createBoundedHttpClient(options: BoundedHttpClientOptions): Data
         );
       }
       if (!response.ok) {
-        throwHttpStatus(response, credential, options.limits.maxRetryDelayMs, bytes);
+        throwHttpStatus(response, credential, options.limits.maxRetryDelayMs, bytes, fetchResult);
       }
       const contentType = normalizedContentType(response.headers.get("content-type"));
       if (!contentTypeAllowed(contentType, endpoint.allowedContentTypes)) {
@@ -143,6 +159,7 @@ export function createBoundedHttpClient(options: BoundedHttpClientOptions): Data
             details: {
               contentType,
               allowedContentTypes: endpoint.allowedContentTypes,
+              ...httpAttemptDetails(fetchResult, "response"),
             },
           },
         );
@@ -256,7 +273,8 @@ async function performBoundedFetch(input: {
   timeoutMs: number;
   limits: DataExecutionLimits;
   fetchImpl: typeof fetch;
-}): Promise<{ response: Response; attempts: number }> {
+  cookieJar: Map<string, string> | null;
+}): Promise<{ response: Response; attempts: number; redirects: number; retries: number }> {
   let target = input.initialTarget;
   let redirects = 0;
   let retries = 0;
@@ -266,9 +284,13 @@ async function performBoundedFetch(input: {
     attempts += 1;
     let response: Response;
     try {
+      const requestHeaders = new Headers(input.headers);
+      if (input.cookieJar && input.cookieJar.size > 0) {
+        requestHeaders.set("Cookie", serializeCookieJar(input.cookieJar));
+      }
       response = await input.fetchImpl(target.toString(), {
         method: input.method,
-        headers: input.headers,
+        headers: requestHeaders,
         ...(input.body === undefined ? {} : { body: input.body }),
         redirect: "manual",
         signal: AbortSignal.timeout(input.timeoutMs),
@@ -277,11 +299,18 @@ async function performBoundedFetch(input: {
       if (isTimeoutError(error)) {
         throw new DataRuntimeError("timeout", "The provider request exceeded its timeout.", {
           retryable: true,
-          details: { timeoutMs: input.timeoutMs },
+          details: {
+            attempts,
+            phase: "request",
+            redirects,
+            retries,
+            timeoutMs: input.timeoutMs,
+          },
         });
       }
       throw new DataRuntimeError("network-failed", "The provider network request failed.", {
         retryable: true,
+        details: { attempts, phase: "request", redirects, retries },
       });
     }
 
@@ -291,14 +320,17 @@ async function performBoundedFetch(input: {
         throw new DataRuntimeError(
           "endpoint-policy-blocked",
           "Redirects are not authorized for POST data requests.",
+          { details: { attempts, phase: "redirect", redirects, retries } },
         );
       }
       const location = response.headers.get("location");
+      if (input.cookieJar) storeResponseCookies(input.cookieJar, response.headers);
       await response.body?.cancel();
       if (!location || redirects >= input.limits.maxRedirects) {
         throw new DataRuntimeError(
           "endpoint-policy-blocked",
           "The provider redirect exceeded the connector policy.",
+          { details: { attempts, phase: "redirect", redirects, retries } },
         );
       }
       const redirected = new URL(location, target);
@@ -306,6 +338,7 @@ async function performBoundedFetch(input: {
         throw new DataRuntimeError(
           "endpoint-policy-blocked",
           "Cross-origin data redirects are blocked.",
+          { details: { attempts, phase: "redirect", redirects, retries } },
         );
       }
       assertTargetAllowed(redirected, input.endpoint);
@@ -324,7 +357,8 @@ async function performBoundedFetch(input: {
         continue;
       }
     }
-    return { response, attempts };
+    if (input.cookieJar) storeResponseCookies(input.cookieJar, response.headers);
+    return { response, attempts, redirects, retries };
   }
 }
 
@@ -360,6 +394,7 @@ function throwHttpStatus(
   credential: DataCredentialDeclaration | undefined,
   maxRetryDelayMs: number,
   bytes: Buffer,
+  attempts: { attempts: number; redirects: number; retries: number },
 ): never {
   const providerReason = safeProviderErrorReason(bytes);
   if (response.status === 401 || response.status === 403) {
@@ -372,6 +407,7 @@ function throwHttpStatus(
         userActionRequired: true,
         details: {
           status: response.status,
+          ...httpAttemptDetails(attempts, "response"),
           ...(credential ? { credentialId: credential.credentialId } : {}),
           ...(providerReason ? { providerReason } : {}),
         },
@@ -385,6 +421,7 @@ function throwHttpStatus(
       userActionRequired: (retryAfterMs ?? 0) > maxRetryDelayMs,
       details: {
         status: response.status,
+        ...httpAttemptDetails(attempts, "response"),
         ...(retryAfterMs === null ? {} : { retryAfterMs }),
         ...(providerReason ? { providerReason } : {}),
       },
@@ -397,10 +434,73 @@ function throwHttpStatus(
       retryable: response.status >= 500,
       details: {
         status: response.status,
+        ...httpAttemptDetails(attempts, "response"),
         ...(providerReason ? { providerReason } : {}),
       },
     },
   );
+}
+
+function sessionCookieJar(
+  jars: Map<string, Map<string, string>>,
+  endpointId: string,
+): Map<string, string> {
+  const existing = jars.get(endpointId);
+  if (existing) return existing;
+  const created = new Map<string, string>();
+  jars.set(endpointId, created);
+  return created;
+}
+
+function storeResponseCookies(jar: Map<string, string>, headers: Headers): void {
+  const values =
+    (headers as Headers & { getSetCookie?: () => string[] }).getSetCookie?.() ??
+    (headers.get("set-cookie") ? [headers.get("set-cookie")!] : []);
+  for (const value of values) {
+    const pair = value.split(";", 1)[0]?.trim() ?? "";
+    const separator = pair.indexOf("=");
+    if (separator <= 0) continue;
+    const name = pair.slice(0, separator);
+    const cookieValue = pair.slice(separator + 1);
+    if (!/^[!#$%&'*+.^_`|~0-9A-Za-z-]{1,128}$/.test(name)) continue;
+    if (cookieValue.length > 2048 || /[\s;,\r\n]/.test(cookieValue)) continue;
+    if (/max-age\s*=\s*0/i.test(value) || cookieValue === "") jar.delete(name);
+    else jar.set(name, cookieValue);
+  }
+}
+
+function serializeCookieJar(jar: Map<string, string>): string {
+  return [...jar.entries()]
+    .sort(([left], [right]) => codePointOrder(left, right))
+    .map(([name, value]) => `${name}=${value}`)
+    .join("; ");
+}
+
+function httpAttemptDetails(
+  value: { attempts: number; redirects: number; retries: number },
+  phase: "request" | "redirect" | "response",
+): Record<string, JsonValue> {
+  return {
+    attempts: value.attempts,
+    phase,
+    redirects: value.redirects,
+    retries: value.retries,
+  };
+}
+
+function withHttpAttemptDetails(
+  error: unknown,
+  value: { attempts: number; redirects: number; retries: number },
+  phase: "request" | "redirect" | "response",
+): unknown {
+  if (!(error instanceof DataRuntimeError)) return error;
+  return new DataRuntimeError(error.code, error.message, {
+    ...error.options,
+    details: {
+      ...httpAttemptDetails(value, phase),
+      ...(error.options.details ?? {}),
+    },
+  });
 }
 
 function safeProviderErrorReason(bytes: Buffer): string | undefined {

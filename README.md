@@ -70,16 +70,36 @@ tiangong-ai data run <capability-id> <operation-id> \
 The command-line capability and operation must match the versions in the input
 envelope. Credentials are never accepted in argv or input JSON. Each connector
 declares exact logical environment-variable bindings, HTTPS endpoint scopes,
-and execution limits in its execution manifest. Data commands deliberately do
+and acquisition limits in its execution manifest. Callers may explicitly
+tighten those limits, but upper layers do not silently reinterpret Agent
+context budgets as provider or record limits. Data commands deliberately do
 not load a cwd `.env` file.
 
 `data catalog` also returns a concise capability summary, what the capability
-provides and does not provide, operation summaries, and a separate discovery
-digest. `data describe` expands that layer with source ownership, coverage,
+provides and does not provide, operation summaries, a separate discovery
+digest, and an explicit `available` or `suspended` status. Suspended entries
+remain inspectable, but `doctor` and `run` block before any provider request.
+`data describe` expands that layer with source ownership, coverage,
 granularity, selection hints, typical uses, official documentation, freshness,
 license restrictions, and operation descriptions. Narrative discovery changes
 do not change the execution manifest digest used for compatibility binding.
 Operation input schemas include field-level descriptions and examples.
+Operations may also publish stable feature IDs for Skills that depend on a
+specific compatible behavior within the same contract major.
+
+Auto Research keeps three budgets separate: connector acquisition limits,
+Evidence package bytes/files, and the Agent-visible context view. A validated
+result is persisted in full when it fits the Evidence package budget;
+`maxBrokerItems` and the context-token ceiling only shape the Agent view.
+Receipts distinguish provider coverage, explicit limits reached, and context
+projection instead of forcing them into one status. A projected result returns
+an opaque, evidence-bound cursor; `research project evidence data read` serves
+the next shape-aware view from immutable local Evidence without another
+provider request or provider quota charge. Agents must either continue until
+`nextCursor` is null or disclose the exact presented/total fraction.
+The public Research command returns receipt identity, coverage, a structured
+bounded context view, and continuation metadata. The complete core result
+remains in immutable Evidence and is not duplicated into Agent stdout.
 
 JSON exits are `0` for success, `2` for request/contract errors, `3` for a
 blocked execution, and `4` for an explicit partial result. Public machine
@@ -90,7 +110,9 @@ The built-in capabilities are:
 - `airnow.hourly-observations` / `fetch-hourly`: fetches official AirNow
   `HourlyAQObs` files for a bounded UTC-hour window, bounding box, and pollutant
   list. Results retain source-file lineage and always state that AirNow data are
-  preliminary and unsuitable as regulatory-grade AQS evidence.
+  preliminary and unsuitable as regulatory-grade AQS evidence. Independent
+  hourly files use bounded concurrency while output files and records retain
+  deterministic UTC-hour order.
 - `bluesky.public-posts` / `fetch-cascades`: fetches bounded public Bluesky
   post seeds from search, an author feed, a custom feed, or a list feed and can
   flatten visible reply cascades. Ranking, counters, moderation visibility, and
@@ -98,7 +120,10 @@ The built-in capabilities are:
 - `epa.eis-records` / `search`: retrieves bounded official EPA EIS Database
   common-search or UI-created search pages and parses title, CEQ/provider IDs,
   document type, dates, agencies, state, detail links, and document-availability
-  cues. It does not fetch or assess linked EIS documents.
+  cues. Its endpoint-scoped, same-origin session cookie jar exists only in
+  memory so the provider's initial redirect can complete; cookies never enter
+  results, receipts, logs, or cross-origin requests. It does not fetch or assess
+  linked EIS documents.
 - `federal-register.documents` / `search`: searches bounded
   FederalRegister.gov document metadata by publication date plus term, agency,
   document type, topic, docket, or RIN filters. It does not follow result links,
@@ -111,34 +136,30 @@ The built-in capabilities are:
   discoverable GDELT 2.0 table capabilities backed by one bounded TypeScript
   file-feed core. They fetch either the latest provider entry or at most twenty
   aligned 15-minute files, verify ZIP/CRC and advertised latest-file checksums,
-  and emit closed named columns without persisting downloaded files.
+  and emit closed named columns without persisting downloaded files. Their
+  wide named-field JSON is preserved as Evidence; Agent context projection is
+  handled by Auto Research without changing the connector result.
 - `nasa-firms.active-fire` / `fetch-area`: retrieves bounded NASA FIRMS MODIS,
   VIIRS, or Landsat active-fire point detections, optionally validates source
   availability, and exposes chunk-level partial coverage. Hotspots are thermal
   anomalies, not fire perimeters or confirmed incident identities.
 - `open-meteo.air-quality` / `fetch-hourly`: retrieves bounded GMT hourly CAMS
   model-grid air-quality series for known coordinates; these are modeled
-  background values rather than station observations.
+  background values rather than station observations. Missing and explicitly
+  returned all-null series are distinct machine-readable partial issues.
 - `open-meteo.flood` / `fetch-daily`: retrieves bounded daily GloFAS simulated
   river-discharge series for the represented river grid; it is neither gauge
-  data nor a flood-alert service.
+  data nor a flood-alert service. Missing and explicitly returned all-null
+  series are distinct machine-readable partial issues.
 - `open-meteo.historical-weather` / `fetch`: retrieves bounded GMT hourly and/or
   daily historical weather reanalysis for one controlled model and known
   coordinates. ERA5 or ERA5-Land should be selected when multi-decade model
-  consistency matters.
+  consistency matters. Missing requested series and provider-returned series
+  whose values are all `null` are distinct machine-readable partial issues.
 - `openaq.air-quality` / `search-locations` and `fetch-sensor-measurements`:
   discovers filtered OpenAQ v3 locations and retrieves a bounded raw, hourly,
   or daily series for one sensor. It preserves provider/license context but
   does not calculate AQI or make health or regulatory determinations.
-- `regulations-gov.comments` / `search` and `fetch-details`: searches bounded
-  Regulations.gov public-comment metadata and retrieves curated details for
-  explicit comment IDs. It omits named personal-profile fields, never submits
-  comments, and returns attachment metadata without downloading file bytes.
-- `regulations-gov.attachments` / `download`: retrieves attachment metadata for
-  exact public comment IDs and writes bounded files only from the official
-  Regulations.gov download origin. It requires `--artifact-dir`, refuses to
-  overwrite files, and commits SHA-256-bound relative files plus a manifest;
-  it does not scan, open, extract, or interpret the untrusted bytes.
 - `usbr.project-records` / `fetch`: inventories caller-supplied official
   `www.usbr.gov` project or program pages plus bounded same-origin links. It
   preserves page response provenance but does not follow, download, parse, or
@@ -156,12 +177,17 @@ The built-in capabilities are:
   comment/reply text for explicit video IDs. It does not download media or
   transcripts and does not treat ranking or comments as representative opinion.
 
+Regulations.gov comment and attachment capabilities remain discoverable with
+`availability.status=suspended`, a stable reason code, and explicit resume
+criteria. `doctor` and `run` block locally without network access, and Auto
+Research excludes them from its executable projection until production
+search/detail/attachment live gates qualify them again.
+
 Fourteen capabilities are keyless. NASA FIRMS requires `NASA_FIRMS_MAP_KEY`, which the
 CLI injects as a protected provider path segment; OpenAQ requires
-`OPENAQ_API_KEY`, Regulations.gov requires `REGGOV_API_KEY`, and YouTube requires
-`YOUTUBE_API_KEY`; the CLI injects all three as protected provider headers, with
-YouTube using `X-Goog-Api-Key` rather than a URL parameter. No secret is accepted
-in argv or input JSON. Exact input and output schemas,
+`OPENAQ_API_KEY`, and YouTube requires `YOUTUBE_API_KEY`; the CLI injects the
+latter two as protected provider headers, with YouTube using `X-Goog-Api-Key`
+rather than a URL parameter. No secret is accepted in argv or input JSON. Exact input and output schemas,
 endpoint scopes and limits are available through the execution manifest, while
 source notes, coverage, selection guidance and license restrictions are
 available in the discovery metadata returned by `data describe`; static
@@ -1263,6 +1289,11 @@ with `tiangong-ai data describe`, then run the exact request through:
 tiangong-ai research project evidence data run <project-id> \
   --request /absolute/path/to/data-run-request.json \
   --workspace /absolute/path/to/workspace --json
+
+# When contextView.nextCursor is non-null, continue from persisted Evidence:
+tiangong-ai research project evidence data read <project-id> \
+  --receipt <attempt-id> --cursor <opaque-next-cursor> \
+  --workspace /absolute/path/to/workspace --json
 ```
 
 This Research command calls the same TypeScript data service in-process; it does
@@ -1275,6 +1306,12 @@ credentialed operation must resolve its namespaced logical credential from the
 workspace's owner-only store or it is blocked before any provider request.
 Standalone `tiangong-ai data run` keeps its separate manifest-declared
 environment-variable policy. A blocked data result is not promoted to evidence.
+Native packets publish data commands as `workspace-cli-relative-argv`;
+installed Auto Research must prefix them with its workspace-locked resolver
+rather than resolving a global CLI from `PATH`.
+Data Evidence continuation is read-only and does not consume another evidence-call
+or provider-request budget. Provider coverage, limits reached, and Agent context
+coverage are reported independently, so a result may be both partial and bounded.
 Analyze and synthesize packets contain hash-verified prior-stage artifacts and
 require no external evidence calls. Base and scientific review use only the
 packet-bound `research_list_artifacts` and `research_read_artifact` tools; shell,

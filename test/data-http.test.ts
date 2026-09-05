@@ -9,8 +9,15 @@ function httpClient(input: {
   fetchImpl: typeof fetch;
   environment?: NodeJS.ProcessEnv;
   maxResponseBytes?: number;
+  sameOriginSessionCookies?: boolean;
 }) {
   const connector = syntheticConnector({ credential: true });
+  if (input.sameOriginSessionCookies) {
+    connector.endpoints[0] = {
+      ...connector.endpoints[0]!,
+      sessionCookies: "same-origin-memory",
+    };
+  }
   return createBoundedHttpClient({
     capabilityId: connector.capabilityId,
     endpoints: connector.endpoints,
@@ -120,6 +127,41 @@ describe("bounded data HTTP", () => {
     assert.deepEqual(calls, ["https://example.test/v1/items"]);
   });
 
+  it("keeps opt-in redirect cookies only in an ephemeral same-origin session", async () => {
+    const calls: Array<{ url: string; cookie: string | null }> = [];
+    const client = httpClient({
+      sameOriginSessionCookies: true,
+      fetchImpl: (async (input, init) => {
+        calls.push({
+          url: String(input),
+          cookie: new Headers(init?.headers).get("cookie"),
+        });
+        if (calls.length === 1) {
+          return new Response(null, {
+            status: 302,
+            headers: {
+              location: "/v1/session-ready",
+              "set-cookie": "JSESSIONID=synthetic-session; Path=/; HttpOnly; Secure",
+            },
+          });
+        }
+        return Response.json({ items: [] });
+      }) as typeof fetch,
+    });
+
+    const response = await client.request({
+      endpointId: "primary",
+      method: "GET",
+      path: "/v1/items",
+      credentialId: "api-token",
+    });
+
+    assert.equal(calls[0]?.cookie, null);
+    assert.equal(calls[1]?.cookie, "JSESSIONID=synthetic-session");
+    assert.equal(response.observation.attempts, 2);
+    assert.doesNotMatch(JSON.stringify(response), /synthetic-session/);
+  });
+
   it("retries one bounded 429 and records the attempt count", async () => {
     let attempts = 0;
     const client = httpClient({
@@ -188,6 +230,13 @@ describe("bounded data HTTP", () => {
     assert.ok(thrown instanceof DataRuntimeError);
     const machine = toDataMachineError(thrown, [secret]);
     assert.equal(machine.code, "timeout");
+    assert.deepEqual(machine.details, {
+      attempts: 1,
+      phase: "request",
+      redirects: 0,
+      retries: 0,
+      timeoutMs: 1000,
+    });
     assert.doesNotMatch(JSON.stringify(machine), new RegExp(secret));
   });
 

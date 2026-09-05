@@ -21,7 +21,7 @@ function searchRequest(): DataRunRequest {
   return {
     schemaVersion: "tiangong.data.run-request.v1",
     capabilityId: "youtube.public-content",
-    capabilityVersion: "1.0.0",
+    capabilityVersion: "1.0.1",
     operationId: "search-videos",
     operationVersion: "1.0.0",
     input: {
@@ -45,9 +45,9 @@ function commentsRequest(): DataRunRequest {
   return {
     schemaVersion: "tiangong.data.run-request.v1",
     capabilityId: "youtube.public-content",
-    capabilityVersion: "1.0.0",
+    capabilityVersion: "1.0.1",
     operationId: "fetch-comments",
-    operationVersion: "1.0.0",
+    operationVersion: "1.0.1",
     input: {
       videoIds: [VIDEO_ONE],
       startDateTime: "2026-03-01T00:00:00Z",
@@ -382,6 +382,86 @@ describe("YouTube public-content connector", () => {
       ["comment-top", "reply-1", "reply-2"],
     );
     assert.equal(records[0]?.channelId, "video-channel");
+    const communication = result.data as {
+      requestBudget: {
+        maxRequests: number;
+        usedRequests: number;
+        threadRequests: number;
+        replyRequests: number;
+        remainingRequests: number;
+      };
+      replyCompleteness: {
+        knownThreadsWithReplies: number;
+        fullyExpandedThreads: number;
+        knownUnexpandedThreadIds: string[];
+      };
+    };
+    assert.deepEqual(communication.requestBudget, {
+      maxRequests: 100,
+      usedRequests: 2,
+      threadRequests: 1,
+      replyRequests: 1,
+      remainingRequests: 98,
+    });
+    assert.equal(communication.replyCompleteness.knownThreadsWithReplies, 1);
+    assert.equal(communication.replyCompleteness.fullyExpandedThreads, 1);
+    assert.deepEqual(communication.replyCompleteness.knownUnexpandedThreadIds, []);
+  });
+
+  it("supports an explicit top-level-only strategy without spending reply requests", async () => {
+    const targets: URL[] = [];
+    const nextRequest = {
+      ...commentsRequest(),
+      input: {
+        videoIds: [VIDEO_ONE],
+        replyStrategy: "top-level-only",
+        order: "time",
+      },
+    };
+    const result = await executeDataRun(nextRequest, {
+      registry: createDataRegistry([youtubePublicContentConnector]),
+      environment: { YOUTUBE_API_KEY: "secret-youtube-key" },
+      fetchImpl: (async (target) => {
+        const url = new URL(String(target));
+        targets.push(url);
+        return Response.json({
+          items: [
+            {
+              id: "thread-1",
+              snippet: {
+                videoId: VIDEO_ONE,
+                totalReplyCount: 5,
+                topLevelComment: {
+                  id: "comment-top",
+                  snippet: {
+                    videoId: VIDEO_ONE,
+                    textDisplay: "Top comment",
+                    publishedAt: "2026-03-03T00:00:00Z",
+                    updatedAt: "2026-03-03T00:00:00Z",
+                  },
+                },
+              },
+            },
+          ],
+        });
+      }) as typeof fetch,
+    });
+
+    assert.equal(result.status, "success");
+    assert.equal(result.summary.recordCount, 1);
+    assert.equal(targets.length, 1);
+    assert.ok(targets[0]?.pathname.endsWith("/commentThreads"));
+    const data = result.data as {
+      query: { includeReplies: boolean; replyStrategy: string };
+      requestBudget: { threadRequests: number; replyRequests: number };
+      replyCompleteness: { requested: boolean; knownUnexpandedThreadIds: string[] };
+    };
+    assert.equal(data.query.includeReplies, false);
+    assert.equal(data.query.replyStrategy, "top-level-only");
+    assert.equal(data.requestBudget.threadRequests, 1);
+    assert.equal(data.requestBudget.replyRequests, 0);
+    assert.equal(data.replyCompleteness.requested, false);
+    assert.deepEqual(data.replyCompleteness.knownUnexpandedThreadIds, ["thread-1"]);
   });
 
   it("continues later videos after a per-video thread-page cap", async () => {
@@ -494,6 +574,11 @@ describe("YouTube public-content connector", () => {
     assert.equal(result.summary.recordCount, 4);
     assert.equal(result.summary.truncated, true);
     assert.deepEqual(requestedParents, ["comment-one", "comment-two"]);
+    assert.deepEqual(
+      (result.data as { replyCompleteness: { knownUnexpandedThreadIds: string[] } })
+        .replyCompleteness.knownUnexpandedThreadIds,
+      ["thread-one", "thread-two"],
+    );
   });
 
   it("marks a mismatched reply parent as partial while preserving the top-level comment", async () => {

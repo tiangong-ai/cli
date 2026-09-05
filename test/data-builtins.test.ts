@@ -52,6 +52,10 @@ describe("built-in data connectors", () => {
       assert.ok(capability.provides.length > 0);
       assert.ok(Array.isArray(capability.doesNotProvide));
       assert.match(String(capability.discoveryDigest), /^[a-f0-9]{64}$/);
+      assert.equal(
+        capability.availability.status,
+        capability.capabilityId.startsWith("regulations-gov.") ? "suspended" : "available",
+      );
     }
   });
 
@@ -119,11 +123,10 @@ describe("built-in data connectors", () => {
       const requiresCredential = [
         "nasa-firms.active-fire",
         "openaq.air-quality",
-        "regulations-gov.attachments",
-        "regulations-gov.comments",
         "youtube.public-content",
       ].includes(capabilityId);
-      assert.equal(exitCode, requiresCredential ? 3 : 0);
+      const suspended = capabilityId.startsWith("regulations-gov.");
+      assert.equal(exitCode, requiresCredential || suspended ? 3 : 0);
       assert.equal(fetched, false);
       const doctor = JSON.parse(capture.stdout()) as {
         networkAttempted: boolean;
@@ -131,7 +134,14 @@ describe("built-in data connectors", () => {
         checks: Array<{ checkId: string; status: string }>;
       };
       assert.equal(doctor.networkAttempted, false);
-      assert.equal(doctor.status, requiresCredential ? "blocked" : "ready");
+      assert.equal(doctor.status, requiresCredential || suspended ? "blocked" : "ready");
+      if (suspended) {
+        assert.ok(
+          doctor.checks.some(
+            (check) => check.checkId === "availability" && check.status === "fail",
+          ),
+        );
+      }
       if (capabilityId === "nasa-firms.active-fire") {
         assert.ok(
           doctor.checks.some(
@@ -140,20 +150,6 @@ describe("built-in data connectors", () => {
         );
       }
       if (capabilityId === "openaq.air-quality") {
-        assert.ok(
-          doctor.checks.some(
-            (check) => check.checkId === "credential:api-key" && check.status === "fail",
-          ),
-        );
-      }
-      if (capabilityId === "regulations-gov.comments") {
-        assert.ok(
-          doctor.checks.some(
-            (check) => check.checkId === "credential:api-key" && check.status === "fail",
-          ),
-        );
-      }
-      if (capabilityId === "regulations-gov.attachments") {
         assert.ok(
           doctor.checks.some(
             (check) => check.checkId === "credential:api-key" && check.status === "fail",
@@ -169,5 +165,38 @@ describe("built-in data connectors", () => {
       }
       assert.equal(capture.stderr(), "");
     }
+  });
+
+  it("keeps temporarily suspended Regulations.gov capabilities discoverable but unavailable", () => {
+    for (const capabilityId of ["regulations-gov.comments", "regulations-gov.attachments"]) {
+      const catalogEntry = builtInDataRegistry
+        .catalog()
+        .capabilities.find((item) => item.capabilityId === capabilityId);
+      assert.equal(catalogEntry?.availability.status, "suspended");
+      assert.equal(catalogEntry?.availability.reasonCode, "provider-live-gate-failed");
+      assert.equal(builtInDataRegistry.describe(capabilityId)?.availability?.status, "suspended");
+      assert.equal(builtInDataRegistry.discovery(capabilityId)?.availability?.status, "suspended");
+      assert.ok(builtInDataRegistry.registered(capabilityId));
+    }
+  });
+
+  it("publishes operation features required by thin Skills", () => {
+    for (const capabilityId of [
+      "open-meteo.air-quality",
+      "open-meteo.flood",
+      "open-meteo.historical-weather",
+    ]) {
+      assert.ok(
+        builtInDataRegistry
+          .describe(capabilityId)
+          ?.operations[0]?.features?.includes("open-meteo.series-all-null"),
+      );
+    }
+    assert.ok(
+      builtInDataRegistry
+        .describe("youtube.public-content")
+        ?.operations.find((operation) => operation.operationId === "fetch-comments")
+        ?.features?.includes("youtube.reply-strategy"),
+    );
   });
 });

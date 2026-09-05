@@ -82,6 +82,7 @@ interface CommentsInput {
   endDateTime?: string;
   timeField?: "published" | "updated";
   includeReplies?: boolean;
+  replyStrategy?: "all-visible" | "top-level-only";
   searchTerms?: string;
   order?: "relevance" | "time";
   pageSize?: number;
@@ -95,6 +96,7 @@ interface NormalizedCommentsQuery {
   endDateTime: string | null;
   timeField: "published" | "updated";
   includeReplies: boolean;
+  replyStrategy: "all-visible" | "top-level-only";
   searchTerms: string | null;
   order: "relevance" | "time";
   pageSize: number;
@@ -174,7 +176,7 @@ interface CommentRecord {
 export const youtubePublicContentConnector: DataConnectorDefinition = {
   schemaVersion: DATA_MANIFEST_SCHEMA_VERSION,
   capabilityId: "youtube.public-content",
-  capabilityVersion: "1.0.0",
+  capabilityVersion: "1.0.1",
   minimumCliVersion: "0.0.55",
   provider: { providerId: "youtube", name: "YouTube Data API" },
   sourceCategory: "public-video-and-comment-metadata",
@@ -314,7 +316,8 @@ export const youtubePublicContentConnector: DataConnectorDefinition = {
     },
     {
       operationId: "fetch-comments",
-      operationVersion: "1.0.0",
+      operationVersion: "1.0.1",
+      features: ["youtube.reply-strategy"],
       summary: "Fetch visible public comments and replies for explicit YouTube video IDs.",
       description:
         "Runs bounded commentThreads.list pages for caller-supplied IDs, optionally expands every visible reply page through comments.list, applies an optional UTC window client-side, and preserves completed videos when another video fails.",
@@ -553,7 +556,11 @@ async function executeCommentsFetch(
   }> = [];
   const failures: Array<{ videoId: string; code: string }> = [];
   const failureValues: unknown[] = [];
+  const knownThreadsWithReplies = new Set<string>();
+  const fullyExpandedThreads = new Set<string>();
   let requestCount = 0;
+  let threadRequestCount = 0;
+  let replyRequestCount = 0;
   let truncationReason: "max-pages" | "max-records" | null = null;
   let globalStop = false;
 
@@ -587,6 +594,7 @@ async function executeCommentsFetch(
           break;
         }
         requestCount += 1;
+        threadRequestCount += 1;
         const response = await context.http.request({
           endpointId: "youtube-data-api",
           method: "GET",
@@ -625,9 +633,14 @@ async function executeCommentsFetch(
             globalStop = true;
             break;
           }
-          if (!query.includeReplies || thread.totalReplyCount === 0) continue;
+          if (thread.totalReplyCount === 0) continue;
+          knownThreadsWithReplies.add(thread.threadId);
+          if (!query.includeReplies) {
+            continue;
+          }
 
           let nextReplyPageToken: string | undefined;
+          let replyExpansionComplete = false;
           for (let replyPage = 1; replyPage <= query.maxReplyPagesPerThread; replyPage += 1) {
             if (
               requestCount >= context.limits.maxPages ||
@@ -642,6 +655,7 @@ async function executeCommentsFetch(
               break;
             }
             requestCount += 1;
+            replyRequestCount += 1;
             const replyResponse = await context.http.request({
               endpointId: "youtube-data-api",
               method: "GET",
@@ -679,7 +693,10 @@ async function executeCommentsFetch(
               }
             }
             if (globalStop) break;
-            if (!replyResult.nextPageToken) break;
+            if (!replyResult.nextPageToken) {
+              replyExpansionComplete = true;
+              break;
+            }
             if (replyResult.nextPageToken === nextReplyPageToken) {
               throw providerInvalid("YouTube replies returned a repeated page token.");
             }
@@ -689,6 +706,7 @@ async function executeCommentsFetch(
               truncationReason ??= "max-pages";
             }
           }
+          if (replyExpansionComplete) fullyExpandedThreads.add(thread.threadId);
           if (globalStop) break;
         }
         if (globalStop) break;
@@ -731,12 +749,20 @@ async function executeCommentsFetch(
           details: {
             missingVideoIds,
             causeCodes: [...new Set(failures.map((failure) => failure.code))],
+            failureDiagnostics: failureValues.map((failure, index) => ({
+              videoId: failures[index]!.videoId,
+              code: failures[index]!.code,
+              ...safeFailureTelemetry(failure),
+            })),
           },
         },
       ]
     : [];
   const truncated = truncationReason !== null;
   const completeReplies = query.includeReplies && !truncated && !partial;
+  const knownUnexpandedThreadIds = [...knownThreadsWithReplies].filter(
+    (threadId) => !fullyExpandedThreads.has(threadId),
+  );
   return {
     status: partial ? "partial" : "success",
     data: {
@@ -745,10 +771,20 @@ async function executeCommentsFetch(
       videos,
       records,
       failures,
+      requestBudget: {
+        maxRequests: context.limits.maxPages,
+        usedRequests: requestCount,
+        threadRequests: threadRequestCount,
+        replyRequests: replyRequestCount,
+        remainingRequests: Math.max(0, context.limits.maxPages - requestCount),
+      },
       replyCompleteness: {
         requested: query.includeReplies,
         strategy: query.includeReplies ? "comments-list-pagination" : "not-requested",
         completeWithinLimits: completeReplies,
+        knownThreadsWithReplies: knownThreadsWithReplies.size,
+        fullyExpandedThreads: fullyExpandedThreads.size,
+        knownUnexpandedThreadIds,
       },
       stopReason,
     },
@@ -768,7 +804,7 @@ async function executeCommentsFetch(
             "Replies were read with comments.list rather than the incomplete embedded sample, but explicit request and record limits can still truncate them.",
           ]
         : [
-            "Replies were not requested; top-level comments do not represent the full conversation.",
+            `Replies were not requested; ${knownUnexpandedThreadIds.length} known thread(s) have replies that were not expanded, and top-level comments do not represent the full conversation.`,
           ]),
       ...(query.searchTerms
         ? [
@@ -961,18 +997,42 @@ function normalizeCommentsQuery(input: CommentsInput): NormalizedCommentsQuery {
       "YouTube video IDs must remain unique after whitespace normalization.",
     );
   }
+  const replyStrategy =
+    input.replyStrategy ?? (input.includeReplies === false ? "top-level-only" : "all-visible");
+  if (
+    input.includeReplies !== undefined &&
+    input.includeReplies !== (replyStrategy === "all-visible")
+  ) {
+    throw new DataRuntimeError(
+      "invalid-request",
+      "YouTube includeReplies and replyStrategy must describe the same reply policy.",
+    );
+  }
   return {
     videoIds,
     startDateTime,
     endDateTime,
     timeField: input.timeField ?? "published",
-    includeReplies: input.includeReplies ?? true,
+    includeReplies: replyStrategy === "all-visible",
+    replyStrategy,
     searchTerms: nullableText(input.searchTerms),
     order: input.order ?? "time",
     pageSize: input.pageSize ?? 100,
     maxThreadPagesPerVideo: input.maxThreadPagesPerVideo ?? 10,
     maxReplyPagesPerThread: input.maxReplyPagesPerThread ?? 20,
   };
+}
+
+function safeFailureTelemetry(error: unknown): Record<string, boolean | number | string> {
+  if (!(error instanceof DataRuntimeError)) return {};
+  const result: Record<string, boolean | number | string> = {};
+  for (const key of ["attempts", "phase", "redirects", "retries", "status"] as const) {
+    const value = error.options.details?.[key];
+    if (typeof value === "string" || typeof value === "number" || typeof value === "boolean") {
+      result[key] = value;
+    }
+  }
+  return result;
 }
 
 function parseCommentThreadsPage(

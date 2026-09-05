@@ -20,6 +20,7 @@
           "summary",
           "provides",
           "doesNotProvide",
+          "availability",
           "manifestDigest",
           "discoveryDigest",
           "operations"
@@ -33,6 +34,7 @@
           "summary": { "type": "string", "minLength": 1 },
           "provides": { "$ref": "#/$defs/nonEmptyStringArray" },
           "doesNotProvide": { "$ref": "#/$defs/nonEmptyStringArray" },
+          "availability": { "$ref": "#/$defs/availability" },
           "manifestDigest": { "$ref": "#/$defs/digest" },
           "discoveryDigest": { "$ref": "#/$defs/digest" },
           "operations": {
@@ -51,6 +53,12 @@
                 "operationId": { "type": "string", "minLength": 1 },
                 "operationVersion": { "type": "string", "minLength": 1 },
                 "summary": { "type": "string", "minLength": 1 },
+                "features": {
+                  "type": "array",
+                  "minItems": 1,
+                  "uniqueItems": true,
+                  "items": { "$ref": "#/$defs/id" }
+                },
                 "inputSchemaDigest": { "$ref": "#/$defs/digest" },
                 "outputSchemaDigest": { "$ref": "#/$defs/digest" }
               }
@@ -62,7 +70,45 @@
     "catalogDigest": { "$ref": "#/$defs/digest" }
   },
   "$defs": {
+    "id": { "type": "string", "pattern": "^[a-z0-9]+(?:[._-][a-z0-9]+)*$" },
     "digest": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+    "availability": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["status", "reasonCode", "description", "resumeCriteria"],
+      "properties": {
+        "status": { "enum": ["available", "suspended"] },
+        "reasonCode": { "type": ["string", "null"] },
+        "description": { "type": ["string", "null"] },
+        "resumeCriteria": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": { "type": "string", "minLength": 1 }
+        }
+      },
+      "allOf": [
+        {
+          "if": { "properties": { "status": { "const": "available" } } },
+          "then": {
+            "properties": {
+              "reasonCode": { "type": "null" },
+              "description": { "type": "null" },
+              "resumeCriteria": { "type": "array", "maxItems": 0 }
+            }
+          }
+        },
+        {
+          "if": { "properties": { "status": { "const": "suspended" } } },
+          "then": {
+            "properties": {
+              "reasonCode": { "$ref": "#/$defs/id" },
+              "description": { "type": "string", "minLength": 1 },
+              "resumeCriteria": { "type": "array", "minItems": 1 }
+            }
+          }
+        }
+      ]
+    },
     "nonEmptyStringArray": {
       "type": "array",
       "minItems": 1,

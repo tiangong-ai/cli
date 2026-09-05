@@ -16,6 +16,7 @@ export type DataErrorCode =
   | "invalid-request"
   | "unsupported-operation"
   | "incompatible-contract"
+  | "capability-unavailable"
   | "credential-missing"
   | "credential-invalid"
   | "provider-auth-blocked"
@@ -67,6 +68,7 @@ export interface DataEndpointScope {
   pathPrefixes: string[];
   allowedMethods: Array<"GET" | "POST">;
   allowedContentTypes: string[];
+  sessionCookies?: "same-origin-memory" | undefined;
 }
 
 export interface DataCredentialDeclaration {
@@ -97,7 +99,22 @@ export interface DataOperationManifest {
   inputSchema: DataSchemaReference;
   outputSchema: DataSchemaReference;
   limits: DataExecutionLimits;
+  features?: string[] | undefined;
   artifactOutput?: DataArtifactOutputDeclaration | undefined;
+}
+
+export interface DataCapabilityAvailability {
+  status: "available" | "suspended";
+  reasonCode: string | null;
+  description: string | null;
+  resumeCriteria: string[];
+}
+
+export interface SuspendedDataCapabilityAvailability {
+  status: "suspended";
+  reasonCode: string;
+  description: string;
+  resumeCriteria: string[];
 }
 
 export interface DataArtifactOutputDeclaration {
@@ -130,6 +147,7 @@ export interface DataCapabilityManifest {
     static: true;
     live: boolean;
   };
+  availability?: Pick<SuspendedDataCapabilityAvailability, "status" | "reasonCode"> | undefined;
   operations: DataOperationManifest[];
   manifestDigest: string;
 }
@@ -173,6 +191,7 @@ export interface DataCapabilityDiscovery {
     description: string;
   };
   limitations: string[];
+  availability?: SuspendedDataCapabilityAvailability | undefined;
   operations: Array<{
     operationId: string;
     summary: string;
@@ -190,12 +209,14 @@ export interface DataCatalogCapability {
   summary: string;
   provides: string[];
   doesNotProvide: string[];
+  availability: DataCapabilityAvailability;
   manifestDigest: string;
   discoveryDigest: string;
   operations: Array<{
     operationId: string;
     operationVersion: string;
     summary: string;
+    features?: string[] | undefined;
     inputSchemaDigest: string;
     outputSchemaDigest: string;
   }>;
@@ -359,6 +380,7 @@ export interface DataOperationDefinition {
   description: string;
   inputSchema: JsonSchema;
   outputSchema: JsonSchema;
+  features?: string[] | undefined;
   limits?: Partial<DataExecutionLimits> | undefined;
   artifactOutput?: DataArtifactOutputDeclaration | undefined;
   execute(
@@ -398,6 +420,7 @@ export interface DataConnectorDefinition {
     static: true;
     live: boolean;
   };
+  availability?: SuspendedDataCapabilityAvailability | undefined;
   freshness: {
     kind: string;
     description: string;

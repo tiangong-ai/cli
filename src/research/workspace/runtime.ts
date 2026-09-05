@@ -491,7 +491,9 @@ export interface NativeStagePacket {
     readArtifact: { argv: string[] };
     fetchEvidence: { argv: string[]; requestSchema: Record<string, unknown> } | null;
     runDataCapability: {
+      executionKind: "workspace-cli-relative-argv";
       argv: string[];
+      readArgv: string[];
       describeArgv: string[];
       requestSchema: Record<string, unknown>;
       catalog: ResearchDataCapabilityCatalog;
@@ -880,7 +882,7 @@ export async function prepareNativeResearchStage(input: {
                 ? "Use native Web/Browser broadly for discovery when useful, but record every native search/navigation with recordActivity and register its candidates. Before admitting any native lead, formalize the same URL or DOI through fetchEvidence so it receives an immutable broker receipt."
                 : null,
               hasDataEvidence
-                ? "Use the dynamically projected structured data capabilities when their source coverage and operation semantics fit the question. Inspect a selected capability with the supplied describe command, then call runDataCapability with the exact published DataRunRequest. The Research adapter invokes the same TypeScript runtime in-process and returns an immutable data receipt plus candidate ID; do not invoke standalone data run for project evidence."
+                ? "Use the dynamically projected structured data capabilities when their source coverage and operation semantics fit the question. All runDataCapability commands declare workspace-cli-relative-argv: pass the published argv, readArgv, or describeArgv to the host's workspace-locked resolver, never a PATH-resolved global CLI. Inspect a selected capability with the supplied describe command, then call runDataCapability with the exact published DataRunRequest. The Research adapter invokes the same TypeScript runtime in-process and returns an immutable data receipt plus candidate ID; do not invoke standalone data run for project evidence. If the returned contextView has a nextCursor, use runDataCapability.readArgv to continue from immutable local evidence without another provider request. Do not claim complete item-level review until nextCursor is null; when exhaustive review is unnecessary, record the presented/total fraction as a limitation."
                 : null,
               "Assess candidates in bounded batches with recordAssessment as they arrive; the final output is only a small coverage closeout. Native results without broker/data/input provenance are discovery leads, never evidence.",
             ]
@@ -1040,8 +1042,8 @@ export async function prepareNativeResearchStage(input: {
           runDataCapability:
             input.stage === "discover" && hasDataEvidence
               ? {
+                  executionKind: "workspace-cli-relative-argv" as const,
                   argv: [
-                    "tiangong-ai",
                     "research",
                     "project",
                     "evidence",
@@ -1054,7 +1056,22 @@ export async function prepareNativeResearchStage(input: {
                     input.root,
                     "--json",
                   ],
-                  describeArgv: ["tiangong-ai", "data", "describe", "<capability-id>", "--json"],
+                  readArgv: [
+                    "research",
+                    "project",
+                    "evidence",
+                    "data",
+                    "read",
+                    project.id,
+                    "--receipt",
+                    "<data-evidence-receipt-id>",
+                    "--cursor",
+                    "<opaque-next-cursor>",
+                    "--workspace",
+                    input.root,
+                    "--json",
+                  ],
+                  describeArgv: ["data", "describe", "<capability-id>", "--json"],
                   requestSchema: structuredClone(dataPublicSchemas.runRequest) as Record<
                     string,
                     unknown
@@ -4524,7 +4541,7 @@ function packagePrompt(
         ? "Use the installed external acquisition/document Skills in the current native host, but treat the CLI artifact registry and acquisition schema as the only authority for durable evidence."
         : "Capability files are provenance-bound but are not available as execution tools in this stage.",
     workPackage.stage === "discover"
-      ? `Follow the reviewed discovery plan: ${JSON.stringify(discovery)}. The plan's max evidence-call count is a hard working ceiling, not a target to exhaust. Execute required first-pass channels before supplemental channels, prefer broad high-yield queries, assess registered candidates between batches, and use the next gap-fill batch only for explicit uncovered dimensions, source types, date ranges, full text, limitations, or counterevidence. Stop fetching as soon as the declared coverage minimums are supportable. Native Web/Browser may broaden lead discovery, but every such action must be recorded through recordActivity, every useful result must be registered as a candidate, and the same URL/DOI must then be formalized through the broker before admission. A broker receipt, structured data-runtime receipt, or immutable registered input is an admissible evidence path. Do not execute a staged Skill's curl/CLI examples or read provider environment variables. For generic broker capabilities, invoke fetch_candidate_source with the manifest capability ID and obey its exact declared HTTP method. For structured data capabilities, use the packet's dynamic catalog and describe command, then invoke runDataCapability; never call standalone data run for project evidence. Never place API keys, tokens, authorization data, cookies, or other credential-like fields in request files. The Research control plane injects declared logical credentials and persists only safe hash-bound results. Exercise every manifest capability with requiredForDiscovery=true and every project-required data capability ID, or the mechanical coverage gate will stop downstream work.`
+      ? `Follow the reviewed discovery plan: ${JSON.stringify(discovery)}. The plan's max evidence-call count is a hard working ceiling, not a target to exhaust. Execute required first-pass channels before supplemental channels, prefer broad high-yield queries, assess registered candidates between batches, and use the next gap-fill batch only for explicit uncovered dimensions, source types, date ranges, full text, limitations, or counterevidence. Stop fetching as soon as the declared coverage minimums are supportable. Native Web/Browser may broaden lead discovery, but every such action must be recorded through recordActivity, every useful result must be registered as a candidate, and the same URL/DOI must then be formalized through the broker before admission. A broker receipt, structured data-runtime receipt, or immutable registered input is an admissible evidence path. Do not execute a staged Skill's curl/CLI examples or read provider environment variables. For generic broker capabilities, invoke fetch_candidate_source with the manifest capability ID and obey its exact declared HTTP method. For structured data capabilities, use the packet's dynamic catalog and describe command, then invoke runDataCapability; never call standalone data run for project evidence. A projected data context is not missing acquisition data: follow the packet's resolver-relative continuation arguments from immutable local evidence until complete when row-level exhaustiveness matters, or report the exact presented/total fraction and limitation. Never place API keys, tokens, authorization data, cookies, or other credential-like fields in request files. The Research control plane injects declared logical credentials and persists only safe hash-bound results. Exercise every manifest capability with requiredForDiscovery=true and every project-required data capability ID, or the mechanical coverage gate will stop downstream work.`
       : executionMode === "native-host" && workPackage.stage === "acquire"
         ? "Acquire files and readable derivatives only for provisionally admitted sources using the packet's bindDownload and registerArtifact commands. Do not reopen discovery, admit new sources, or access unrelated host files."
         : "Use only admitted stage context and this packet's read-only artifact channel. No new evidence acquisition or arbitrary host-file access is authorized.",

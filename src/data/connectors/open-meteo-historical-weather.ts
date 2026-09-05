@@ -52,7 +52,26 @@ interface NormalizedInput {
   precipitationUnit: "mm";
 }
 
+type ValidationIssueCode =
+  | "response-count-mismatch"
+  | "coordinate-response-invalid"
+  | "provider-error"
+  | "grid-location-missing"
+  | "section-missing"
+  | "timezone-missing"
+  | "timezone-invalid"
+  | "utc-offset-missing"
+  | "utc-offset-invalid"
+  | "time-axis-length-mismatch"
+  | "time-axis-invalid"
+  | "series-missing"
+  | "series-length-mismatch"
+  | "series-unit-missing"
+  | "series-value-invalid"
+  | "series-all-null";
+
 interface ValidationIssue {
+  code: ValidationIssueCode;
   path: string;
   message: string;
 }
@@ -92,16 +111,16 @@ class IssueCollector {
   count = 0;
   readonly issues: ValidationIssue[] = [];
 
-  add(path: string, message: string): void {
+  add(code: ValidationIssueCode, path: string, message: string): void {
     this.count += 1;
-    if (this.issues.length < MAX_VALIDATION_ISSUES) this.issues.push({ path, message });
+    if (this.issues.length < MAX_VALIDATION_ISSUES) this.issues.push({ code, path, message });
   }
 }
 
 export const openMeteoHistoricalWeatherConnector: DataConnectorDefinition = {
   schemaVersion: DATA_MANIFEST_SCHEMA_VERSION,
   capabilityId: "open-meteo.historical-weather",
-  capabilityVersion: "1.0.0",
+  capabilityVersion: "1.0.1",
   minimumCliVersion: "0.0.55",
   provider: {
     providerId: "open-meteo",
@@ -214,7 +233,8 @@ export const openMeteoHistoricalWeatherConnector: DataConnectorDefinition = {
   operations: [
     {
       operationId: "fetch",
-      operationVersion: "1.0.0",
+      operationVersion: "1.0.1",
+      features: ["open-meteo.series-all-null"],
       summary: "Fetch one bounded GMT window of Open-Meteo historical weather reanalysis.",
       description:
         "Builds one stable public-endpoint query for up to ten coordinates, one model, and curated hourly or daily variables, then validates aligned numeric arrays under shared byte, retry, timeout, and time-row limits.",
@@ -253,6 +273,7 @@ async function executeOpenMeteoHistoricalWeather(
   const normalized = normalizePayload(response.json(), input, context.limits.maxRecords);
   const partial = normalized.issueCount > 0;
   const invalidPaths = normalized.issues.map((issue) => issue.path);
+  const issueCodes = [...new Set(normalized.issues.map((issue) => issue.code))];
   const errors: DataMachineError[] = partial
     ? [
         {
@@ -261,7 +282,7 @@ async function executeOpenMeteoHistoricalWeather(
             "One or more Open-Meteo historical locations, sections, timestamps, variables, or units could not be normalized.",
           retryable: false,
           userActionRequired: false,
-          details: { issueCount: normalized.issueCount, invalidPaths },
+          details: { issueCount: normalized.issueCount, issueCodes, invalidPaths },
         },
       ]
     : [];
@@ -380,6 +401,7 @@ function normalizePayload(
   const collector = new IssueCollector();
   if (responses.length !== input.locations.length) {
     collector.add(
+      "response-count-mismatch",
       "$",
       `Expected ${input.locations.length} coordinate responses but received ${responses.length}.`,
     );
@@ -438,17 +460,25 @@ function normalizeLocation(
   const path = `$[${index}]`;
   const item = recordValue(value);
   if (!item) {
-    collector.add(path, "Coordinate response must be an object.");
+    collector.add("coordinate-response-invalid", path, "Coordinate response must be an object.");
     return null;
   }
   if (item.error === true) {
-    collector.add(path, "Coordinate response contains an explicit provider error.");
+    collector.add(
+      "provider-error",
+      path,
+      "Coordinate response contains an explicit provider error.",
+    );
     return null;
   }
   const latitude = finiteNumber(item.latitude);
   const longitude = finiteNumber(item.longitude);
   if (latitude === null || longitude === null) {
-    collector.add(path, "Coordinate response is missing numeric model-grid latitude or longitude.");
+    collector.add(
+      "grid-location-missing",
+      path,
+      "Coordinate response is missing numeric model-grid latitude or longitude.",
+    );
     return null;
   }
 
@@ -480,17 +510,29 @@ function normalizeLocation(
   const hasTimezone = typeof item.timezone === "string" && item.timezone.length > 0;
   const timezone = hasTimezone ? (item.timezone as string) : "GMT";
   if (!hasTimezone) {
-    collector.add(`${path}.timezone`, "Provider timezone metadata is missing.");
+    collector.add("timezone-missing", `${path}.timezone`, "Provider timezone metadata is missing.");
   } else if (!["GMT", "UTC", "Etc/UTC"].includes(timezone)) {
-    collector.add(`${path}.timezone`, "Provider timezone must remain GMT/UTC for this operation.");
+    collector.add(
+      "timezone-invalid",
+      `${path}.timezone`,
+      "Provider timezone must remain GMT/UTC for this operation.",
+    );
   }
   const hasUtcOffset =
     typeof item.utc_offset_seconds === "number" && Number.isInteger(item.utc_offset_seconds);
   const utcOffsetSeconds = hasUtcOffset ? (item.utc_offset_seconds as number) : 0;
   if (!hasUtcOffset) {
-    collector.add(`${path}.utc_offset_seconds`, "Provider UTC offset metadata must be an integer.");
+    collector.add(
+      "utc-offset-missing",
+      `${path}.utc_offset_seconds`,
+      "Provider UTC offset metadata must be an integer.",
+    );
   } else if (utcOffsetSeconds !== 0) {
-    collector.add(`${path}.utc_offset_seconds`, "Provider UTC offset must be zero in GMT mode.");
+    collector.add(
+      "utc-offset-invalid",
+      `${path}.utc_offset_seconds`,
+      "Provider UTC offset must be zero in GMT mode.",
+    );
   }
 
   return {
@@ -521,7 +563,11 @@ function normalizeSection<TVariable extends HourlyVariable | DailyVariable>(
   const section = recordValue(rawSection);
   const units = recordValue(rawUnits);
   if (!section || !units || !Array.isArray(section.time)) {
-    collector.add(path, `Response must contain ${kind}, ${kind}.time, and ${kind}_units.`);
+    collector.add(
+      "section-missing",
+      path,
+      `Response must contain ${kind}, ${kind}.time, and ${kind}_units.`,
+    );
     return null;
   }
   const times = normalizeTimes(section.time, path, input, kind, collector);
@@ -556,12 +602,14 @@ function normalizeTimes(
     ) + 1;
   if (kind === "daily" && values.length !== expectedDailyCount) {
     collector.add(
+      "time-axis-length-mismatch",
       `${path}.time`,
       `Expected ${expectedDailyCount} daily dates but received ${values.length}.`,
     );
   }
   if (kind === "hourly" && values.length !== expectedDailyCount * 24) {
     collector.add(
+      "time-axis-length-mismatch",
       `${path}.time`,
       `Expected ${expectedDailyCount * 24} GMT hours but received ${values.length}.`,
     );
@@ -592,6 +640,7 @@ function normalizeTimes(
       (previous !== "" && (value as string) <= previous)
     ) {
       collector.add(
+        "time-axis-invalid",
         `${path}.time[${index}]`,
         `${kind === "daily" ? "Daily date" : "Hourly timestamp"} must be real, in-window, and strictly ascending in GMT.`,
       );
@@ -612,26 +661,45 @@ function normalizeSeries(
   collector: IssueCollector,
 ): { unit: string; values: Array<number | null> } | null {
   if (!Array.isArray(rawValues)) {
-    collector.add(valuePath, "Requested historical-weather series is missing or is not an array.");
+    collector.add(
+      "series-missing",
+      valuePath,
+      "Requested historical-weather series is missing or is not an array.",
+    );
     return null;
   }
   if (rawValues.length !== expectedLength) {
-    collector.add(valuePath, "Historical-weather series length does not match its time axis.");
+    collector.add(
+      "series-length-mismatch",
+      valuePath,
+      "Historical-weather series length does not match its time axis.",
+    );
     return null;
   }
   if (typeof rawUnit !== "string" || rawUnit.length === 0) {
-    collector.add(unitPath, "Historical-weather series unit is missing.");
+    collector.add("series-unit-missing", unitPath, "Historical-weather series unit is missing.");
     return null;
   }
   const values = rawValues.map((value, index): number | null => {
     if (value === null) return null;
     const number = finiteNumber(value);
     if (number === null) {
-      collector.add(`${valuePath}[${index}]`, "Historical-weather value must be numeric or null.");
+      collector.add(
+        "series-value-invalid",
+        `${valuePath}[${index}]`,
+        "Historical-weather value must be numeric or null.",
+      );
       return null;
     }
     return number;
   });
+  if (rawValues.every((value) => value === null)) {
+    collector.add(
+      "series-all-null",
+      valuePath,
+      "Requested historical-weather series was returned but contains no usable numeric values.",
+    );
+  }
   return { unit: rawUnit, values };
 }
 

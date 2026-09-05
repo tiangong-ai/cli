@@ -1,5 +1,6 @@
 import type {
   DataConnectorDefinition,
+  DataExecutionLimits,
   DataMachineError,
   DataOperationExecution,
   DataOperationExecutionContext,
@@ -32,6 +33,8 @@ export interface SyntheticConnectorOptions {
   credential?: boolean;
   liveDoctor?: boolean;
   artifactOutput?: boolean;
+  limits?: Partial<DataExecutionLimits>;
+  outputSchema?: JsonSchema;
   execute?: (
     context: DataOperationExecutionContext,
   ) => DataOperationExecution | Promise<DataOperationExecution>;
@@ -88,6 +91,7 @@ export function syntheticConnector(
       maxRetries: 1,
       maxRetryDelayMs: 10,
       maxRedirects: 2,
+      ...options.limits,
     },
     diagnostics: {
       static: true,
@@ -129,7 +133,7 @@ export function syntheticConnector(
         description:
           "Validates one non-empty string and returns it unchanged in a closed envelope.",
         inputSchema: SYNTHETIC_INPUT_SCHEMA,
-        outputSchema: SYNTHETIC_OUTPUT_SCHEMA,
+        outputSchema: options.outputSchema ?? SYNTHETIC_OUTPUT_SCHEMA,
         ...(options.artifactOutput
           ? { artifactOutput: { kind: "directory" as const, required: true as const } }
           : {}),

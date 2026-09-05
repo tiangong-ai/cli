@@ -44,7 +44,26 @@ interface NormalizedInput {
   timezone: "GMT";
 }
 
+type ValidationIssueCode =
+  | "response-count-mismatch"
+  | "coordinate-response-invalid"
+  | "provider-error"
+  | "grid-location-missing"
+  | "section-missing"
+  | "timezone-missing"
+  | "timezone-invalid"
+  | "utc-offset-missing"
+  | "utc-offset-invalid"
+  | "time-axis-length-mismatch"
+  | "time-axis-invalid"
+  | "series-missing"
+  | "series-length-mismatch"
+  | "series-unit-missing"
+  | "series-value-invalid"
+  | "series-all-null";
+
 interface ValidationIssue {
+  code: ValidationIssueCode;
   path: string;
   message: string;
 }
@@ -87,16 +106,16 @@ class IssueCollector {
   count = 0;
   readonly issues: ValidationIssue[] = [];
 
-  add(path: string, message: string): void {
+  add(code: ValidationIssueCode, path: string, message: string): void {
     this.count += 1;
-    if (this.issues.length < MAX_VALIDATION_ISSUES) this.issues.push({ path, message });
+    if (this.issues.length < MAX_VALIDATION_ISSUES) this.issues.push({ code, path, message });
   }
 }
 
 export const openMeteoFloodConnector: DataConnectorDefinition = {
   schemaVersion: DATA_MANIFEST_SCHEMA_VERSION,
   capabilityId: "open-meteo.flood",
-  capabilityVersion: "1.0.0",
+  capabilityVersion: "1.0.1",
   minimumCliVersion: "0.0.55",
   provider: {
     providerId: "open-meteo",
@@ -205,7 +224,8 @@ export const openMeteoFloodConnector: DataConnectorDefinition = {
   operations: [
     {
       operationId: "fetch-daily",
-      operationVersion: "1.0.0",
+      operationVersion: "1.0.1",
+      features: ["open-meteo.series-all-null"],
       summary: "Fetch one bounded GMT window of Open-Meteo daily simulated river discharge.",
       description:
         "Builds one stable public-endpoint query for up to ten coordinates, seven documented discharge variables, and optional ensemble members, then validates aligned daily arrays under shared byte, retry, timeout, and record limits.",
@@ -240,6 +260,7 @@ async function executeOpenMeteoFlood(
   const normalized = normalizePayload(response.json(), input, context.limits.maxRecords);
   const partial = normalized.issueCount > 0;
   const invalidPaths = normalized.issues.map((issue) => issue.path);
+  const issueCodes = [...new Set(normalized.issues.map((issue) => issue.code))];
   const errors: DataMachineError[] = partial
     ? [
         {
@@ -248,7 +269,7 @@ async function executeOpenMeteoFlood(
             "One or more Open-Meteo Flood locations, dates, variables, or ensemble members could not be normalized.",
           retryable: false,
           userActionRequired: false,
-          details: { issueCount: normalized.issueCount, invalidPaths },
+          details: { issueCount: normalized.issueCount, issueCodes, invalidPaths },
         },
       ]
     : [];
@@ -363,6 +384,7 @@ function normalizePayload(
   const collector = new IssueCollector();
   if (responses.length !== input.locations.length) {
     collector.add(
+      "response-count-mismatch",
       "$",
       `Expected ${input.locations.length} coordinate responses but received ${responses.length}.`,
     );
@@ -420,23 +442,35 @@ function normalizeLocation(
   const path = `$[${index}]`;
   const item = recordValue(value);
   if (!item) {
-    collector.add(path, "Coordinate response must be an object.");
+    collector.add("coordinate-response-invalid", path, "Coordinate response must be an object.");
     return null;
   }
   if (item.error === true) {
-    collector.add(path, "Coordinate response contains an explicit provider error.");
+    collector.add(
+      "provider-error",
+      path,
+      "Coordinate response contains an explicit provider error.",
+    );
     return null;
   }
   const latitude = finiteNumber(item.latitude);
   const longitude = finiteNumber(item.longitude);
   if (latitude === null || longitude === null) {
-    collector.add(path, "Coordinate response is missing numeric river-grid latitude or longitude.");
+    collector.add(
+      "grid-location-missing",
+      path,
+      "Coordinate response is missing numeric river-grid latitude or longitude.",
+    );
     return null;
   }
   const daily = recordValue(item.daily);
   const units = recordValue(item.daily_units);
   if (!daily || !units || !Array.isArray(daily.time)) {
-    collector.add(path, "Coordinate response must contain daily, daily.time, and daily_units.");
+    collector.add(
+      "section-missing",
+      path,
+      "Coordinate response must contain daily, daily.time, and daily_units.",
+    );
     return null;
   }
   const dates = normalizeDates(daily.time, path, input, collector);
@@ -463,7 +497,11 @@ function normalizeLocation(
       if (!match) continue;
       const member = Number(match[1]);
       if (!Number.isSafeInteger(member)) {
-        collector.add(`${path}.daily.${field}`, "Ensemble member suffix is not a safe integer.");
+        collector.add(
+          "series-value-invalid",
+          `${path}.daily.${field}`,
+          "Ensemble member suffix is not a safe integer.",
+        );
         continue;
       }
       fields.push({ field, member });
@@ -473,6 +511,7 @@ function normalizeLocation(
     );
     if (fields.length === 0) {
       collector.add(
+        "series-missing",
         `${path}.daily.river_discharge_memberNN`,
         "Ensemble members were requested but none were returned.",
       );
@@ -499,17 +538,29 @@ function normalizeLocation(
   const hasTimezone = typeof item.timezone === "string" && item.timezone.length > 0;
   const timezone = hasTimezone ? (item.timezone as string) : "GMT";
   if (!hasTimezone) {
-    collector.add(`${path}.timezone`, "Provider timezone metadata is missing.");
+    collector.add("timezone-missing", `${path}.timezone`, "Provider timezone metadata is missing.");
   } else if (!["GMT", "UTC", "Etc/UTC"].includes(timezone)) {
-    collector.add(`${path}.timezone`, "Provider timezone must remain GMT/UTC for this operation.");
+    collector.add(
+      "timezone-invalid",
+      `${path}.timezone`,
+      "Provider timezone must remain GMT/UTC for this operation.",
+    );
   }
   const hasUtcOffset =
     typeof item.utc_offset_seconds === "number" && Number.isInteger(item.utc_offset_seconds);
   const utcOffsetSeconds = hasUtcOffset ? (item.utc_offset_seconds as number) : 0;
   if (!hasUtcOffset) {
-    collector.add(`${path}.utc_offset_seconds`, "Provider UTC offset metadata must be an integer.");
+    collector.add(
+      "utc-offset-missing",
+      `${path}.utc_offset_seconds`,
+      "Provider UTC offset metadata must be an integer.",
+    );
   } else if (utcOffsetSeconds !== 0) {
-    collector.add(`${path}.utc_offset_seconds`, "Provider UTC offset must be zero in GMT mode.");
+    collector.add(
+      "utc-offset-invalid",
+      `${path}.utc_offset_seconds`,
+      "Provider UTC offset must be zero in GMT mode.",
+    );
   }
   return {
     requestedLocationIndex: index,
@@ -542,6 +593,7 @@ function normalizeDates(
     ) + 1;
   if (values.length !== expected) {
     collector.add(
+      "time-axis-length-mismatch",
       `${path}.daily.time`,
       `Expected ${expected} daily dates but received ${values.length}.`,
     );
@@ -551,7 +603,11 @@ function normalizeDates(
   for (let index = 0; index < values.length; index += 1) {
     const value = values[index];
     if (typeof value !== "string" || !/^\d{4}-\d{2}-\d{2}$/.test(value)) {
-      collector.add(`${path}.daily.time[${index}]`, "Daily time must be a YYYY-MM-DD string.");
+      collector.add(
+        "time-axis-invalid",
+        `${path}.daily.time[${index}]`,
+        "Daily time must be a YYYY-MM-DD string.",
+      );
       return null;
     }
     const parsed = new Date(`${value}T00:00:00Z`);
@@ -563,6 +619,7 @@ function normalizeDates(
       (previous !== "" && value <= previous)
     ) {
       collector.add(
+        "time-axis-invalid",
         `${path}.daily.time[${index}]`,
         "Daily time must be a real, in-window, strictly ascending date.",
       );
@@ -583,26 +640,45 @@ function normalizeSeries(
   collector: IssueCollector,
 ): { unit: string; values: Array<number | null> } | null {
   if (!Array.isArray(rawValues)) {
-    collector.add(valuePath, "Requested discharge series is missing or is not an array.");
+    collector.add(
+      "series-missing",
+      valuePath,
+      "Requested discharge series is missing or is not an array.",
+    );
     return null;
   }
   if (rawValues.length !== expectedLength) {
-    collector.add(valuePath, "Discharge series length does not match daily.time.");
+    collector.add(
+      "series-length-mismatch",
+      valuePath,
+      "Discharge series length does not match daily.time.",
+    );
     return null;
   }
   if (typeof rawUnit !== "string" || rawUnit.length === 0) {
-    collector.add(unitPath, "Discharge series unit is missing.");
+    collector.add("series-unit-missing", unitPath, "Discharge series unit is missing.");
     return null;
   }
   const values = rawValues.map((value, index): number | null => {
     if (value === null) return null;
     const number = finiteNumber(value);
     if (number === null) {
-      collector.add(`${valuePath}[${index}]`, "Discharge value must be numeric or null.");
+      collector.add(
+        "series-value-invalid",
+        `${valuePath}[${index}]`,
+        "Discharge value must be numeric or null.",
+      );
       return null;
     }
     return number;
   });
+  if (rawValues.every((value) => value === null)) {
+    collector.add(
+      "series-all-null",
+      valuePath,
+      "Requested discharge series was returned but contains no usable numeric values.",
+    );
+  }
   return { unit: rawUnit, values };
 }
 

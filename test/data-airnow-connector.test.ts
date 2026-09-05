@@ -27,9 +27,9 @@ function request(
   return {
     schemaVersion: "tiangong.data.run-request.v1",
     capabilityId: "airnow.hourly-observations",
-    capabilityVersion: "1.0.0",
+    capabilityVersion: "1.0.1",
     operationId: "fetch-hourly",
-    operationVersion: "1.0.0",
+    operationVersion: "1.0.1",
     input,
   };
 }
@@ -118,6 +118,54 @@ describe("AirNow hourly observations connector", () => {
     );
   });
 
+  it("fetches independent hourly files with bounded concurrency and preserves hour order", async () => {
+    let active = 0;
+    let peak = 0;
+    const completed: string[] = [];
+    const result = await executeDataRun(
+      request({
+        startDateTimeUtc: "2026-03-22T00:00:00Z",
+        endDateTimeUtc: "2026-03-22T03:00:00Z",
+        boundingBox: {
+          minLongitude: -123.5,
+          minLatitude: 37,
+          maxLongitude: -121.5,
+          maxLatitude: 38.8,
+        },
+        parameters: ["PM25"],
+      }),
+      {
+        registry: createDataRegistry([airNowHourlyObservationsConnector]),
+        environment: {},
+        fetchImpl: (async (target) => {
+          const url = new URL(String(target));
+          active += 1;
+          peak = Math.max(peak, active);
+          await new Promise((resolve) =>
+            setTimeout(resolve, url.pathname.endsWith("00.dat") ? 20 : 5),
+          );
+          active -= 1;
+          completed.push(url.pathname);
+          return new Response(await fixture("HourlyAQObs_2026032200.dat"), {
+            headers: { "content-type": "text/plain" },
+          });
+        }) as typeof fetch,
+      },
+    );
+
+    assert.ok(peak >= 2);
+    assert.notDeepEqual(completed, [...completed].sort());
+    assert.deepEqual(
+      (result.data as { files: Array<{ hourUtc: string }> }).files.map((file) => file.hourUtc),
+      [
+        "2026-03-22T00:00:00Z",
+        "2026-03-22T01:00:00Z",
+        "2026-03-22T02:00:00Z",
+        "2026-03-22T03:00:00Z",
+      ],
+    );
+  });
+
   it("returns explicit partial coverage when an hourly file is missing", async () => {
     const result = await executeDataRun(request(), {
       registry: createDataRegistry([airNowHourlyObservationsConnector]),
@@ -133,6 +181,17 @@ describe("AirNow hourly observations connector", () => {
 
     assert.equal(result.status, "partial");
     assert.equal(result.errors[0]?.code, "partial-result");
+    assert.deepEqual(result.errors[0]?.details?.failures, [
+      {
+        attempts: 1,
+        code: "provider-response-invalid",
+        phase: "response",
+        redirects: 0,
+        retries: 0,
+        sourceId: "/airnow/2026/20260322/HourlyAQObs_2026032201.dat",
+        status: 404,
+      },
+    ]);
     assert.deepEqual(result.summary.missing, [
       {
         kind: "file",

@@ -1,4 +1,5 @@
 import { createDataRegistry } from "./catalog.js";
+import type { DataConnectorDefinition } from "./contracts.js";
 import { airNowHourlyObservationsConnector } from "./connectors/airnow-hourly-observations.js";
 import { blueskyPublicPostsConnector } from "./connectors/bluesky-public-posts.js";
 import { epaEisRecordsConnector } from "./connectors/epa-eis-records.js";
@@ -35,10 +36,40 @@ export const builtInDataRegistry = createDataRegistry([
   openMeteoFloodConnector,
   openMeteoHistoricalWeatherConnector,
   openAqAirQualityConnector,
-  regulationsGovAttachmentsConnector,
-  regulationsGovCommentsConnector,
+  suspendBuiltInCapability(
+    regulationsGovAttachmentsConnector,
+    "The provider currently returns HTTP 503 for validated production requests, so attachment execution is paused while the capability remains discoverable.",
+    [
+      "The Regulations.gov comment/detail live gate succeeds.",
+      "A production attachment metadata and download request succeeds within the declared bounds.",
+    ],
+  ),
+  suspendBuiltInCapability(
+    regulationsGovCommentsConnector,
+    "The provider currently returns HTTP 503 for validated production requests, so this capability is discoverable but execution is paused.",
+    [
+      "A production search request succeeds with the documented API contract.",
+      "A production detail request succeeds with the documented API contract.",
+    ],
+  ),
   usbrProjectRecordsConnector,
   usbrRiseConnector,
   usgsWaterInstantaneousValuesConnector,
   youtubePublicContentConnector,
 ]);
+
+function suspendBuiltInCapability(
+  definition: DataConnectorDefinition,
+  description: string,
+  resumeCriteria: string[],
+): DataConnectorDefinition {
+  return {
+    ...definition,
+    availability: {
+      status: "suspended",
+      reasonCode: "provider-live-gate-failed",
+      description,
+      resumeCriteria,
+    },
+  };
+}

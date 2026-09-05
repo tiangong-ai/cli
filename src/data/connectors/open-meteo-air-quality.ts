@@ -44,7 +44,26 @@ interface NormalizedInput {
   timezone: "GMT";
 }
 
+type ValidationIssueCode =
+  | "response-count-mismatch"
+  | "coordinate-response-invalid"
+  | "provider-error"
+  | "grid-location-missing"
+  | "section-missing"
+  | "timezone-missing"
+  | "timezone-invalid"
+  | "utc-offset-missing"
+  | "utc-offset-invalid"
+  | "time-axis-length-mismatch"
+  | "time-axis-invalid"
+  | "series-missing"
+  | "series-length-mismatch"
+  | "series-unit-missing"
+  | "series-value-invalid"
+  | "series-all-null";
+
 interface ValidationIssue {
+  code: ValidationIssueCode;
   path: string;
   message: string;
 }
@@ -79,16 +98,16 @@ class IssueCollector {
   count = 0;
   readonly issues: ValidationIssue[] = [];
 
-  add(path: string, message: string): void {
+  add(code: ValidationIssueCode, path: string, message: string): void {
     this.count += 1;
-    if (this.issues.length < MAX_VALIDATION_ISSUES) this.issues.push({ path, message });
+    if (this.issues.length < MAX_VALIDATION_ISSUES) this.issues.push({ code, path, message });
   }
 }
 
 export const openMeteoAirQualityConnector: DataConnectorDefinition = {
   schemaVersion: DATA_MANIFEST_SCHEMA_VERSION,
   capabilityId: "open-meteo.air-quality",
-  capabilityVersion: "1.0.0",
+  capabilityVersion: "1.0.1",
   minimumCliVersion: "0.0.55",
   provider: {
     providerId: "open-meteo",
@@ -196,7 +215,8 @@ export const openMeteoAirQualityConnector: DataConnectorDefinition = {
   operations: [
     {
       operationId: "fetch-hourly",
-      operationVersion: "1.0.0",
+      operationVersion: "1.0.1",
+      features: ["open-meteo.series-all-null"],
       summary: "Fetch one bounded GMT window of Open-Meteo modeled hourly air-quality variables.",
       description:
         "Builds one stable public-endpoint query for up to ten coordinates and sixteen documented variables, validates aligned hourly arrays independently, and applies the shared byte, retry, timeout, and record limits.",
@@ -229,6 +249,7 @@ async function executeOpenMeteoAirQuality(
   const normalized = normalizePayload(response.json(), input, context.limits.maxRecords);
   const partial = normalized.issueCount > 0;
   const invalidPaths = normalized.issues.map((issue) => issue.path);
+  const issueCodes = [...new Set(normalized.issues.map((issue) => issue.code))];
   const errors: DataMachineError[] = partial
     ? [
         {
@@ -237,7 +258,7 @@ async function executeOpenMeteoAirQuality(
             "One or more Open-Meteo locations, timestamps, or variables could not be normalized.",
           retryable: false,
           userActionRequired: false,
-          details: { issueCount: normalized.issueCount, invalidPaths },
+          details: { issueCount: normalized.issueCount, issueCodes, invalidPaths },
         },
       ]
     : [];
@@ -339,6 +360,7 @@ function normalizePayload(
   const collector = new IssueCollector();
   if (responses.length !== input.locations.length) {
     collector.add(
+      "response-count-mismatch",
       "$",
       `Expected ${input.locations.length} coordinate responses but received ${responses.length}.`,
     );
@@ -396,23 +418,35 @@ function normalizeLocation(
   const path = `$[${index}]`;
   const item = recordValue(value);
   if (!item) {
-    collector.add(path, "Coordinate response must be an object.");
+    collector.add("coordinate-response-invalid", path, "Coordinate response must be an object.");
     return null;
   }
   if (item.error === true) {
-    collector.add(path, "Coordinate response contains an explicit provider error.");
+    collector.add(
+      "provider-error",
+      path,
+      "Coordinate response contains an explicit provider error.",
+    );
     return null;
   }
   const latitude = finiteNumber(item.latitude);
   const longitude = finiteNumber(item.longitude);
   if (latitude === null || longitude === null) {
-    collector.add(path, "Coordinate response is missing numeric grid latitude or longitude.");
+    collector.add(
+      "grid-location-missing",
+      path,
+      "Coordinate response is missing numeric grid latitude or longitude.",
+    );
     return null;
   }
   const hourly = recordValue(item.hourly);
   const units = recordValue(item.hourly_units);
   if (!hourly || !units || !Array.isArray(hourly.time)) {
-    collector.add(path, "Coordinate response must contain hourly, hourly.time, and hourly_units.");
+    collector.add(
+      "section-missing",
+      path,
+      "Coordinate response must contain hourly, hourly.time, and hourly_units.",
+    );
     return null;
   }
 
@@ -421,11 +455,16 @@ function normalizeLocation(
   for (let timeIndex = 0; timeIndex < hourly.time.length; timeIndex += 1) {
     const normalizedTime = normalizeProviderTime(hourly.time[timeIndex], input);
     if (normalizedTime === null) {
-      collector.add(`${path}.hourly.time[${timeIndex}]`, "Invalid or out-of-window GMT timestamp.");
+      collector.add(
+        "time-axis-invalid",
+        `${path}.hourly.time[${timeIndex}]`,
+        "Invalid or out-of-window GMT timestamp.",
+      );
       continue;
     }
     if (previousTime !== null && normalizedTime <= previousTime) {
       collector.add(
+        "time-axis-invalid",
         `${path}.hourly.time[${timeIndex}]`,
         "GMT timestamps must be strictly ascending.",
       );
@@ -435,6 +474,7 @@ function normalizeLocation(
   }
   if (timesUtc.length !== hourly.time.length) {
     collector.add(
+      "time-axis-invalid",
       `${path}.hourly.time`,
       "One or more invalid timestamps prevent safe alignment for this coordinate.",
     );
@@ -443,6 +483,7 @@ function normalizeLocation(
   const expectedHourCount = inclusiveDayCount(input.startDate, input.endDate) * 24;
   if (timesUtc.length !== expectedHourCount) {
     collector.add(
+      "time-axis-length-mismatch",
       `${path}.hourly.time`,
       `Expected ${expectedHourCount} GMT hours for the inclusive date window but received ${timesUtc.length}.`,
     );
@@ -454,43 +495,78 @@ function normalizeLocation(
     const rawValues = hourly[variable];
     const unit = units[variable];
     if (!Array.isArray(rawValues)) {
-      collector.add(variablePath, "Requested variable is missing or is not an array.");
+      collector.add(
+        "series-missing",
+        variablePath,
+        "Requested variable is missing or is not an array.",
+      );
       continue;
     }
     if (rawValues.length !== timesUtc.length) {
-      collector.add(variablePath, "Requested variable length does not match hourly.time.");
+      collector.add(
+        "series-length-mismatch",
+        variablePath,
+        "Requested variable length does not match hourly.time.",
+      );
       continue;
     }
     if (typeof unit !== "string" || unit.length === 0) {
-      collector.add(`${path}.hourly_units.${variable}`, "Requested variable unit is missing.");
+      collector.add(
+        "series-unit-missing",
+        `${path}.hourly_units.${variable}`,
+        "Requested variable unit is missing.",
+      );
       continue;
     }
     const values = rawValues.map((rawValue, valueIndex): number | null => {
       if (rawValue === null) return null;
       const number = finiteNumber(rawValue);
       if (number === null) {
-        collector.add(`${variablePath}[${valueIndex}]`, "Value must be numeric or null.");
+        collector.add(
+          "series-value-invalid",
+          `${variablePath}[${valueIndex}]`,
+          "Value must be numeric or null.",
+        );
         return null;
       }
       return number;
     });
+    if (rawValues.every((rawValue) => rawValue === null)) {
+      collector.add(
+        "series-all-null",
+        variablePath,
+        "Requested air-quality series was returned but contains no usable numeric values.",
+      );
+    }
     variables.push({ variable, unit, values });
   }
 
   const hasTimezone = typeof item.timezone === "string" && item.timezone.length > 0;
   const timezone = hasTimezone ? (item.timezone as string) : "GMT";
   if (!hasTimezone) {
-    collector.add(`${path}.timezone`, "Provider timezone metadata is missing.");
+    collector.add("timezone-missing", `${path}.timezone`, "Provider timezone metadata is missing.");
   } else if (!["GMT", "UTC", "Etc/UTC"].includes(timezone)) {
-    collector.add(`${path}.timezone`, "Provider timezone must remain GMT/UTC for this operation.");
+    collector.add(
+      "timezone-invalid",
+      `${path}.timezone`,
+      "Provider timezone must remain GMT/UTC for this operation.",
+    );
   }
   const hasUtcOffset =
     typeof item.utc_offset_seconds === "number" && Number.isInteger(item.utc_offset_seconds);
   const utcOffsetSeconds = hasUtcOffset ? (item.utc_offset_seconds as number) : 0;
   if (!hasUtcOffset) {
-    collector.add(`${path}.utc_offset_seconds`, "Provider UTC offset metadata must be an integer.");
+    collector.add(
+      "utc-offset-missing",
+      `${path}.utc_offset_seconds`,
+      "Provider UTC offset metadata must be an integer.",
+    );
   } else if (utcOffsetSeconds !== 0) {
-    collector.add(`${path}.utc_offset_seconds`, "Provider UTC offset must be zero in GMT mode.");
+    collector.add(
+      "utc-offset-invalid",
+      `${path}.utc_offset_seconds`,
+      "Provider UTC offset must be zero in GMT mode.",
+    );
   }
   return {
     requestedLocationIndex: index,

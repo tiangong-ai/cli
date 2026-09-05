@@ -17,8 +17,8 @@ checkPaths:
   - .docpact/config.yaml
   - docs/agents/**
   - src/**
-lastReviewedAt: 2026-09-04
-lastReviewedCommit: 4cb45f23331677a7c713f20f3aa3cbb65afe9358
+lastReviewedAt: 2026-09-05
+lastReviewedCommit: 16b436927ca80ae58b2fefc5c47bdf21f850827d
 ---
 
 # Tiangong AI CLI Contract
@@ -65,10 +65,13 @@ This repository owns the Tiangong AI command-line interface.
 - `tiangong-ai research search`
 - `tiangong-ai education search`
 
-The built-in atomic data catalog currently contains 19 independently
+The built-in atomic data catalog currently contains 17 independently
 discoverable capabilities for public environmental, regulatory, news-event,
 social, video, and water-project data, including bounded USBR RISE and project
 record capabilities.
+Regulations.gov connector sources remain in the repository for future
+qualification but are not registered, discoverable, or executable while their
+production search/detail and attachment paths fail live availability gates.
 Connector execution, normalization, schemas, provider limits, and
 source/license restrictions belong under `src/data/**`. The execution manifest
 digest is deliberately separate from the Agent-facing discovery metadata

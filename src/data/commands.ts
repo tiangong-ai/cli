@@ -204,10 +204,26 @@ async function runDoctor(
       status: "pass",
       message: "The built-in manifest and operation schemas are valid.",
     },
+    ...(connector.definition.availability?.status === "suspended"
+      ? [
+          {
+            checkId: "availability",
+            status: "fail" as const,
+            message: "The data capability is temporarily suspended.",
+            details: {
+              reasonCode: connector.definition.availability.reasonCode,
+              resumeCriteria: connector.definition.availability.resumeCriteria,
+            },
+          },
+        ]
+      : []),
     ...resolved.checks,
   ];
   let networkAttempted = false;
-  if (live) {
+  if (
+    live &&
+    !checks.some((check) => check.checkId === "availability" && check.status === "fail")
+  ) {
     if (!connector.definition.diagnostics.live || !connector.definition.liveDoctor) {
       throw new DataRuntimeError(
         "unsupported-operation",

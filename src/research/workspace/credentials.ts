@@ -18,7 +18,8 @@ export function researchDataCredentialIds(registry: DataRegistry = builtInDataRe
     ...new Set(
       registry
         .catalog()
-        .capabilities.flatMap((capability) =>
+        .capabilities.filter((capability) => capability.availability.status === "available")
+        .flatMap((capability) =>
           (registry.describe(capability.capabilityId)?.credentials ?? []).map((credential) =>
             researchDataCredentialId(capability.capabilityId, credential.credentialId),
           ),

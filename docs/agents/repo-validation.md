@@ -18,8 +18,8 @@ checkPaths:
   - scripts/**
   - test/**
   - .github/workflows/**
-lastReviewedAt: 2026-09-04
-lastReviewedCommit: 4cb45f23331677a7c713f20f3aa3cbb65afe9358
+lastReviewedAt: 2026-09-05
+lastReviewedCommit: 16b436927ca80ae58b2fefc5c47bdf21f850827d
 ---
 
 # Repo Validation
@@ -108,12 +108,14 @@ selection, pagination metadata validation, attribution/coverage normalization,
 pre-network request rejection, record caps, later-page partial isolation, and
 the explicit S3-download, AQI, health, and regulatory boundaries.
 
-`test/data-regulations-gov-connector.test.ts` proves API-key preflight for both
+`test/data-regulations-gov-connector.test.ts` retains fixture-only proof of API-key preflight for both
 read-only operations, posted and Eastern-wall-clock last-modified filters,
 stable JSON:API pagination, curated detail and attachment metadata, omission of
 named personal-profile fields, pre-network request rejection, record caps,
 per-ID partial isolation, and the non-posting, non-download, and
-non-representative-public-opinion discovery boundaries.
+non-representative-public-opinion discovery boundaries. The definitions are not
+part of the built-in registry while their production live gates are suspended;
+`test/data-builtins.test.ts` enforces that absence.
 
 Target the foundation during iteration with
 `node --import tsx --test test/data-*.test.ts`. The ordinary `npm test` and

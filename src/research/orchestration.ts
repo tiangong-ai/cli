@@ -34,7 +34,12 @@ import {
 import { appendJournalEvent, readJournal } from "./workspace/journal.js";
 import { fetchNativeCandidateSource } from "./workspace/broker.js";
 import { preflightEvidenceArtifact, registerEvidenceArtifact } from "./workspace/artifacts.js";
-import { executeResearchDataCapability } from "./workspace/data-evidence-adapter.js";
+import {
+  executeResearchDataCapability,
+  projectResearchDataEvidenceViewResult,
+  projectResearchDataExecutionResult,
+  readResearchDataEvidence,
+} from "./workspace/data-evidence-adapter.js";
 import { exportProjectAuditBundle, verifyProjectAuditBundle } from "./workspace/audit-bundle.js";
 import { loadCurrentEvidenceSnapshot } from "./workspace/acquisition.js";
 import { inspectAcquisitionForecast } from "./workspace/acquisition-forecast.js";
@@ -257,6 +262,7 @@ export function researchOrchestrationHelp(): string {
   tiangong-ai research project stage read <project-id> --session <id> --artifact <object-id> [--offset <bytes>] [--length <bytes|all>] [--encoding utf8|base64] [--workspace <path>] [--json]
   tiangong-ai research project evidence fetch <project-id> --request <absolute-json> [--workspace <path>] [--json]
   tiangong-ai research project evidence data run <project-id> --request <absolute-data-run-request.json> [--workspace <path>] [--json]
+  tiangong-ai research project evidence data read <project-id> --receipt <attempt-id> --cursor <opaque-cursor> [--workspace <path>] [--json]
   tiangong-ai research project evidence activity record <project-id> --record <absolute-json> [--workspace <path>] [--json]
   tiangong-ai research project evidence candidate register <project-id> --record <absolute-json> [--workspace <path>] [--json]
   tiangong-ai research project evidence assessment record <project-id> --record <absolute-json> [--workspace <path>] [--json]
@@ -1574,8 +1580,31 @@ async function runProject(argv: string[], io: CliIO): Promise<number> {
     }
     if (evidenceAction === "data") {
       const [dataAction, ...dataRest] = evidenceRest;
-      if (dataAction !== "run") {
+      if (dataAction !== "run" && dataAction !== "read") {
         throw unknownAction("research project evidence data", dataAction ?? "");
+      }
+      if (dataAction === "read") {
+        const args = parseStrictArgs(
+          dataRest,
+          { ...WORKSPACE_OPTIONS, receipt: "string", cursor: "string" },
+          "research project evidence data read",
+        );
+        if (strictBoolean(args, "help")) return writeHelp(io);
+        const projectId = onePositional(args.positionals, "research project evidence data read");
+        const receiptId = strictString(args, "receipt");
+        const cursor = strictString(args, "cursor");
+        if (!receiptId || !cursor) {
+          throw new CliError("evidence data read requires --receipt and --cursor.", {
+            code: "RESEARCH_DATA_EVIDENCE_CURSOR_INVALID",
+            exitCode: 2,
+          });
+        }
+        const root = await workspaceFromArgs(args);
+        const result = await withWorkspaceLock(root, "research.data-evidence.read", () =>
+          readResearchDataEvidence({ root, projectId, receiptId, cursor }),
+        );
+        writeJson(io, projectResearchDataEvidenceViewResult(result), args);
+        return 0;
       }
       const args = parseStrictArgs(
         dataRest,
@@ -1604,7 +1633,7 @@ async function runProject(argv: string[], io: CliIO): Promise<number> {
           request,
         }),
       );
-      writeJson(io, result, args);
+      writeJson(io, projectResearchDataExecutionResult(result), args);
       return result.coreResult.status === "success"
         ? 0
         : result.coreResult.status === "partial"

@@ -89,7 +89,7 @@ interface HtmlState {
 export const epaEisRecordsConnector: DataConnectorDefinition = {
   schemaVersion: DATA_MANIFEST_SCHEMA_VERSION,
   capabilityId: "epa.eis-records",
-  capabilityVersion: "1.0.0",
+  capabilityVersion: "1.0.1",
   minimumCliVersion: "0.0.55",
   provider: {
     providerId: "epa-eis-database",
@@ -103,6 +103,7 @@ export const epaEisRecordsConnector: DataConnectorDefinition = {
       pathPrefixes: ["/cdx-enepa-II/public/action/eis/"],
       allowedMethods: ["GET"],
       allowedContentTypes: ["text/html", "application/xhtml+xml"],
+      sessionCookies: "same-origin-memory",
     },
   ],
   license: {
@@ -185,7 +186,7 @@ export const epaEisRecordsConnector: DataConnectorDefinition = {
   operations: [
     {
       operationId: "search",
-      operationVersion: "1.0.0",
+      operationVersion: "1.0.1",
       summary: "Fetch and parse bounded official EPA EIS Database result pages.",
       description:
         "Retrieves caller-ordered common searches followed by explicit official search URLs, parses submissionsTable rows, deduplicates by official identifiers, and reports truncation or later-search failure explicitly.",
@@ -310,6 +311,7 @@ async function executeEpaEisSearch(
             missingSearches: [`search:${failedSearch}`],
             causeCode:
               failure instanceof DataRuntimeError ? failure.code : "provider-response-invalid",
+            failureDiagnostics: safeFailureTelemetry(failure),
           },
         },
       ]
@@ -350,6 +352,18 @@ async function executeEpaEisSearch(
     errors,
     observations,
   };
+}
+
+function safeFailureTelemetry(error: unknown): Record<string, boolean | number | string> {
+  if (!(error instanceof DataRuntimeError)) return {};
+  const result: Record<string, boolean | number | string> = {};
+  for (const key of ["attempts", "phase", "redirects", "retries", "status"] as const) {
+    const value = error.options.details?.[key];
+    if (typeof value === "string" || typeof value === "number" || typeof value === "boolean") {
+      result[key] = value;
+    }
+  }
+  return result;
 }
 
 function normalizeSearchPlan(input: EpaEisInput): PlannedSearch[] {

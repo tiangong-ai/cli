@@ -14,6 +14,7 @@ import {
 } from "./airnow-hourly-observations.schemas.js";
 
 const MAX_HOURS = 168;
+const AIRNOW_FETCH_CONCURRENCY = 3;
 const OFFICIAL_HEADERS = [
   "AQSID",
   "SiteName",
@@ -128,7 +129,7 @@ class AirNowFileValidationError extends Error {
 export const airNowHourlyObservationsConnector: DataConnectorDefinition = {
   schemaVersion: DATA_MANIFEST_SCHEMA_VERSION,
   capabilityId: "airnow.hourly-observations",
-  capabilityVersion: "1.0.0",
+  capabilityVersion: "1.0.1",
   minimumCliVersion: "0.0.55",
   provider: {
     providerId: "airnow",
@@ -227,7 +228,7 @@ export const airNowHourlyObservationsConnector: DataConnectorDefinition = {
   operations: [
     {
       operationId: "fetch-hourly",
-      operationVersion: "1.0.0",
+      operationVersion: "1.0.1",
       summary:
         "Fetch bounded AirNow HourlyAQObs files and normalize site-hour-pollutant observations.",
       description:
@@ -248,9 +249,10 @@ async function executeAirNowHourly(
   const records: AirNowRecord[] = [];
   const observations: DataSourceObservation[] = [];
   const missingFiles: string[] = [];
+  const fetchFailures: Array<Record<string, boolean | number | string>> = [];
   let truncated = false;
 
-  for (const hourUtc of hours) {
+  const fetched = await mapConcurrent(hours, AIRNOW_FETCH_CONCURRENCY, async (hourUtc) => {
     const sourceFile = sourceFileForHour(hourUtc);
     try {
       const response = await context.http.request({
@@ -258,6 +260,16 @@ async function executeAirNowHourly(
         method: "GET",
         path: sourceFile,
       });
+      return { hourUtc, sourceFile, response };
+    } catch (error) {
+      return { hourUtc, sourceFile, error };
+    }
+  });
+
+  for (const item of fetched) {
+    const { hourUtc, sourceFile } = item;
+    if ("response" in item) {
+      const response = item.response;
       observations.push({ ...response.observation, sourceId: sourceFile });
       try {
         const parsed = normalizeFile({
@@ -298,7 +310,8 @@ async function executeAirNowHourly(
         });
         missingFiles.push(sourceFile);
       }
-    } catch (error) {
+    } else {
+      const error = item.error;
       const missing = isMissingResponse(error);
       const code = error instanceof DataRuntimeError ? error.code : "network-failed";
       files.push({
@@ -314,6 +327,11 @@ async function executeAirNowHourly(
         errorCode: missing ? "source-file-missing" : code,
       });
       missingFiles.push(sourceFile);
+      fetchFailures.push({
+        sourceId: sourceFile,
+        code,
+        ...safeFailureTelemetry(error),
+      });
     }
   }
 
@@ -325,7 +343,7 @@ async function executeAirNowHourly(
           message: "One or more AirNow hourly files were unavailable or invalid.",
           retryable: files.some((file) => file.status === "failed" || file.status === "missing"),
           userActionRequired: false,
-          details: { missingFiles },
+          details: { missingFiles, failures: fetchFailures },
         },
       ]
     : [];
@@ -360,6 +378,37 @@ async function executeAirNowHourly(
     errors,
     observations,
   };
+}
+
+async function mapConcurrent<T, R>(
+  values: readonly T[],
+  concurrency: number,
+  work: (value: T) => Promise<R>,
+): Promise<R[]> {
+  const results = new Array<R>(values.length);
+  let nextIndex = 0;
+  const workers = Array.from({ length: Math.min(concurrency, values.length) }, async () => {
+    while (true) {
+      const index = nextIndex;
+      nextIndex += 1;
+      if (index >= values.length) return;
+      results[index] = await work(values[index]!);
+    }
+  });
+  await Promise.all(workers);
+  return results;
+}
+
+function safeFailureTelemetry(error: unknown): Record<string, boolean | number | string> {
+  if (!(error instanceof DataRuntimeError)) return {};
+  const result: Record<string, boolean | number | string> = {};
+  for (const key of ["attempts", "phase", "redirects", "retries", "status"] as const) {
+    const value = error.options.details?.[key];
+    if (typeof value === "string" || typeof value === "number" || typeof value === "boolean") {
+      result[key] = value;
+    }
+  }
+  return result;
 }
 
 function normalizeInput(input: AirNowInput, maxHours: number): AirNowInput {

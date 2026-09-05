@@ -15,9 +15,9 @@ function request(inputOverrides: Record<string, unknown> = {}): DataRunRequest {
   return {
     schemaVersion: "tiangong.data.run-request.v1",
     capabilityId: "open-meteo.flood",
-    capabilityVersion: "1.0.0",
+    capabilityVersion: "1.0.1",
     operationId: "fetch-daily",
-    operationVersion: "1.0.0",
+    operationVersion: "1.0.1",
     input: {
       locations: [{ latitude: 52.52, longitude: 13.41 }],
       startDate: "2026-03-01",
@@ -236,6 +236,7 @@ describe("Open-Meteo flood connector", () => {
 
     assert.equal(result.status, "partial");
     assert.equal(result.summary.recordCount, 3);
+    assert.deepEqual(result.errors[0]?.details?.issueCodes, ["series-missing"]);
     assert.deepEqual(result.summary.missing, [
       { kind: "field", identifiers: ["$[0].daily.river_discharge_p75"] },
     ]);
@@ -246,6 +247,36 @@ describe("Open-Meteo flood connector", () => {
         }
       ).locations[0]?.variables.map((variable) => variable.variable),
       ["river_discharge"],
+    );
+  });
+
+  it("preserves a returned all-null series and distinguishes it from a missing series", async () => {
+    const payload = await fixture();
+    const daily = payload.daily as Record<string, unknown>;
+    daily.river_discharge_p75 = new Array((daily.time as unknown[]).length).fill(null);
+    const result = await executeDataRun(request(), {
+      registry: createDataRegistry([openMeteoFloodConnector]),
+      environment: {},
+      fetchImpl: (async () => jsonResponse(payload)) as typeof fetch,
+    });
+
+    assert.equal(result.status, "partial");
+    assert.deepEqual(result.errors[0]?.details?.issueCodes, ["series-all-null"]);
+    const data = result.data as {
+      validation: { issues: Array<{ code: string; path: string; message: string }> };
+      locations: Array<{ variables: Array<{ variable: string; values: unknown[] }> }>;
+    };
+    assert.deepEqual(data.validation.issues, [
+      {
+        code: "series-all-null",
+        path: "$[0].daily.river_discharge_p75",
+        message: "Requested discharge series was returned but contains no usable numeric values.",
+      },
+    ]);
+    assert.ok(
+      data.locations[0]?.variables
+        .find((variable) => variable.variable === "river_discharge_p75")
+        ?.values.every((value) => value === null),
     );
   });
 

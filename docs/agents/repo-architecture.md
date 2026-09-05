@@ -12,8 +12,8 @@ checkPaths:
   - README.md
   - src/**
   - bin/**
-lastReviewedAt: 2026-09-04
-lastReviewedCommit: 4cb45f23331677a7c713f20f3aa3cbb65afe9358
+lastReviewedAt: 2026-09-05
+lastReviewedCommit: 16b436927ca80ae58b2fefc5c47bdf21f850827d
 ---
 
 # Repo Architecture
@@ -213,24 +213,30 @@ storage writes, queueing, and document status transitions.
   immutable registry, public JSON Schemas, canonical digest and receipt rules,
   strict command router, logical credential resolution, bounded HTTPS client,
   stable error taxonomy, and connector execution/conformance contracts. Its
-  built-in registry currently ships nineteen independently discoverable
+  built-in registry currently ships seventeen independently discoverable
   capabilities on the same runtime: AirNow hourly observations, public Bluesky
   post cascades, EPA EIS records, Federal Register document metadata, four GDELT
   DOC/table surfaces, NASA FIRMS active-fire detections, three Open-Meteo series,
-  OpenAQ location and sensor measurements, Regulations.gov public comments and
-  attachment downloads, two USBR data surfaces, USGS Water instantaneous values,
-  and YouTube public video/comment metadata. The three
+  OpenAQ location and sensor measurements, two USBR data surfaces, USGS Water
+  instantaneous values, and YouTube public video/comment metadata. The
+  Regulations.gov source definitions remain compiled and fixture-tested but are
+  excluded from the built-in registry until production search/detail and
+  attachment live gates pass. The three
   GDELT table capabilities share one bounded ZIP/feed core without collapsing
   their separate discovery and binding identities; the two YouTube operations
   share one provider and credential contract without merging video discovery
-  with explicit-ID comment retrieval.
+  with explicit-ID comment retrieval. Structural expansion from compressed
+  provider bytes into closed named-field JSON remains part of the validated
+  connector result; Research stores that result as Evidence and independently
+  projects a bounded Agent context view.
 - `src/research/workspace/data-evidence-adapter.ts`: dynamically projects every
   built-in data operation into the native Research discovery packet, invokes
   the shared TypeScript data service in-process, constructs its provider
   credential environment exclusively from the owner-only Research store,
-  applies call, item, byte, context, receipt, ledger, and audit bindings, and
-  never inherits host provider credentials or introduces provider-specific
-  Research adapters.
+  applies call, Evidence-package, shape-aware context, coverage, receipt,
+  ledger, and audit bindings, and never inherits host provider credentials,
+  silently lowers connector acquisition limits, or introduces
+  provider-specific Research adapters.
 - `scripts/**`: validation helpers.
 - `test/**`: Node test runner suites.
 

@@ -6,6 +6,7 @@ import { Readable } from "node:stream";
 import { describe, it } from "node:test";
 
 import { createDataRegistry } from "../src/data/catalog.js";
+import { builtInDataRegistry } from "../src/data/builtins.js";
 import { runDataCommand } from "../src/data/commands.js";
 import { runCli } from "../src/cli.js";
 import { syntheticConnector } from "./support/data-synthetic-connector.js";
@@ -135,6 +136,68 @@ describe("data CLI", () => {
     );
     assert.equal(liveCode, 0);
     assert.equal((JSON.parse(liveCapture.output().stdout) as { mode: string }).mode, "live");
+  });
+
+  it("describes suspended capabilities but blocks doctor and run without network access", async () => {
+    const capabilityId = "regulations-gov.comments";
+    const manifest = builtInDataRegistry.describe(capabilityId)!;
+    const operation = manifest.operations.find((item) => item.operationId === "search")!;
+    let fetchCalls = 0;
+    const fetchImpl = (async () => {
+      fetchCalls += 1;
+      throw new Error("suspended capabilities must not fetch");
+    }) as typeof fetch;
+
+    const describeCapture = captureIo();
+    assert.equal(
+      await runDataCommand(["describe", capabilityId, "--json"], describeCapture.io, {
+        registry: builtInDataRegistry,
+        fetchImpl,
+      }),
+      0,
+    );
+    assert.equal(
+      (
+        JSON.parse(describeCapture.output().stdout) as {
+          manifest: { availability: { status: string } };
+        }
+      ).manifest.availability.status,
+      "suspended",
+    );
+
+    const doctorCapture = captureIo({ REGGOV_API_KEY: "fixture-key-never-sent" });
+    assert.equal(
+      await runDataCommand(["doctor", capabilityId, "--live", "--json"], doctorCapture.io, {
+        registry: builtInDataRegistry,
+        fetchImpl,
+      }),
+      3,
+    );
+    assert.equal(fetchCalls, 0);
+
+    const runCapture = captureIo({ REGGOV_API_KEY: "fixture-key-never-sent" });
+    const runRequest = {
+      schemaVersion: "tiangong.data.run-request.v1",
+      capabilityId,
+      capabilityVersion: manifest.capabilityVersion,
+      operationId: operation.operationId,
+      operationVersion: operation.operationVersion,
+      input: {},
+    };
+    assert.equal(
+      await runDataCommand(
+        ["run", capabilityId, operation.operationId, "--input", "-", "--json"],
+        { ...runCapture.io, stdin: Readable.from([JSON.stringify(runRequest)]) },
+        { registry: builtInDataRegistry, fetchImpl },
+      ),
+      3,
+    );
+    assert.equal(fetchCalls, 0);
+    assert.equal(
+      (JSON.parse(runCapture.output().stdout) as { errors: Array<{ code: string }> }).errors[0]
+        ?.code,
+      "capability-unavailable",
+    );
   });
 
   it("reads one run request from stdin and returns a machine result", async () => {

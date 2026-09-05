@@ -24,6 +24,7 @@
             "invalid-request",
             "unsupported-operation",
             "incompatible-contract",
+            "capability-unavailable",
             "credential-missing",
             "credential-invalid",
             "provider-auth-blocked",

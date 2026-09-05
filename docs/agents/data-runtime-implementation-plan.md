@@ -18,8 +18,8 @@ checkPaths:
   - src/data/**
   - src/research/workspace/data-evidence-adapter.ts
   - test/**
-lastReviewedAt: 2026-09-01
-lastReviewedCommit: e387a5e66221ab91920a6e6c960cc717919caecb
+lastReviewedAt: 2026-09-05
+lastReviewedCommit: 16b436927ca3967673b46be41135e415f87704d9
 ---
 
 # 原子数据运行时实施计划
@@ -194,6 +194,12 @@ runtime primitive。
   coverage、永久 evidence、journal、handoff 和 review。
 - 对同一固定输入建立 parity test：独立 data 调用与 Research adapter 的核心结果和
   receipt digest 相同，Research 仅增加上层对象。
+- 严格分离 connector acquisition、Evidence package 与 Agent context 三层预算；Research
+  不把 `maxBrokerItems`/`maxBrokerResponseBytes` 隐式写入 `DataRunRequest`。调用者显式
+  limits 原样保留，完整验证结果与 artifacts 受 package byte/file ceiling 约束，Agent
+  视图再按 record、thread、time-series 或 artifact 形态投影。
+- receipt、candidate 与 journal 分别报告 validation issues、request coverage 和 context
+  projection，禁止把“上下文只显示前 100 条”表述成“采集结果只有 100 条”或无提示 complete。
 
 完成门槛：现有 Research clean-container 门禁先观察针对新 adapter 的 RED，再在新容器
 转 GREEN；不得让 data runtime 依赖项目目录或 stage 状态。
@@ -206,6 +212,9 @@ parity、credential 脱敏、动态投影和 packet 合同均有独立回归；�
 当前 connector 所需的最小凭证环境，不继承或 fallback 到 CLI 宿主的 provider 环境变量；
 缺失 workspace credential 时在 connector 和网络执行前返回 blocked，并由显式 ambient-key
 回归冻结该边界。
+对 144 条合成记录的回归确认：connector 仍执行其 1000 条/1 MiB 原生上限，Evidence 保存
+完整 144 条，smoke Agent 视图按 `maxBrokerItems=100` 显示 100/144；矩形时间序列按所有
+location 的对齐时间块分配，线程记录优先保留完整 group，attachment 使用 manifest 视图。
 
 ## 工作包 6：后续分批迁移
 
@@ -249,7 +258,8 @@ parity、credential 脱敏、动态投影和 packet 合同均有独立回归；�
   顺序，变量稳定排序，timezone 固定为 GMT，避免 locale/DST 进入执行合同。
 - 输出按 location-hour 计数，保留 requested/grid coordinate、elevation、timezone、unit
   和 aligned nullable arrays；单坐标/变量异常返回 partial，record cap 对时间和值同步
-  截断，整体 provider error 返回 blocked。
+  截断，整体 provider error 返回 blocked。requested series 缺失使用 `series-missing`；
+  provider 返回合法长度的全 `null` series 使用 `series-all-null` 并保留该列。
 - Discovery Metadata 区分 CAMS modeled background 与 station observation，记录 Europe/
   Global 分辨率和变量覆盖差异、公开端点非商业限制以及 Open-Meteo/CAMS attribution。
 - fixture 为按官方响应形状重建的合成数据；connector、catalog、static doctor、
@@ -332,8 +342,10 @@ parity、credential 脱敏、动态投影和 packet 合同均有独立回归；�
   生成受限 HTTPS path，不下载大型 master file。latest 校验 provider size/MD5，所有 ZIP
   校验单 member、安全名称、header 一致性、解压上限、CRC32、UTF-8 和精确 codebook 列数。
 - 输出在内存中归一化为闭合 named fields，并保留 file timestamp/name lineage；缺失后续文件
-  返回 partial，record cap 在下载下一文件前停止。该原子合同不落盘、不下载 article body，
-  也不把 automated coding 当作代表性、事实或因果证据。
+  返回 partial，record cap 在下载下一文件前停止。压缩 TSV/ZIP 展开为 named-field JSON 的
+  结构放大不作为数据丢弃理由；完整结果交给 Research Evidence package，Agent context 另行
+  生成 bounded table view。该原子合同不落盘、不下载 article body，也不把 automated coding
+  当作代表性、事实或因果证据。
 - fixtures 完全由测试生成并在 provenance note 中说明，不包含 live provider 响应；四个
   connector 的 field description、discovery boundary、range/ZIP failure、conformance、
   catalog/static doctor 与 dist pack 均离线验证。
@@ -485,7 +497,9 @@ TypeScript 7 typecheck 已通过；薄 Skill、binding、clean-container GREEN�
   requested/model-grid coordinate、elevation、hourly/daily 时间轴、单位和 aligned nullable
   arrays。record cap 按 location 内 hourly 后 daily 的顺序同步截断时间和值。
 - 单坐标/section/time axis/variable/unit 异常返回 partial，整体 provider error 返回
-  blocked；fixture 按官方响应形状重建。Discovery Metadata 区分 reanalysis/model-grid
+  blocked；requested series 缺失使用 `series-missing`，合法数组全为 `null` 使用
+  `series-all-null`，两者均保留机器可读 issue code，且后者保留原始空序列。fixture 按
+  官方响应形状重建。Discovery Metadata 区分 reanalysis/model-grid
   estimate 与 station observation，并提示多年代趋势使用 ERA5 或 ERA5-Land，避免 Best
   Match 的模型升级断点。
 - 不透传旧 Skill 的 endpoint、API key、任意 model、timezone 或单位环境配置；商业
@@ -503,13 +517,36 @@ TypeScript 7 typecheck 已通过；薄 Skill、binding、clean-container GREEN�
   requested/river-grid coordinate、unit、aligned nullable variables 与带 member identity
   的 ensemble series。
 - 单坐标/变量/member 异常返回 partial，record cap 同步截断日期和所有 series，整体
-  provider error 返回 blocked；fixture 为按官方响应形状重建的合成数据。
+  provider error 返回 blocked；requested series 缺失与合法全 `null` series 分别使用
+  `series-missing` 和 `series-all-null`，后者原样保留；fixture 为按官方响应形状重建的
+  合成数据。
 - Discovery Metadata 明确 GloFAS 约 5 km simulated discharge、附近最大河流选择误差、
   forecast-only ensemble statistics、非站点观测/非告警边界、公开端点非商业限制与
   Open-Meteo/GloFAS attribution。
 
 状态：CLI connector、对应薄 Skill 和候选 binding 已在本地完成并验证；正式 binding
 等待包含全部 connector 的精确 npm 版本发布。
+
+## 2026-09-02 可靠性与 Agent 消费补强
+
+- Research data Evidence 增加 digest-bound opaque cursor 和只读 `data read` 入口；完整
+  acquisition 结果仍只持久化一次，后续 Agent 视图不重取 provider、不消耗 provider quota
+  或 evidence-call budget。native packet 明确要求需要逐行穷尽时读到 `nextCursor=null`，
+  否则必须披露 presented/total 比例。
+- Research communication 将 provider coverage、显式 limit coverage 与 context coverage
+  分开；保留旧 `requestCoverage` 兼容投影，因此 provider partial 与 runtime bounded 不再
+  相互覆盖。
+- EPA EIS 的已声明 endpoint 单独启用 same-origin、memory-only cookie session，以通过官方
+  初始重定向；cookie 不进入持久化、错误、摘要或跨域请求。该能力不扩展到其他 connector。
+- AirNow 小时文件改为固定三路并发获取并保持稳定输出顺序；bounded HTTP 失败补充脱敏的
+  attempt/retry/redirect/phase/status，便于区分 provider 响应、超时和 transport failure。
+- YouTube comments 增加显式 `top-level-only|all-visible` reply 策略，并报告 thread/reply
+  request 消耗、剩余预算与已知未展开线程；默认兼容既有 `includeReplies` 行为，不以
+  embedded reply sample 冒充完整回复。
+- Regulations.gov 的两个 capability 保留在 built-in registry，以 suspended availability
+  发布原因和恢复标准；catalog/describe 可诊断，doctor/run 在网络前阻断，Auto Research 不投影。
+  真实 key 下 production search 返回 503，旧 fetcher 同样超时，attachment origin 在当前执行
+  环境返回 403；恢复 available 必须先通过 search、detail、attachment 三段 live gate。
 
 ## PR 与提交拆分
 
