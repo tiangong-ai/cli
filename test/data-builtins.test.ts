@@ -4,6 +4,14 @@ import { describe, it } from "node:test";
 import { builtInDataRegistry } from "../src/data/builtins.js";
 import { runDataCommand } from "../src/data/commands.js";
 
+const SUSPENDED_CAPABILITY_IDS = new Set([
+  "gdelt.doc-search",
+  "regulations-gov.attachments",
+  "regulations-gov.comments",
+  "usbr.project-records",
+  "usbr.rise",
+]);
+
 function captureIo() {
   let stdout = "";
   let stderr = "";
@@ -32,6 +40,7 @@ describe("built-in data connectors", () => {
         "gdelt.events",
         "gdelt.gkg",
         "gdelt.mentions",
+        "gdelt.web-ngrams",
         "nasa-firms.active-fire",
         "open-meteo.air-quality",
         "open-meteo.flood",
@@ -54,7 +63,7 @@ describe("built-in data connectors", () => {
       assert.match(String(capability.discoveryDigest), /^[a-f0-9]{64}$/);
       assert.equal(
         capability.availability.status,
-        capability.capabilityId.startsWith("regulations-gov.") ? "suspended" : "available",
+        SUSPENDED_CAPABILITY_IDS.has(capability.capabilityId) ? "suspended" : "available",
       );
     }
   });
@@ -69,6 +78,7 @@ describe("built-in data connectors", () => {
       "gdelt.events",
       "gdelt.gkg",
       "gdelt.mentions",
+      "gdelt.web-ngrams",
       "nasa-firms.active-fire",
       "open-meteo.air-quality",
       "open-meteo.flood",
@@ -125,7 +135,7 @@ describe("built-in data connectors", () => {
         "openaq.air-quality",
         "youtube.public-content",
       ].includes(capabilityId);
-      const suspended = capabilityId.startsWith("regulations-gov.");
+      const suspended = SUSPENDED_CAPABILITY_IDS.has(capabilityId);
       assert.equal(exitCode, requiresCredential || suspended ? 3 : 0);
       assert.equal(fetched, false);
       const doctor = JSON.parse(capture.stdout()) as {
@@ -167,8 +177,8 @@ describe("built-in data connectors", () => {
     }
   });
 
-  it("keeps temporarily suspended Regulations.gov capabilities discoverable but unavailable", () => {
-    for (const capabilityId of ["regulations-gov.comments", "regulations-gov.attachments"]) {
+  it("keeps provider-blocked capabilities discoverable but unavailable", () => {
+    for (const capabilityId of SUSPENDED_CAPABILITY_IDS) {
       const catalogEntry = builtInDataRegistry
         .catalog()
         .capabilities.find((item) => item.capabilityId === capabilityId);

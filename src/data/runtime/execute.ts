@@ -11,6 +11,7 @@ import type {
 import { DATA_RUN_REQUEST_SCHEMA_VERSION, DATA_RUN_RESULT_SCHEMA_VERSION } from "../contracts.js";
 import type { DataRegistry, RegisteredDataConnector } from "../catalog.js";
 import { createBoundedHttpClient } from "./bounded-http.js";
+import { withBoundedTransport } from "./http-transport.js";
 import { createDataArtifactSession, type DataArtifactSession } from "./artifacts.js";
 import { canonicalJson } from "./canonical-json.js";
 import { requiredCredentialsPresent, resolveDataCredentials } from "./credentials.js";
@@ -226,80 +227,84 @@ export async function executeDataRun(
     }
   }
 
-  const http = createBoundedHttpClient({
-    capabilityId: connector.manifest.capabilityId,
-    endpoints: connector.definition.endpoints,
-    credentials: connector.definition.credentials,
-    environment: options.environment,
-    limits: effectiveLimits,
-    ...(options.fetchImpl === undefined ? {} : { fetchImpl: options.fetchImpl }),
-  });
-  try {
-    const execution = await operation.definition.execute({
-      input: request.input,
-      request,
+  // Reuse connections across pages/chunks in one operation; avoid a new TLS
+  // handshake per page while still cleaning up every success/failure path.
+  return withBoundedTransport(effectiveLimits.timeoutMs, options.fetchImpl, async (fetchImpl) => {
+    const http = createBoundedHttpClient({
+      capabilityId: connector.manifest.capabilityId,
+      endpoints: connector.definition.endpoints,
+      credentials: connector.definition.credentials,
+      environment: options.environment,
       limits: effectiveLimits,
-      http,
-      artifacts: artifactSession,
+      fetchImpl,
     });
-    assertExecutionInvariants(execution, effectiveLimits);
-    if (!operation.validateOutput(execution.data)) {
-      throw new DataRuntimeError(
-        "provider-response-invalid",
-        "The normalized operation result does not satisfy its published output schema.",
-        { details: { issues: formatValidationErrors(operation.validateOutput.errors) } },
-      );
-    }
-    const secrets = http.configuredSecrets();
-    if (containsConfiguredSecret(canonicalJson(execution), secrets)) {
-      throw new DataRuntimeError(
-        "provider-response-invalid",
-        "The normalized operation result contained configured credential material and was blocked.",
-      );
-    }
-    const errors = execution.errors.map((error) => ({
-      ...error,
-      message: sanitizeDataText(error.message, secrets),
-      ...(error.details === undefined
-        ? {}
-        : { details: sanitizeDataValue(error.details, secrets) as typeof error.details }),
-    }));
-    const result: DataRunResult = {
-      schemaVersion: DATA_RUN_RESULT_SCHEMA_VERSION,
-      status: execution.status,
-      requestId: request.requestId ?? null,
-      contract: contractProjection(cliVersion, request, connector.manifest, operation.manifest),
-      data: execution.data,
-      summary: execution.summary,
-      warnings: execution.warnings.map((warning) => sanitizeDataText(warning, secrets)),
-      errors,
-      receipt: buildCoreDataReceipt({
+    try {
+      const execution = await operation.definition.execute({
+        input: request.input,
+        request,
+        limits: effectiveLimits,
+        http,
+        artifacts: artifactSession,
+      });
+      assertExecutionInvariants(execution, effectiveLimits);
+      if (!operation.validateOutput(execution.data)) {
+        throw new DataRuntimeError(
+          "provider-response-invalid",
+          "The normalized operation result does not satisfy its published output schema.",
+          { details: { issues: formatValidationErrors(operation.validateOutput.errors) } },
+        );
+      }
+      const secrets = http.configuredSecrets();
+      if (containsConfiguredSecret(canonicalJson(execution), secrets)) {
+        throw new DataRuntimeError(
+          "provider-response-invalid",
+          "The normalized operation result contained configured credential material and was blocked.",
+        );
+      }
+      const errors = execution.errors.map((error) => ({
+        ...error,
+        message: sanitizeDataText(error.message, secrets),
+        ...(error.details === undefined
+          ? {}
+          : { details: sanitizeDataValue(error.details, secrets) as typeof error.details }),
+      }));
+      const result: DataRunResult = {
+        schemaVersion: DATA_RUN_RESULT_SCHEMA_VERSION,
+        status: execution.status,
+        requestId: request.requestId ?? null,
+        contract: contractProjection(cliVersion, request, connector.manifest, operation.manifest),
+        data: execution.data,
+        summary: execution.summary,
+        warnings: execution.warnings.map((warning) => sanitizeDataText(warning, secrets)),
+        errors,
+        receipt: buildCoreDataReceipt({
+          cliVersion,
+          request,
+          manifest: connector.manifest,
+          operation: operation.manifest,
+          observations: execution.observations,
+          data: execution.data,
+          completionStatus: execution.status,
+          summary: execution.summary,
+          generatedAt: clock().toISOString(),
+        }),
+      };
+      validateDataPublicContract("runResult", result);
+      await artifactSession?.commit();
+      return result;
+    } catch (error) {
+      await artifactSession?.rollback();
+      return blockedResult({
         cliVersion,
         request,
         manifest: connector.manifest,
         operation: operation.manifest,
-        observations: execution.observations,
-        data: execution.data,
-        completionStatus: execution.status,
-        summary: execution.summary,
+        error,
+        secrets: http.configuredSecrets(),
         generatedAt: clock().toISOString(),
-      }),
-    };
-    validateDataPublicContract("runResult", result);
-    await artifactSession?.commit();
-    return result;
-  } catch (error) {
-    await artifactSession?.rollback();
-    return blockedResult({
-      cliVersion,
-      request,
-      manifest: connector.manifest,
-      operation: operation.manifest,
-      error,
-      secrets: http.configuredSecrets(),
-      generatedAt: clock().toISOString(),
-    });
-  }
+      });
+    }
+  });
 }
 
 function checkCompatibility(

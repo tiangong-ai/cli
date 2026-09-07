@@ -21,7 +21,7 @@ function searchRequest(): DataRunRequest {
   return {
     schemaVersion: "tiangong.data.run-request.v1",
     capabilityId: "youtube.public-content",
-    capabilityVersion: "1.0.1",
+    capabilityVersion: "1.0.2",
     operationId: "search-videos",
     operationVersion: "1.0.0",
     input: {
@@ -45,9 +45,9 @@ function commentsRequest(): DataRunRequest {
   return {
     schemaVersion: "tiangong.data.run-request.v1",
     capabilityId: "youtube.public-content",
-    capabilityVersion: "1.0.1",
+    capabilityVersion: "1.0.2",
     operationId: "fetch-comments",
-    operationVersion: "1.0.1",
+    operationVersion: "1.0.2",
     input: {
       videoIds: [VIDEO_ONE],
       startDateTime: "2026-03-01T00:00:00Z",
@@ -61,6 +61,71 @@ function commentsRequest(): DataRunRequest {
 }
 
 describe("YouTube public-content connector", () => {
+  it("prunes only provably too-new parent threads in a published-time query, preserving old-parent replies", async () => {
+    const replyParents: string[] = [];
+    const result = await executeDataRun(commentsRequest(), {
+      registry: createDataRegistry([youtubePublicContentConnector]),
+      environment: { YOUTUBE_API_KEY: "secret-youtube-key" },
+      fetchImpl: (async (target) => {
+        const url = new URL(String(target));
+        if (url.pathname.endsWith("/commentThreads")) {
+          return Response.json({
+            items: [
+              ["too-new", "2026-03-08T00:00:00Z"],
+              ["older-parent", "2026-02-01T00:00:00Z"],
+              ["unknown-date", null],
+            ].map(([id, publishedAt]) => ({
+              id,
+              snippet: {
+                videoId: VIDEO_ONE,
+                totalReplyCount: 1,
+                topLevelComment: {
+                  id,
+                  snippet: {
+                    videoId: VIDEO_ONE,
+                    publishedAt,
+                    textDisplay: "Parent",
+                    updatedAt: "2026-04-01T00:00:00Z",
+                  },
+                },
+              },
+            })),
+          });
+        }
+        const parentId = url.searchParams.get("parentId")!;
+        replyParents.push(parentId);
+        return Response.json({
+          items: [
+            {
+              id: `${parentId}-reply`,
+              snippet: {
+                videoId: VIDEO_ONE,
+                parentId,
+                publishedAt: "2026-03-04T00:00:00Z",
+                textDisplay: "In-window reply",
+              },
+            },
+          ],
+        });
+      }) as typeof fetch,
+    });
+    assert.equal(result.status, "success");
+    assert.deepEqual(replyParents, ["older-parent", "unknown-date"]);
+    assert.equal(result.summary.recordCount, 2);
+    const communication = result.data as {
+      replyCompleteness: {
+        excludedByPublishedWindowThreadIds: string[];
+        knownUnexpandedThreadIds: string[];
+        fullyExpandedThreads: number;
+      };
+    };
+    assert.deepEqual(communication.replyCompleteness.excludedByPublishedWindowThreadIds, [
+      "too-new",
+    ]);
+    assert.deepEqual(communication.replyCompleteness.knownUnexpandedThreadIds, []);
+    assert.equal(communication.replyCompleteness.fullyExpandedThreads, 2);
+  });
+
   it("documents all top-level inputs for both operations", () => {
     for (const schema of [YOUTUBE_VIDEO_SEARCH_INPUT_SCHEMA, YOUTUBE_COMMENTS_INPUT_SCHEMA]) {
       for (const [name, property] of Object.entries(schema.properties)) {

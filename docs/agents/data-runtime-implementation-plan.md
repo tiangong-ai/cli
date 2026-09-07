@@ -548,6 +548,103 @@ TypeScript 7 typecheck 已通过；薄 Skill、binding、clean-container GREEN�
   真实 key 下 production search 返回 503，旧 fetcher 同样超时，attachment origin 在当前执行
   环境返回 403；恢复 available 必须先通过 search、detail、attachment 三段 live gate。
 
+## 2026-09-07 GDELT DOC 修复与验收边界
+
+- 修正 native fetch 默认 10 秒连接超时与 DOC 45 秒预算不一致；独立 dispatcher 复用
+  于同一 operation 的 pages/chunks/retries/redirects，并在 operation 完成或失败后销毁。
+- 补回迁移丢失的 DOC 5 秒间隔；公共 HTTP 层执行进程内同 origin pacing，并对无
+  `Retry-After` 的 429 做有界指数退避。最终限流给出明确 code、attempts 和建议冷却时间。
+- 新增真实 CLI 正向验收脚本，固定同一个 Node 24 executable，保留输入、输出、版本、
+  耗时、请求次数和 HTTP phase 记录；只有取得有效非空文章/时间序列才算 positive E2E。
+  失败后停止更多 case，不以零记录冒充查询无结果，不以离线 fixture 通过冒充线上可用。
+- 2026-09-07 07:17 UTC 第一轮修复后实测：文章查询耗时约 137.6 秒，五次 attempt 后仍
+  为 HTTP 429，`rate-limited/blocked`。因此连接和错误诊断已得到线上证据，但当时
+  **真实非空数据 E2E 尚未通过**。不得沿用此前“全部完成”的汇报口径。
+- 后续实测（UTC）：07:24 文章查询在 `429 -> 429 -> 200` 后取得 10 篇有效文章，
+  62.936 秒、4317 decoded provider bytes、7801 CLI output bytes，文章正向 E2E 通过。
+  07:26 时间序列仍为五次 429；冷却后 07:30 的最终运行时代码定向复测也是五次 429，
+  152.290 秒，时间序列正向 E2E **未通过**。这证明间歇性可用，不能宣称稳定或全部模式可用。
+- 最终运行时代码隔离 cold gate：708/708，通过；typecheck、lint、平台合同 3/3、
+  pack dry-run 和 docpact 通过。离线通过不改变上述 provider live 阻断结论。
+- 本轮只处理 CLI 的 GDELT DOC 与公共 transport，不改 Skills 或 Auto Research，不处理
+  Regulations.gov，也不绕过 provider rate limit。改动尚未发布时不得称安装用户已获修复。
+
+## 2026-09-07 数据可靠性放行门槛（可执行集合已放行）
+
+本批次不以 fixture/Schema 通过代替 live 可用性，不因提供方故障静默缩小清单，也不
+以受限样本冒充完整覆盖。最终 catalog 包含 20 个 capability：15 个 available capability
+的 17 个 operation 均有真实正向数据或业务语义相符的空值/质量边界证据；GDELT DOC、
+Regulations.gov 的两个 capability 与 USBR 的两个 capability 共 5 项保持 suspended。
+每次变更只做针对性回归，最终源码统一执行一次隔离门禁。
+
+本地修正：
+
+- GDELT 文件坏行从 success 改为 partial，保留其余行并披露受影响文件。
+- GDELT ToneChart 数字 bin（包括 0）不再被当成空字符串丢弃；保留实际 `toparts`
+  代表文章，坏 bin 返回 partial，不伪装为 no-results。
+- FIRMS 完整 chunk 恰好达到 record cap、但后续日期未访问时标明 truncated；最后一个
+  chunk 恰好达到 cap 不虚报截断。
+- 识别 HTTP 200 的 HTML `Request Rejected` gateway 页面，阻止其成为 USBR 项目记录。
+- YouTube `fetch-comments` 升为 1.0.2，按原始发布时间保守剪枝不可能落入查询窗口的
+  回复，单独声明被排除的 thread IDs，不把它们当作已完整获取。
+- OpenAQ capability/measurement operation 升为 1.0.1：异常 coverage 数字保留原值与
+  测量行，机器标记质量 partial，不因一个比例超界丢弃整页或 clamp 掩盖问题。
+
+实时证据已经补齐 FIRMS 历史 MODIS/近期 VIIRS 非空与海洋空样本、GKG 四文件完整行数、
+Mentions 四个单文件的完整获取、Open-Meteo 真实全 null，以及 YouTube 从发现视频到
+240 条完整评论/回复的链路。YouTube 同一旧日期请求修前 100 次请求/61.928 秒，修后
+20 次/17.788 秒，仍得到相同的 3 个 comment IDs；它仍是有界扫描，不是历史全集证明。
+
+此前阻断记录不能隐瞒：RISE 和 USBR 项目网页在本环境返回 gateway 拒绝；AirNow 在 WSL
+解析的 CloudFront 地址连接超时，但 Windows 正常安装的候选 CLI 可取得三文件 2382 条；
+GDELT DOC 各模式存在多次 429 和较长等待。测试记录必须保留运行平台与完整失败历史，
+不得只选择成功样本宣称高可用。下述后续处置以修复或 suspended availability 消除错误放行。
+
+后续定向排障确认 AirNow 故障位于 CloudFront 路径而非文件名、CSV 或数据缺失：WSL 与
+Windows 到四个当前边缘 IP 均在 TLS 前连接超时；AWS 的 S3 redirect 明确给出 bucket
+`files.airnowtech.org` 与 region `us-west-1`。connector 改用区域化 path-style S3 endpoint，
+同一 `2026-09-06T12:00:00Z` 文件实测取得 1,014,422 bytes、4,431 输入行和 5,818 条
+PM2.5/Ozone 记录，约 2.6 秒，status=success、complete、未截断。
+
+USBR 的 legacy RISE、2026 年发布的官方 EDR beta 和 `www.usbr.gov` 项目页从 WSL、
+Windows 及浏览器均返回同一种 HTTP 200 `Request Rejected` 网关页；浏览器 headers 不能
+改变结果，因此不是参数、JSON parser 或客户端 User-Agent 问题。可访问的 WWDH EDR 是
+第三方缓存代理，且不能无损实现现有显式 catalog-item 操作合同，不能静默替换官方来源。
+`gdelt.doc-search`、`usbr.rise` 与 `usbr.project-records` 因而改为 suspended：保留定义、
+fixture 与发现语义，doctor/run 在网络前阻断，Auto Research 自动排除，并发布客观恢复标准。
+
+### 最终端到端与可用性汇总
+
+下表记录代表性请求，不把单次成功解释为 provider SLA。吞吐为成功响应字节除以完整
+调用墙钟时间，包含连接、等待、重试、解析与序列化；不同请求范围不可直接横向排名。
+
+| Capability                        | Availability | 代表性端到端证据                                               | 耗时与规模                                                   | 结论                                                                   |
+| --------------------------------- | ------------ | -------------------------------------------------------------- | ------------------------------------------------------------ | ---------------------------------------------------------------------- |
+| `airnow.hourly-observations`      | available    | 区域 S3 endpoint，PM2.5/Ozone 单小时                           | connector 约 2.6 秒；1,014,422 bytes；4,431 输入行；5,818 条 | success/complete，未截断                                               |
+| `bluesky.public-posts`            | available    | 历史 cascade                                                   | 5.443 秒；4 请求；6 条                                       | success/complete                                                       |
+| `epa.eis-records`                 | available    | 两页搜索与同源内存会话                                         | 5.284 秒；3 请求；26 条                                      | success/complete                                                       |
+| `federal-register.documents`      | available    | 两页文档搜索                                                   | 3.003 秒；2 请求；101 条                                     | success/complete                                                       |
+| `gdelt.events`                    | available    | 四个文件                                                       | 3.944 秒；4,323 条                                           | success/complete                                                       |
+| `gdelt.gkg`                       | available    | 四个文件                                                       | 9.036 秒；2,587 条；10.94 MiB 响应                           | success/complete                                                       |
+| `gdelt.mentions`                  | available    | 单文件及另外三文件分别复核                                     | 代表文件 2.856 秒；3,908 条                                  | success/complete                                                       |
+| `gdelt.web-ngrams`                | available    | 官方历史 minute 的 NGrams/TOC 文件对                           | 4.225 秒；8.08 MiB；扫描 1,063,647 行；28 篇                 | success/complete；无 429/重试                                          |
+| `nasa-firms.active-fire`          | available    | 近期 VIIRS 正例及海洋空结果负例                                | 正例 4.228 秒；2 请求；450 条                                | 正例与合法 no-results 均验证                                           |
+| `open-meteo.air-quality`          | available    | 逐小时空气质量                                                 | 2.681 秒；96 条                                              | success/complete                                                       |
+| `open-meteo.flood`                | available    | 每日模拟流量                                                   | 2.785 秒；10 条                                              | success/complete                                                       |
+| `open-meteo.historical-weather`   | available    | 正常序列与合法全-null 序列                                     | 正例 2.634 秒/50 条；全-null 2.653 秒/48 条                  | 正常、missing 与 all-null 已区分                                       |
+| `openaq.air-quality`              | available    | location 与 sensor measurements                                | 3.652 秒/199 条；3.321 秒/167 条                             | 两个 operation 均 success/complete；异常 coverage 保留数据并标 partial |
+| `usgs.water-instantaneous-values` | available    | 一日实测水文序列                                               | 3.331 秒；7,060 条                                           | success/complete                                                       |
+| `youtube.public-content`          | available    | 视频搜索及完整可见评论链                                       | 4.983 秒/1 视频；20.077 秒/38 请求/240 评论                  | 两个 operation 均取得正向数据；边界与未展开线程显式报告                |
+| `gdelt.doc-search`                | suspended    | 文章与部分 timeline 可间歇成功，`timelinetone` 最终仍 5 次 429 | 最终失败 127.252 秒                                          | 不满足稳定 live gate                                                   |
+| `regulations-gov.comments`        | suspended    | 生产 search/detail 返回 503                                    | 无有效吞吐                                                   | provider live gate 失败                                                |
+| `regulations-gov.attachments`     | suspended    | attachment origin 返回 403/503                                 | 无有效吞吐                                                   | provider live gate 失败                                                |
+| `usbr.project-records`            | suspended    | 官方页面返回 HTTP 200 `Request Rejected` 网关页                | 约 2.820 秒即阻断                                            | 不把拦截页解析为记录                                                   |
+| `usbr.rise`                       | suspended    | legacy API 与 EDR beta 均返回同类网关页                        | discovery 2.948 秒；result 3.795 秒                          | 两个 operation 均在网络前对 Agent 停用                                 |
+
+最终定向 connector/Research 回归 33/33；最终隔离容器 727/727，0 失败，statement/line
+coverage 87%。Skills 侧 22 个 binding provenance 与 24 个请求示例对同一候选包精确通过；
+当前 Auto Research 只投影 15 个 available capability、17 个 operation。
+
 ## PR 与提交拆分
 
 建议保持下列可独立审阅/回退单元：
@@ -565,6 +662,17 @@ TypeScript 7 typecheck 已通过；薄 Skill、binding、clean-container GREEN�
 
 计划 PR 先同步评审；实现 PR 不形成“Skills 先引用未存在的 CLI”或“CLI 发布时依赖
 未合并 Skills pin”的循环。
+
+## 2026-09-07：DOC 之外的文件检索候选
+
+新增 `gdelt.web-ngrams/search`，不修改原 EcoCouncil 21 项迁移来源记录。
+这是官方推荐的 NGrams/TOC 文件检索路径：单明确分钟、literal 短语、文件级 ID 关联、
+全文件扫描和显式 partial/blocked，不提供自动 DOC fallback、跨分钟采样或三表联查。
+CLI 拥有唯一 TS7 实现；新薄 Skill 仅负责路由，Research 由当前 catalog 自动发现。
+这是本地候选功能，不能仅凭 package `0.0.61` 推断已发布包含它；以同一 resolved CLI
+的 describe 为准。官方历史 minute 实测扫描 1,063,647 行、返回 28 篇，4.225 秒、
+8.08 MiB 有效响应；当日 minute 实测扫描 969,712 行、返回 19 篇，5.739 秒、7.45 MiB。
+两次均无重试或 429。线上验证与 DOC 恢复门槛分开记录，不将新路径成功计作 DOC 成功。
 
 ## 每阶段通用验收
 

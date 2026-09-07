@@ -19,7 +19,7 @@ function locationRequest(inputOverrides: Record<string, unknown> = {}): DataRunR
   return {
     schemaVersion: "tiangong.data.run-request.v1",
     capabilityId: "openaq.air-quality",
-    capabilityVersion: "1.0.0",
+    capabilityVersion: "1.0.1",
     operationId: "search-locations",
     operationVersion: "1.0.0",
     input: {
@@ -36,9 +36,9 @@ function measurementRequest(inputOverrides: Record<string, unknown> = {}): DataR
   return {
     schemaVersion: "tiangong.data.run-request.v1",
     capabilityId: "openaq.air-quality",
-    capabilityVersion: "1.0.0",
+    capabilityVersion: "1.0.1",
     operationId: "fetch-sensor-measurements",
-    operationVersion: "1.0.0",
+    operationVersion: "1.0.1",
     input: {
       sensorId: 1001,
       granularity: "hourly",
@@ -74,6 +74,29 @@ async function successfulFetch(target: string | URL | Request): Promise<Response
 }
 
 describe("OpenAQ air-quality connector", () => {
+  it("preserves anomalous provider coverage values and measurements with an explicit quality issue", async () => {
+    const payload = JSON.parse(await fixture("measurements-page-1.json"));
+    payload.meta.found = payload.results.length;
+    payload.results[0].coverage.percentCoverage = 2400;
+    const result = await executeDataRun(measurementRequest(), {
+      registry: createDataRegistry([openAqAirQualityConnector]),
+      environment: { OPENAQ_API_KEY: API_KEY },
+      fetchImpl: (async () => jsonResponse(JSON.stringify(payload))) as typeof fetch,
+    });
+    assert.equal(result.status, "partial");
+    assert.equal(result.summary.recordCount, payload.results.length);
+    assert.equal(result.summary.completeness, "partial");
+    assert.equal(
+      (result.data as { records: Array<{ coverage: { percentCoverage: number } }> }).records[0]
+        ?.coverage.percentCoverage,
+      2400,
+    );
+    assert.equal(result.errors[0]?.details?.issueCode, "coverage-percentage-out-of-range");
+    assert.deepEqual(result.summary.missing, [
+      { kind: "field", identifiers: ["records[0].coverage.percentCoverage"] },
+    ]);
+  });
+
   it("documents every operation input field and spatial coordinate", () => {
     for (const schema of [OPENAQ_LOCATION_SEARCH_INPUT_SCHEMA, OPENAQ_MEASUREMENT_INPUT_SCHEMA]) {
       for (const [name, field] of Object.entries(schema.properties)) {

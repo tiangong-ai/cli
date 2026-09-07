@@ -1,5 +1,4 @@
 import { isIP } from "node:net";
-import { setTimeout as delay } from "node:timers/promises";
 
 import type {
   DataCredentialDeclaration,
@@ -14,6 +13,8 @@ import type {
 import { canonicalJson, sha256Bytes, sha256CanonicalJson } from "./canonical-json.js";
 import { injectLogicalCredential, resolveDataCredentials } from "./credentials.js";
 import { containsConfiguredSecret, DataRuntimeError } from "./errors.js";
+import { withBoundedTransport } from "./http-transport.js";
+import { defaultHttpTiming, sharedRequestPacer, type DataHttpTiming } from "./http-timing.js";
 
 const REDIRECT_STATUSES = new Set([301, 302, 303, 307, 308]);
 const SAFE_RESPONSE_HEADERS = new Set(["etag", "last-modified", "request-id", "x-request-id"]);
@@ -29,6 +30,7 @@ export interface BoundedHttpClientOptions {
   environment: NodeJS.ProcessEnv;
   limits: DataExecutionLimits;
   fetchImpl?: typeof fetch | undefined;
+  timing?: DataHttpTiming | undefined;
 }
 
 export function createBoundedHttpClient(options: BoundedHttpClientOptions): DataHttpClient {
@@ -38,7 +40,7 @@ export function createBoundedHttpClient(options: BoundedHttpClientOptions): Data
   );
   const resolved = resolveDataCredentials(options.credentials, options.environment);
   const secrets = [...resolved.values.values()];
-  const fetchImpl = options.fetchImpl ?? globalThis.fetch;
+  const timing = options.timing ?? defaultHttpTiming;
   const cookieJars = new Map<string, Map<string, string>>();
 
   return {
@@ -106,82 +108,108 @@ export function createBoundedHttpClient(options: BoundedHttpClientOptions): Data
         query: sortedQuery(safeTarget),
         bodyDigest: body === undefined ? null : sha256Bytes(Buffer.from(body, "utf8")),
       });
-      const fetchResult = await performBoundedFetch({
-        endpoint,
-        initialTarget: target,
-        method: request.method,
-        body,
-        headers,
-        timeoutMs,
-        limits: options.limits,
-        fetchImpl,
-        cookieJar:
-          endpoint.sessionCookies === "same-origin-memory"
-            ? sessionCookieJar(cookieJars, endpoint.endpointId)
-            : null,
-      });
-      const { response, attempts } = fetchResult;
-      const announcedLength = parseContentLength(response.headers.get("content-length"));
-      if (announcedLength !== null && announcedLength > maxResponseBytes) {
-        await response.body?.cancel();
-        throw new DataRuntimeError(
-          "response-too-large",
-          "The provider response exceeds the declared byte limit.",
-          {
-            details: {
-              ...httpAttemptDetails(fetchResult, "response"),
-              maxResponseBytes,
+      return withBoundedTransport(timeoutMs, options.fetchImpl, async (fetchImpl) => {
+        const fetchResult = await performBoundedFetch({
+          endpoint,
+          initialTarget: target,
+          method: request.method,
+          body,
+          headers,
+          timeoutMs,
+          limits: options.limits,
+          fetchImpl,
+          timing,
+          cookieJar:
+            endpoint.sessionCookies === "same-origin-memory"
+              ? sessionCookieJar(cookieJars, endpoint.endpointId)
+              : null,
+        });
+        const { response, attempts } = fetchResult;
+        const announcedLength = parseContentLength(response.headers.get("content-length"));
+        if (announcedLength !== null && announcedLength > maxResponseBytes) {
+          await response.body?.cancel();
+          throw new DataRuntimeError(
+            "response-too-large",
+            "The provider response exceeds the declared byte limit.",
+            {
+              details: {
+                ...httpAttemptDetails(fetchResult, "response"),
+                maxResponseBytes,
+              },
             },
-          },
-        );
-      }
-      let bytes: Buffer;
-      try {
-        bytes = await readBoundedResponse(response, maxResponseBytes);
-      } catch (error) {
-        throw withHttpAttemptDetails(error, fetchResult, "response");
-      }
-      if (containsConfiguredSecret(bytes, secrets)) {
-        throw new DataRuntimeError(
-          "provider-response-invalid",
-          "The provider response reflected a configured credential and was blocked.",
-        );
-      }
-      if (!response.ok) {
-        throwHttpStatus(response, credential, options.limits.maxRetryDelayMs, bytes, fetchResult);
-      }
-      const contentType = normalizedContentType(response.headers.get("content-type"));
-      if (!contentTypeAllowed(contentType, endpoint.allowedContentTypes)) {
-        throw new DataRuntimeError(
-          "provider-response-invalid",
-          "The provider returned a content type outside the connector contract.",
-          {
-            details: {
-              contentType,
-              allowedContentTypes: endpoint.allowedContentTypes,
-              ...httpAttemptDetails(fetchResult, "response"),
+          );
+        }
+        let bytes: Buffer;
+        try {
+          bytes = await readBoundedResponse(response, maxResponseBytes);
+        } catch (error) {
+          throw withHttpAttemptDetails(error, fetchResult, "response");
+        }
+        if (containsConfiguredSecret(bytes, secrets)) {
+          throw new DataRuntimeError(
+            "provider-response-invalid",
+            "The provider response reflected a configured credential and was blocked.",
+          );
+        }
+        if (!response.ok) {
+          throwHttpStatus(response, credential, options.limits.maxRetryDelayMs, bytes, fetchResult);
+        }
+        const contentType = normalizedContentType(response.headers.get("content-type"));
+        // Some provider gateways return their access-denial page with HTTP 200.
+        // Do not promote that HTML into a successful source record, and never
+        // expose the gateway body/support identifier as evidence or diagnostics.
+        if (contentType === "text/html" || contentType === "application/xhtml+xml") {
+          const prefix = bytes.subarray(0, 16_384).toString("utf8");
+          if (
+            /<title\b[^>]*>\s*Request Rejected\s*<\/title>/iu.test(prefix) &&
+            /The requested URL was rejected\./iu.test(prefix)
+          ) {
+            throw new DataRuntimeError(
+              "provider-response-invalid",
+              "The provider gateway rejected the request despite returning HTTP success; no source data was retrieved.",
+              {
+                userActionRequired: true,
+                details: {
+                  reasonCode: "provider-request-rejected",
+                  httpStatus: response.status,
+                  ...httpAttemptDetails(fetchResult, "response"),
+                },
+              },
+            );
+          }
+        }
+        if (!contentTypeAllowed(contentType, endpoint.allowedContentTypes)) {
+          throw new DataRuntimeError(
+            "provider-response-invalid",
+            "The provider returned a content type outside the connector contract.",
+            {
+              details: {
+                contentType,
+                allowedContentTypes: endpoint.allowedContentTypes,
+                ...httpAttemptDetails(fetchResult, "response"),
+              },
             },
-          },
-        );
-      }
-      const responseDigest = sha256Bytes(bytes);
-      const observation: DataSourceObservation = {
-        observationId: sha256CanonicalJson({
+          );
+        }
+        const responseDigest = sha256Bytes(bytes);
+        const observation: DataSourceObservation = {
+          observationId: sha256CanonicalJson({
+            requestDigest,
+            responseDigest,
+            status: response.status,
+            attempts,
+          }),
+          sourceId: endpoint.endpointId,
+          endpointId: endpoint.endpointId,
           requestDigest,
           responseDigest,
+          responseBytes: bytes.byteLength,
           status: response.status,
+          contentType,
           attempts,
-        }),
-        sourceId: endpoint.endpointId,
-        endpointId: endpoint.endpointId,
-        requestDigest,
-        responseDigest,
-        responseBytes: bytes.byteLength,
-        status: response.status,
-        contentType,
-        attempts,
-      };
-      return createHttpResponse(bytes, safeResponseHeaders(response.headers), observation);
+        };
+        return createHttpResponse(bytes, safeResponseHeaders(response.headers), observation);
+      });
     },
   };
 }
@@ -273,14 +301,30 @@ async function performBoundedFetch(input: {
   timeoutMs: number;
   limits: DataExecutionLimits;
   fetchImpl: typeof fetch;
+  timing: DataHttpTiming;
   cookieJar: Map<string, string> | null;
-}): Promise<{ response: Response; attempts: number; redirects: number; retries: number }> {
+}): Promise<{
+  response: Response;
+  attempts: number;
+  redirects: number;
+  retries: number;
+  recommendedRetryDelayMs?: number;
+}> {
   let target = input.initialTarget;
   let redirects = 0;
   let retries = 0;
   let attempts = 0;
+  const intervalMs = input.endpoint.minRequestIntervalMs ?? 0;
+  const pacer = sharedRequestPacer(input.timing);
   while (true) {
     assertTargetAllowed(target, input.endpoint);
+    if (intervalMs > 0) {
+      await pacer.wait(
+        target.origin,
+        intervalMs,
+        Math.max(intervalMs, input.limits.maxRetryDelayMs),
+      );
+    }
     attempts += 1;
     let response: Response;
     try {
@@ -296,12 +340,15 @@ async function performBoundedFetch(input: {
         signal: AbortSignal.timeout(input.timeoutMs),
       });
     } catch (error) {
+      const transportCode = safeTransportCode(error);
+      const transportDetails = transportCode ? { transportCode } : {};
       if (isTimeoutError(error)) {
         throw new DataRuntimeError("timeout", "The provider request exceeded its timeout.", {
           retryable: true,
           details: {
             attempts,
-            phase: "request",
+            phase: transportCode === "UND_ERR_CONNECT_TIMEOUT" ? "connect" : "request",
+            ...transportDetails,
             redirects,
             retries,
             timeoutMs: input.timeoutMs,
@@ -310,7 +357,7 @@ async function performBoundedFetch(input: {
       }
       throw new DataRuntimeError("network-failed", "The provider network request failed.", {
         retryable: true,
-        details: { attempts, phase: "request", redirects, retries },
+        details: { attempts, phase: "request", redirects, retries, ...transportDetails },
       });
     }
 
@@ -347,15 +394,18 @@ async function performBoundedFetch(input: {
       continue;
     }
 
-    if (response.status === 429 && retries < input.limits.maxRetries) {
+    if (response.status === 429) {
       const retryAfterMs = parseRetryAfterMs(response.headers.get("retry-after"));
-      const effectiveDelay = retryAfterMs ?? 0;
-      if (effectiveDelay <= input.limits.maxRetryDelayMs) {
+      const fallbackDelay = Math.max(1_000, intervalMs) * 2 ** retries;
+      const effectiveDelay = Math.max(intervalMs, retryAfterMs ?? fallbackDelay);
+      if (intervalMs > 0) pacer.defer(target.origin, effectiveDelay);
+      if (retries < input.limits.maxRetries && effectiveDelay <= input.limits.maxRetryDelayMs) {
         await response.body?.cancel();
         retries += 1;
-        if (effectiveDelay > 0) await delay(effectiveDelay);
+        if (effectiveDelay > 0) await input.timing.sleep(effectiveDelay);
         continue;
       }
+      return { response, attempts, redirects, retries, recommendedRetryDelayMs: effectiveDelay };
     }
     if (input.cookieJar) storeResponseCookies(input.cookieJar, response.headers);
     return { response, attempts, redirects, retries };
@@ -394,7 +444,12 @@ function throwHttpStatus(
   credential: DataCredentialDeclaration | undefined,
   maxRetryDelayMs: number,
   bytes: Buffer,
-  attempts: { attempts: number; redirects: number; retries: number },
+  attempts: {
+    attempts: number;
+    redirects: number;
+    retries: number;
+    recommendedRetryDelayMs?: number;
+  },
 ): never {
   const providerReason = safeProviderErrorReason(bytes);
   if (response.status === 401 || response.status === 403) {
@@ -418,11 +473,14 @@ function throwHttpStatus(
     const retryAfterMs = parseRetryAfterMs(response.headers.get("retry-after"));
     throw new DataRuntimeError("rate-limited", "The provider rate limit blocked the operation.", {
       retryable: true,
-      userActionRequired: (retryAfterMs ?? 0) > maxRetryDelayMs,
+      userActionRequired: (attempts.recommendedRetryDelayMs ?? retryAfterMs ?? 0) > maxRetryDelayMs,
       details: {
         status: response.status,
         ...httpAttemptDetails(attempts, "response"),
         ...(retryAfterMs === null ? {} : { retryAfterMs }),
+        ...(attempts.recommendedRetryDelayMs === undefined
+          ? {}
+          : { recommendedRetryDelayMs: attempts.recommendedRetryDelayMs }),
         ...(providerReason ? { providerReason } : {}),
       },
     });
@@ -493,7 +551,22 @@ function withHttpAttemptDetails(
   value: { attempts: number; redirects: number; retries: number },
   phase: "request" | "redirect" | "response",
 ): unknown {
-  if (!(error instanceof DataRuntimeError)) return error;
+  if (!(error instanceof DataRuntimeError)) {
+    const transportCode = safeTransportCode(error);
+    return new DataRuntimeError(
+      isTimeoutError(error) ? "timeout" : "network-failed",
+      isTimeoutError(error)
+        ? "The provider response exceeded its timeout."
+        : "The provider response stream failed.",
+      {
+        retryable: true,
+        details: {
+          ...httpAttemptDetails(value, phase),
+          ...(transportCode ? { transportCode } : {}),
+        },
+      },
+    );
+  }
   return new DataRuntimeError(error.code, error.message, {
     ...error.options,
     details: {
@@ -631,8 +704,36 @@ function containsSensitiveField(value: JsonValue): boolean {
 
 function isTimeoutError(error: unknown): boolean {
   return (
-    error instanceof DOMException && (error.name === "TimeoutError" || error.name === "AbortError")
+    (error instanceof DOMException &&
+      (error.name === "TimeoutError" || error.name === "AbortError")) ||
+    [
+      "UND_ERR_CONNECT_TIMEOUT",
+      "UND_ERR_HEADERS_TIMEOUT",
+      "UND_ERR_BODY_TIMEOUT",
+      "ETIMEDOUT",
+    ].includes(safeTransportCode(error) ?? "")
   );
+}
+
+function safeTransportCode(error: unknown): string | null {
+  const allowed = new Set([
+    "UND_ERR_CONNECT_TIMEOUT",
+    "UND_ERR_HEADERS_TIMEOUT",
+    "UND_ERR_BODY_TIMEOUT",
+    "UND_ERR_SOCKET",
+    "ETIMEDOUT",
+    "ECONNRESET",
+    "ECONNREFUSED",
+    "ENOTFOUND",
+    "EAI_AGAIN",
+  ]);
+  let current = error;
+  for (let depth = 0; depth < 4 && current instanceof Error; depth += 1) {
+    const code: unknown = Reflect.get(current, "code");
+    if (typeof code === "string" && allowed.has(code)) return code;
+    current = current.cause;
+  }
+  return null;
 }
 
 function codePointOrder(left: string, right: string): number {

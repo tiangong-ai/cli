@@ -49,6 +49,21 @@ const MATCHING_ITEM = {
 };
 
 describe("USBR RISE connector", () => {
+  it("identifies a 200 HTML gateway block without exposing its body", async () => {
+    const result = await executeDataRun(request("discover-items", { pageSize: 1 }), {
+      registry: createDataRegistry([usbrRiseConnector]),
+      environment: {},
+      fetchImpl: (async () =>
+        new Response(
+          "<html><head><title>Request Rejected</title></head><body>The requested URL was rejected. Your support ID is: synthetic-support-id</body></html>",
+          { headers: { "content-type": "text/html; charset=iso-8859-1" } },
+        )) as typeof fetch,
+    });
+    assert.equal(result.status, "blocked");
+    assert.equal(result.errors[0]?.details?.reasonCode, "provider-request-rejected");
+    assert.doesNotMatch(JSON.stringify(result), /synthetic-support-id/);
+  });
+
   it("documents every operation input field for agent request construction", () => {
     for (const schema of [
       USBR_RISE_DISCOVER_ITEMS_INPUT_SCHEMA,

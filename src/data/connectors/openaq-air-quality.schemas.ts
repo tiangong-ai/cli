@@ -488,8 +488,8 @@ const MEASUREMENT_RECORD_SCHEMA = {
             expectedInterval: { type: "string", minLength: 1 },
             observedCount: { type: "integer", minimum: 0 },
             observedInterval: { type: "string", minLength: 1 },
-            percentComplete: { type: "number", minimum: 0, maximum: 100 },
-            percentCoverage: { type: "number", minimum: 0, maximum: 100 },
+            percentComplete: { type: "number" },
+            percentCoverage: { type: "number" },
             datetimeFromUtc: {
               anyOf: [{ type: "string", pattern: RFC3339_PATTERN }, { type: "null" }],
             },

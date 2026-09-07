@@ -15,6 +15,7 @@ import {
 
 const MAX_HOURS = 168;
 const AIRNOW_FETCH_CONCURRENCY = 3;
+const AIRNOW_S3_BUCKET_PREFIX = "/files.airnowtech.org";
 const OFFICIAL_HEADERS = [
   "AQSID",
   "SiteName",
@@ -138,9 +139,9 @@ export const airNowHourlyObservationsConnector: DataConnectorDefinition = {
   sourceCategory: "environmental-observations",
   endpoints: [
     {
-      endpointId: "airnow-files",
-      baseUrl: "https://files.airnowtech.org",
-      pathPrefixes: ["/airnow/"],
+      endpointId: "airnow-files-s3",
+      baseUrl: "https://s3.us-west-1.amazonaws.com",
+      pathPrefixes: [`${AIRNOW_S3_BUCKET_PREFIX}/airnow/`],
       allowedMethods: ["GET"],
       allowedContentTypes: ["application/octet-stream", "text/csv", "text/plain"],
     },
@@ -220,6 +221,10 @@ export const airNowHourlyObservationsConnector: DataConnectorDefinition = {
         url: "https://docs.airnowapi.org/docs/HourlyAQObsFactSheet.pdf",
       },
       {
+        title: "AirNow official S3 file access guidance",
+        url: "https://forum.airnowtech.org/t/automatically-grabbing-files-on-files-airnowtech-org/204",
+      },
+      {
         title: "AirNow FAQ and Data Use Guidelines",
         url: "https://docs.airnowapi.org/faq",
       },
@@ -256,9 +261,9 @@ async function executeAirNowHourly(
     const sourceFile = sourceFileForHour(hourUtc);
     try {
       const response = await context.http.request({
-        endpointId: "airnow-files",
+        endpointId: "airnow-files-s3",
         method: "GET",
-        path: sourceFile,
+        path: `${AIRNOW_S3_BUCKET_PREFIX}${sourceFile}`,
       });
       return { hourUtc, sourceFile, response };
     } catch (error) {

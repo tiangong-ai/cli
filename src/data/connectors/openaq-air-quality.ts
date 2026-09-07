@@ -180,7 +180,7 @@ type StopReason = "completed" | "no-results" | "max-pages" | "max-records" | "pa
 export const openAqAirQualityConnector: DataConnectorDefinition = {
   schemaVersion: DATA_MANIFEST_SCHEMA_VERSION,
   capabilityId: "openaq.air-quality",
-  capabilityVersion: "1.0.0",
+  capabilityVersion: "1.0.1",
   minimumCliVersion: "0.0.55",
   provider: { providerId: "openaq", name: "OpenAQ" },
   sourceCategory: "air-quality-observations",
@@ -304,7 +304,7 @@ export const openAqAirQualityConnector: DataConnectorDefinition = {
     },
     {
       operationId: "fetch-sensor-measurements",
-      operationVersion: "1.0.0",
+      operationVersion: "1.0.1",
       summary: "Fetch bounded raw, hourly, or daily measurements for one OpenAQ sensor.",
       description:
         "Retrieves at most 366 days for one explicit sensor and granularity, validates provider pagination, and normalizes parameter, period, coordinate, summary, and coverage fields.",
@@ -344,7 +344,7 @@ async function executeSensorMeasurements(
   context: DataOperationExecutionContext,
 ): Promise<DataOperationExecution> {
   const query = normalizeMeasurementQuery(context.input as MeasurementInput);
-  return executePaged<MeasurementRecord, NormalizedMeasurementQuery>({
+  const execution = await executePaged<MeasurementRecord, NormalizedMeasurementQuery>({
     context,
     query,
     path: measurementPath(query),
@@ -371,6 +371,50 @@ async function executeSensorMeasurements(
       "Measurements are provided as-is and do not constitute an AQI, health assessment, or regulatory determination.",
     ],
   });
+  const records = (execution.data as { records: MeasurementRecord[] }).records;
+  const invalidPaths: string[] = [];
+  let affectedRecordCount = 0;
+  for (const [index, record] of records.entries()) {
+    if (!record.coverage) continue;
+    const invalidFields = (["percentComplete", "percentCoverage"] as const).filter(
+      (field) => record.coverage![field] < 0 || record.coverage![field] > 100,
+    );
+    if (invalidFields.length === 0) continue;
+    affectedRecordCount += 1;
+    for (const field of invalidFields) {
+      if (invalidPaths.length < 20) invalidPaths.push(`records[${index}].coverage.${field}`);
+    }
+  }
+  if (affectedRecordCount === 0) return execution;
+  return {
+    ...execution,
+    status: "partial",
+    data: { ...(execution.data as Record<string, unknown>), stopReason: "partial" },
+    summary: {
+      ...execution.summary,
+      completeness: "partial",
+      missing: [...(execution.summary.missing ?? []), { kind: "field", identifiers: invalidPaths }],
+    },
+    warnings: [
+      ...execution.warnings,
+      "Provider coverage percentages outside 0–100 were preserved, not clamped. Measurements were retrieved but these coverage fields do not establish valid quality or temporal completeness.",
+    ],
+    errors: [
+      ...execution.errors,
+      {
+        code: "partial-result",
+        message:
+          "OpenAQ supplied anomalous coverage percentages; measurement rows and original coverage values were retained for review.",
+        retryable: false,
+        userActionRequired: false,
+        details: {
+          issueCode: "coverage-percentage-out-of-range",
+          affectedRecordCount,
+          invalidPaths,
+        },
+      },
+    ],
+  };
 }
 
 async function executePaged<RecordType, QueryType>(options: {
@@ -808,8 +852,8 @@ function normalizeNullableCoverage(value: unknown): MeasurementRecord["coverage"
     expectedInterval: requireString(coverage.expectedInterval, "coverage.expectedInterval"),
     observedCount: requireNonNegativeInteger(coverage.observedCount, "coverage.observedCount"),
     observedInterval: requireString(coverage.observedInterval, "coverage.observedInterval"),
-    percentComplete: requirePercentage(coverage.percentComplete, "coverage.percentComplete"),
-    percentCoverage: requirePercentage(coverage.percentCoverage, "coverage.percentCoverage"),
+    percentComplete: requireFiniteNumber(coverage.percentComplete, "coverage.percentComplete"),
+    percentCoverage: requireFiniteNumber(coverage.percentCoverage, "coverage.percentCoverage"),
     datetimeFromUtc: nullableDateTimeObject(coverage.datetimeFrom, "coverage.datetimeFrom"),
     datetimeToUtc: nullableDateTimeObject(coverage.datetimeTo, "coverage.datetimeTo"),
   };
@@ -984,14 +1028,6 @@ function requireNonNegativeInteger(value: unknown, field: string): number {
 function requireBoolean(value: unknown, field: string): boolean {
   if (typeof value !== "boolean") throw providerInvalid(`${field} must be a boolean.`);
   return value;
-}
-
-function requirePercentage(value: unknown, field: string): number {
-  const percentage = requireFiniteNumber(value, field);
-  if (percentage < 0 || percentage > 100) {
-    throw providerInvalid(`${field} must be between 0 and 100.`);
-  }
-  return percentage;
 }
 
 function nullableDate(value: unknown, field: string): string | null {

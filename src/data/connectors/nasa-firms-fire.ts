@@ -308,6 +308,12 @@ async function executeNasaFirmsFire(
         issues: chunkIssues.slice(0, MAX_VALIDATION_ISSUES),
       });
       if (!parsed.validHeader) missingChunks.push(range);
+      if (
+        records.length >= context.limits.maxRecords &&
+        plan.chunkIndex + 1 < input.chunks.length
+      ) {
+        truncated = true;
+      }
       if (truncated || records.length >= context.limits.maxRecords) break;
     } catch (error) {
       if (
