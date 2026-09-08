@@ -111,7 +111,8 @@
           "uniqueItems": true
         },
         "allowedContentTypes": { "$ref": "#/$defs/stringArray" },
-        "sessionCookies": { "enum": ["same-origin-memory"] }
+        "sessionCookies": { "enum": ["same-origin-memory"] },
+        "minRequestIntervalMs": { "type": "integer", "minimum": 1, "maximum": 120000 }
       }
     },
     "credential": {

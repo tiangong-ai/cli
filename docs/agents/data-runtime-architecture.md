@@ -16,8 +16,8 @@ checkPaths:
   - src/data/**
   - src/research/workspace/data-evidence-adapter.ts
   - test/**
-lastReviewedAt: 2026-09-05
-lastReviewedCommit: 16b436927ca3967673b46be41135e415f87704d9
+lastReviewedAt: 2026-09-08
+lastReviewedCommit: 79b6b941060e525ebc0b9c5e1f6968e1806c1901
 ---
 
 # 原子数据运行时目标架构
@@ -37,7 +37,7 @@ HTTP、认证、分页、重试、缓存或回执实现。Auto Research 复用�
 
 ## 公共命令契约
 
-以下基础命令已经实现并由闭合 Schema 和合同测试冻结；内置 catalog 已注册十九个
+以下基础命令已经实现并由闭合 Schema 和合同测试冻结；内置 catalog 已注册二十个
 独立可发现 capability：
 
 ```text
@@ -149,8 +149,9 @@ doctor/run 必须在网络前稳定阻断。两个公共对象、canonical JSON 
 
 ## 内置 Connectors
 
-`airnow.hourly-observations/fetch-hourly` 从
-`https://files.airnowtech.org/airnow/` 按 UTC 小时规划官方 `HourlyAQObs` 文件，校验
+`airnow.hourly-observations/fetch-hourly` 从官方 `files.airnowtech.org` S3 bucket 的
+`https://s3.us-west-1.amazonaws.com/files.airnowtech.org/airnow/` 区域化对象路径按 UTC
+小时规划 `HourlyAQObs` 文件，校验
 CSV header/值并按 bbox、时间和 pollutant 过滤。每条记录和文件摘要保留 source-file
 lineage；缺文件、坏文件以 `partial` 和明确 missing file 返回。Discovery Metadata 固化
 AirNow 数据为 preliminary、subject to change，并禁止把它当作 regulatory-grade AQS
@@ -158,7 +159,8 @@ AirNow 数据为 preliminary、subject to change，并禁止把它当作 regulat
 仍按 UTC 小时稳定排序；失败请求保留安全的 attempt/retry/redirect/phase/status 诊断。
 字段依据官方
 [`HourlyAQObs` 格式说明](https://docs.airnowapi.org/docs/HourlyAQObsFactSheet.pdf)，使用
-限制依据 [AirNow FAQ/Data Use Guidelines](https://docs.airnowapi.org/faq)。
+限制依据 [AirNow FAQ/Data Use Guidelines](https://docs.airnowapi.org/faq)。直接使用区域化
+S3 路径保留同一官方对象与 canonical source-file lineage，并避免 CloudFront 边缘连接故障。
 
 `federal-register.documents/search` 只调用
 `https://www.federalregister.gov/api/v1/documents.json`，要求 publication date bound
@@ -170,7 +172,26 @@ document search metadata，不访问结果中的正文、XML 或 PDF 链接，�
 法律使用限制依据其
 [About This Site](https://www.federalregister.gov/reader-aids/government-policy-and-ofr-procedures/about-this-site)。
 
-GDELT 保留四个独立发现与 binding 单元。`gdelt.doc-search/search` 使用 DOC 2.0 JSON
+GDELT DOC 的 endpoint 声明 `minRequestIntervalMs=5000`，由公共 HTTP 层对同进程、同
+origin 的调用、拆分 query、redirect 和 retry 统一限速；不同 CLI 进程共享出口时仍需
+调用方串行协调，不承诺跨进程或跨机器限流。429 缺少有效 `Retry-After` 时按
+`max(1000, minRequestIntervalMs) * 2^retries` 退避；有效 header 不低于 endpoint 间隔，
+超过调用方 `maxRetryDelayMs` 则停止重试。最终 429 返回 `rate-limited`、实际 attempt
+计数和 `recommendedRetryDelayMs`，不能作为空结果或成功验收。
+
+原生 HTTP transport 使用 Node 24 兼容的独立 Undici 7 dispatcher，使连接、headers 和
+body 超时跟随已声明的请求预算，避免默认 10 秒连接超时提前击穿 45 秒 DOC 预算。
+逐 attempt 的 AbortSignal 仍覆盖请求与 body；dispatcher 在同一 operation 的分页和
+分块间复用，operation 完成或失败后销毁，避免逐页重新建立 TLS 连接；
+不修改全局 dispatcher。嵌套的连接超时归为 `timeout/phase=connect`，仅保留白名单
+transport code，不输出 cause message、主机、URL 或凭证。
+
+当前 `gdelt.doc-search` 以 suspended availability 保留在 catalog：真实文章与时间线
+模式尚不能在声明的 pacing/retry 预算内稳定通过 provider live gate。doctor/run 在网络前
+阻断，Research 不投影；恢复必须同时通过代表性文章和时间线正向验收，而非只观察到一次
+间歇性 200。
+
+GDELT 保留五个独立发现与 binding 单元。`gdelt.doc-search/search` 使用 DOC 2.0 JSON
 endpoint，只接受一个由 CLI 限制为最长 366 天的 rolling 或 absolute window，并封闭为 article list、
 volume/raw volume、tone、language 和 source-country timeline 模式；输出只含链接元数据或
 aggregate points，不下载 article body/image。`gdelt.events/fetch`、`gdelt.gkg/fetch` 与
@@ -186,6 +207,16 @@ CLI 不以 Agent context 字节预算截断已验证 rows；Research 把完整�
 生成受限表格视图供 Agent 使用。接口与 cadence 依据 [GDELT DOC 2.0](https://blog.gdeltproject.org/gdelt-doc-2-0-api-debuts/)、
 [GDELT 2.0 introduction](https://blog.gdeltproject.org/gdelt-2-0-our-global-world-in-realtime/)
 及官方 codebook；fixture 仅为按公开格式重建的合成字节。
+
+`gdelt.web-ngrams/search` 是迁移后新增的独立原子能力，依据官方
+[Web NGrams 替代检索建议](https://blog.gdeltproject.org/using-the-new-web-ngrams-dataset-to-find-relevant-coverage/)。
+它仅接受一个明确 UTC 分钟的 NGrams/TOC GZIP 文件对与 1–4 词 literal phrases，
+不自动把 DOC query 转成另一种查询、不自动执行三表，也不提供 DOC timeline。
+两文件分别限 20 MiB 压缩与 64 MiB 解压；`maxPages<2` 在请求前拒绝。逐行验证后
+以 `(fileTimestamp, documentId)` 关联；重复冲突 ID 不任意择一。全文件扫描后返回
+匹配数、返回数与遗漏数，记录上限和坏行必须标记 partial；缺失/空/坏压缩文件为 blocked。
+TOC 的 `imageReference` 原样保留为未验证文本，不能因非核心图片引用格式错误丢弃文章。
+complete 只表示该文件对，不保证分钟连续、全天或全球语料覆盖；跨分钟枚举和缺口解释归调用方。
 
 `bluesky.public-posts/fetch-cascades` 只使用公开 AppView，保留 search、author feed、
 custom feed 与 list feed 四种明确种子来源；可选 UTC 窗口按 post record `createdAt` 过滤，
@@ -203,7 +234,14 @@ counter 都是可变快照，不能代表总体意见、验证身份、证明事
 最多 50 个显式 video IDs，以 `commentThreads.list` 获取 top-level comments，并通过显式
 `top-level-only` 或 `all-visible` 策略决定是否使用 `comments.list` 分页，绝不把 embedded reply
 sample 当作完整回复。输出分别报告 thread/reply request 消耗、剩余请求预算、已发现回复线程、
-完整展开线程和已知未展开线程。凭证仅经
+完整展开线程和已知未展开线程。
+`fetch-comments` 1.0.2 对按发布时间筛选的窗口增加保守剪枝：只有顶层评论的原始
+`publishedAt` 已到达或超过 exclusive end 时，才不请求该线程的回复。更早的父评论、
+缺失发布时间或按更新时间筛选时仍保留回复获取，避免遗漏旧评论下的新回复。
+`excludedByPublishedWindowThreadIds` 单独披露已排除线程，不伪造为完整展开，也不混入
+仍需要获取的 `knownUnexpandedThreadIds`。依据是官方
+[Comments 资源](https://developers.google.com/youtube/v3/docs/comments) 对原始发布时间和
+“对已有评论创建回复”的定义；不是依据显示顺序推断日期覆盖。凭证仅经
 `X-Goog-Api-Key` header 注入，绝不进入 URL。两个 operation 共用全局 request/record limits，
 评论还具有 per-video thread page 与 per-thread reply page cap；失败视频保留已经验证的其他记录。
 Discovery Metadata 明确 quota、search ranking、visibility、moderation、统计和用户文本均为可变
@@ -291,6 +329,13 @@ aggregate 不可无方法混用，也不提供 AQI、健康或监管判断。接
 与 [rate limits](https://docs.openaq.org/using-the-api/rate-limits)，使用边界依据
 [OpenAQ terms](https://docs.openaq.org/about/terms)。
 
+OpenAQ `fetch-sensor-measurements` 1.0.1 保留 provider 原始有限 coverage percentages。
+官方 [Measurements](https://docs.openaq.org/resources/measurements) 和 response Schema
+只把这些字段定义为数值；实际 source 可返回超出 0–100 的比例，例如小时记录带
+`percentCoverage=2400`。CLI 不 clamp，也不因此丢弃整页测量，而是返回 partial、保留
+全部记录，并以 `coverage-percentage-out-of-range` 披露受影响记录数和最多 20 个字段路径。
+这说明质量元数据待核查，不表示测量未下载，也不证明异常百分比有可靠业务含义。
+
 Regulations.gov 的两个 capability 保留在 built-in catalog，并以
 `availability.status=suspended` 发布稳定原因与恢复标准；`describe` 可用于诊断，`doctor`
 与 `run` 在凭证或网络前返回 blocked。Research 的动态投影只包含 `available` capability，
@@ -318,10 +363,12 @@ operation 要求独立 artifact directory，按 file/total-byte/runtime limits �
 任意 URL、redirect 和旧脚本假设的独立 attachment endpoint。文件按不可信 public-submission
 bytes 处理，不做 malware scan、打开、OCR、text extraction、stance、法律或证据判断。
 
-十九个已注册 capability 的默认 static doctor 均完全离线；其中十七个可用，两个
-Regulations.gov capability 稳定报告 suspended/blocked。四个 GDELT capability 共享受限的
-文件流机制，但不互相调用 capability 业务入口；其余 connector 也互不导入业务函数。可用
-capability 中十四个无凭证；NASA FIRMS 从 `NASA_FIRMS_MAP_KEY`、OpenAQ 从 `OPENAQ_API_KEY`、
+二十个已注册 capability 的默认 static doctor 均完全离线；其中十五个允许执行，五个
+provider live gate 失败的 capability 稳定报告 suspended/blocked：GDELT DOC、两个
+Regulations.gov、USBR RISE 与 USBR project records。这里的允许执行不是生产可用性保证。
+三个 GDELT table capability 共享受限的 ZIP 文件流机制；DOC 与 NGrams 则独立实现，
+均不互相调用 capability 业务入口；其余 connector 也互不导入业务函数。允许执行的
+capability 中十二个无凭证；NASA FIRMS 从 `NASA_FIRMS_MAP_KEY`、OpenAQ 从 `OPENAQ_API_KEY`、
 YouTube 从 `YOUTUBE_API_KEY` 解析逻辑凭证，
 缺失时离线报告 blocked。测试 fixture 仅按官方格式和旧 Skill 外部行为重建，不包含复制
 的 live provider 响应或真实凭证。
@@ -352,6 +399,17 @@ YouTube 从 `YOUTUBE_API_KEY` 解析逻辑凭证，
 
 `partial` 必须说明缺失了哪些页、文件、范围或字段，不能把不完整结果伪装为成功。
 `blocked` 不携带可误用为完整证据的业务结果。
+
+GDELT 文件中坏行被隔离时，即使文件可解压且其余行可用，也必须返回 `partial` 并披露
+受影响文件，不能只给 warning 后继续声称 complete。ToneChart 同时保留数字/字符串
+bin（包括 0）与 provider 的 `toparts` 代表文章；坏 bin 保留其余有效 bin 并标记 partial，
+不能被静默过滤成 no-results。FIRMS 在完整 chunk 恰好耗尽 record budget 时，也必须把
+未访问的后续 chunk 反映为 truncated；最后一个完整 chunk 恰好到限则不虚报截断。
+
+HTTP 成功码不等于取得业务数据。公共 HTTP 层识别已观察到的 HTML `Request Rejected`
+gateway 响应，返回 `provider-response-invalid` 和 `reasonCode=provider-request-rejected`，
+不输出原始拦截页、support ID 或伪造来源记录。该识别不是通用网页真实性证明；解除
+provider 的访问拒绝仍需独立的真实正向复测。
 
 声明 `artifactOutput` 的 operation 仍以 `DataRunResult` 返回机器结果，但二进制内容只写入
 调用方显式选择的目录。业务输出只能引用安全单段相对文件名、SHA-256 和字节数；manifest
@@ -432,9 +490,9 @@ lock、预算、候选/来源准入、永久证据、journal 和 review 规则�
 链，不改变 connector 语义。
 
 当前实现从内置 registry 动态投影每个 `available` operation 为
-`data:<capability-id>:<operation-id>` Research capability；catalog 的十九个 capability/
-二十三个 operation 中，两个 suspended capability 的三个 operation 不进入 Research，
-因此当前投影为十七个 capability/二十个 operation。native discover packet 携带这份摘要 catalog、独立
+`data:<capability-id>:<operation-id>` Research capability；catalog 的二十个 capability/
+二十四个 operation 中，五个 suspended capability 的七个 operation 不进入 Research，
+因此当前投影为十五个 capability/十七个 operation。native discover packet 携带这份摘要 catalog、独立
 `data describe` 命令、`research project evidence data run` 命令及只读的
 `research project evidence data read` 续读命令。run 命令在同一进程调用
 `executeDataRun`。这些 packet 参数以 `workspace-cli-relative-argv` 发布，宿主必须交给同一

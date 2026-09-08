@@ -18,8 +18,8 @@ checkPaths:
   - scripts/**
   - test/**
   - .github/workflows/**
-lastReviewedAt: 2026-09-05
-lastReviewedCommit: 16b436927ca80ae58b2fefc5c47bdf21f850827d
+lastReviewedAt: 2026-09-08
+lastReviewedCommit: c9dae2c
 ---
 
 # Repo Validation
@@ -64,7 +64,8 @@ clean-container CI use privacy-safe fixtures and synthetic connectors only.
 
 `test/data-airnow-connector.test.ts` reconstructs the official HourlyAQObs CSV
 shape and proves multi-file planning, filters, header/value handling, partial
-file coverage, source lineage, and preliminary-use restrictions.
+file coverage, source lineage, preliminary-use restrictions, and the regional
+path-style URL of the official `files.airnowtech.org` S3 bucket.
 `test/data-federal-register-connector.test.ts` uses metadata-only JSON fixtures
 to prove stable filter encoding, pagination, empty results, record/page caps,
 provider metadata validation, and preservation of earlier pages after a later
@@ -114,8 +115,13 @@ stable JSON:API pagination, curated detail and attachment metadata, omission of
 named personal-profile fields, pre-network request rejection, record caps,
 per-ID partial isolation, and the non-posting, non-download, and
 non-representative-public-opinion discovery boundaries. The definitions are not
-part of the built-in registry while their production live gates are suspended;
-`test/data-builtins.test.ts` enforces that absence.
+executable while their production live gates are suspended;
+`test/data-builtins.test.ts` enforces discoverable suspension and pre-network blocking.
+
+The GDELT DOC and two USBR connector suites likewise retain fixture-level
+contract coverage while their provider live gates are suspended.
+`test/data-builtins.test.ts` enumerates all five suspended capabilities, and the
+Research adapter test proves only `available` operations enter native discovery.
 
 Target the foundation during iteration with
 `node --import tsx --test test/data-*.test.ts`. The ordinary `npm test` and
@@ -126,6 +132,36 @@ with the runtime-loaded documents.
 
 The exact work-package sequence and completion criteria are authoritative in
 `docs/agents/data-runtime-implementation-plan.md`.
+
+## Provider Live Qualification Is A Separate Gate
+
+Fixture, schema, install, and clean-container success do not establish provider
+availability. A release qualification records exact inputs, runtime versions,
+HTTP outcomes/attempts, elapsed time, receipted response bytes, output bytes,
+record/page/file counts, and limits for each in-scope operation. A non-empty
+positive case must also pass business-field and requested-range checks. An
+empty response, HTTP 200 gateway rejection, partial file set, or truncated
+search is never labelled an exhaustive positive result.
+
+Keep successful acquisition, bounded sampling, expected empty/all-null
+responses, and external blocking distinct. Record unresolved cases explicitly;
+do not silently remove them from the denominator. Effective bytes per wall
+second includes connection, retry and normalization time; it is neither wire
+bandwidth nor a measured provider capacity. Do not provoke 429s with a load
+test or infer provider quotas from connector safety limits.
+
+During iteration run affected regression tests, not every live provider.
+Before delivery run the isolated offline gate once for the final source and
+recheck the affected positive/negative live cases. Keep credentials and raw
+responses in caller-selected private evidence storage, outside Git. Static
+Skill requirement checks and example-schema checks are additional evidence,
+not a substitute for real data acquisition or installed-package verification.
+
+Reliability regressions explicitly cover HTTP 200 `Request Rejected` gateway
+pages (including an ordinary-page negative control), GDELT malformed rows and
+numeric ToneChart bins/`toparts`, FIRMS exact record-budget chunk boundaries,
+and conservative YouTube published-window reply pruning. All mock bodies are
+synthetic; no live response or credential is committed.
 
 ## Hosted CI Matrix
 
@@ -358,6 +394,47 @@ injection, secret-free evidence persistence, and the Research credential-source
 boundary. A host provider variable without the corresponding workspace
 credential must return `credential-missing` before connector execution or any
 network request.
+
+## GDELT DOC Live Acceptance
+
+`test/data-gdelt-ngrams.test.ts` separately qualifies the file-based search
+contract with synthetic paired GZIP files: file-scoped ID zero, any/all phrase
+selection, language filtering, literal punctuation and word boundaries, invalid
+dates/budgets, exact and exceeded record caps, bad/ambiguous/orphan rows, corrupt
+CRC/UTF-8 and decompression bounds. Non-core malformed image-reference text must
+remain attached to its valid article, not cause article loss. Offline tests do
+not establish continuous minute-file availability. A live positive gate must
+verify actual matched IDs and TOC URLs, not merely exit zero; a missing pair
+must remain blocked. This gate is independent of DOC timelines and three-table
+joins, and measures compressed bytes per total run time, not pure link speed.
+
+The offline HTTP/GDELT suites prove normalization, a Node-24-compatible real
+loopback transport, dispatcher cleanup, nested connect-timeout classification,
+provider-origin pacing across clients, missing-header 429 backoff, retry ceilings,
+and exhausted-rate-limit semantics. They do **not** prove provider availability.
+
+Run the opt-in positive-data gate with the same supported Node 24 used by the CLI:
+
+```bash
+npm run build
+node scripts/test-gdelt-live.mjs --output-dir /absolute/path/to/new-evidence-directory
+```
+
+Append `--case articles` or `--case timeline` to retest only the outstanding mode;
+keep the earlier evidence directory unchanged.
+
+The directory must not already exist. The harness runs the real CLI binary with
+`process.execPath`, saves exact inputs, normalized outputs, stderr, per-attempt
+HTTP phase/status timing and a summary. Articles require valid nonempty title/URL
+records; the timeline requires positive numeric points. A zero exit status alone,
+empty data, 429, timeout, or a successfully executed failure test never counts as
+positive E2E. After the first failed case the harness stops additional live traffic.
+The summary distinguishes decoded provider bytes per complete CLI wall second
+(including connection, pacing, retries) from wire throughput and provider capacity;
+failed acquisition reports throughput as unknown, not zero.
+
+Live evidence stays outside fixtures and source control. No real key is required
+for DOC. This gate does not run Auto Research, GDELT raw file feeds, or Regulations.gov.
 
 ## Release Flow
 

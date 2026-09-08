@@ -628,6 +628,13 @@ export const YOUTUBE_COMMENTS_OUTPUT_SCHEMA = {
           uniqueItems: true,
           items: { type: "string", minLength: 1 },
         },
+        excludedByPublishedWindowThreadIds: {
+          type: "array",
+          uniqueItems: true,
+          items: { type: "string", minLength: 1 },
+          description:
+            "Observed threads whose parents were originally published at or after the exclusive end of a published-time query; their replies cannot fall in the requested window and were not fetched or counted as fully expanded.",
+        },
       },
     },
     stopReason: { enum: ["completed", "no-results", "max-pages", "max-records", "partial"] },

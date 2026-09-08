@@ -292,6 +292,42 @@ describe("NASA FIRMS active-fire connector", () => {
     assert.equal((result.data as { stopReason: string }).stopReason, "max-records");
   });
 
+  it("discloses unvisited chunks when a complete chunk exactly fills the record budget", async () => {
+    let fetchCount = 0;
+    const result = await executeDataRun(
+      { ...request({ checkAvailability: false }), limits: { maxRecords: 3 } },
+      {
+        registry: createDataRegistry([nasaFirmsFireConnector]),
+        environment: { NASA_FIRMS_MAP_KEY: MAP_KEY },
+        fetchImpl: (async () => {
+          fetchCount += 1;
+          return csvResponse(await fixture("chunk-1.csv"));
+        }) as typeof fetch,
+      },
+    );
+    assert.equal(result.summary.recordCount, 3);
+    assert.equal(result.summary.truncated, true);
+    assert.equal((result.data as { stopReason: string }).stopReason, "max-records");
+    assert.equal(fetchCount, 1);
+  });
+
+  it("does not claim truncation when the final complete chunk exactly fills the record budget", async () => {
+    const result = await executeDataRun(
+      {
+        ...request({ endDate: "2026-03-05", checkAvailability: false }),
+        limits: { maxRecords: 3 },
+      },
+      {
+        registry: createDataRegistry([nasaFirmsFireConnector]),
+        environment: { NASA_FIRMS_MAP_KEY: MAP_KEY },
+        fetchImpl: (async () => csvResponse(await fixture("chunk-1.csv"))) as typeof fetch,
+      },
+    );
+    assert.equal(result.summary.recordCount, 3);
+    assert.equal(result.summary.truncated, false);
+    assert.equal((result.data as { stopReason: string }).stopReason, "completed");
+  });
+
   it("publishes hotspot, NRT/SP, and non-perimeter discovery boundaries", () => {
     const discovery = createDataRegistry([nasaFirmsFireConnector]).discovery(
       "nasa-firms.active-fire",

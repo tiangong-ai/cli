@@ -48,6 +48,41 @@ function projectHtml() {
 }
 
 describe("USBR project records connector", () => {
+  it("blocks an HTTP 200 request-rejected gateway page instead of promoting it to a project record", async () => {
+    const result = await executeDataRun(request({ urls: [PAGE_URL] }), {
+      registry: createDataRegistry([usbrProjectRecordsConnector]),
+      environment: {},
+      fetchImpl: (async () =>
+        htmlResponse(
+          "<html><head><title>Request Rejected</title></head><body>The requested URL was rejected. Please consult with your administrator.<br>Your support ID is: synthetic-support-id</body></html>",
+        )) as typeof fetch,
+    });
+    assert.equal(result.status, "blocked");
+    assert.equal(result.data, null);
+    assert.equal(result.errors[0]?.code, "provider-response-invalid");
+    assert.equal(result.errors[0]?.details?.reasonCode, "provider-request-rejected");
+    assert.doesNotMatch(
+      JSON.stringify(result),
+      /synthetic-support-id|consult with your administrator/,
+    );
+  });
+
+  it("does not mistake an ordinary project page mentioning request rejection for a gateway block", async () => {
+    const result = await executeDataRun(request({ urls: [PAGE_URL] }), {
+      registry: createDataRegistry([usbrProjectRecordsConnector]),
+      environment: {},
+      fetchImpl: (async () =>
+        htmlResponse(
+          projectHtml().replace(
+            "</body>",
+            "<p>The requested URL was rejected during a previous test.</p></body>",
+          ),
+        )) as typeof fetch,
+    });
+    assert.equal(result.status, "success");
+    assert.equal(result.summary.recordCount, 4);
+  });
+
   it("documents every input field for agent request construction", () => {
     for (const [name, property] of Object.entries(USBR_PROJECT_RECORDS_INPUT_SCHEMA.properties)) {
       assert.equal(typeof (property as Record<string, unknown>).description, "string", name);

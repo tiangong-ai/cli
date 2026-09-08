@@ -5,6 +5,7 @@ import { blueskyPublicPostsConnector } from "./connectors/bluesky-public-posts.j
 import { epaEisRecordsConnector } from "./connectors/epa-eis-records.js";
 import { federalRegisterDocumentsConnector } from "./connectors/federal-register-documents.js";
 import { gdeltDocSearchConnector } from "./connectors/gdelt-doc-search.js";
+import { gdeltWebNgramsConnector } from "./connectors/gdelt-web-ngrams.js";
 import {
   gdeltEventsConnector,
   gdeltGkgConnector,
@@ -27,10 +28,18 @@ export const builtInDataRegistry = createDataRegistry([
   blueskyPublicPostsConnector,
   epaEisRecordsConnector,
   federalRegisterDocumentsConnector,
-  gdeltDocSearchConnector,
+  suspendBuiltInCapability(
+    gdeltDocSearchConnector,
+    "The provider's legacy DOC search currently exhausts its documented pacing and retry budget under dynamic load shedding, so execution is paused while the capability remains discoverable.",
+    [
+      "Representative article-list and timeline requests both succeed within the declared pacing and retry bounds.",
+      "A repeated live qualification run confirms that DOC responses are stable enough for Agent selection.",
+    ],
+  ),
   gdeltEventsConnector,
   gdeltGkgConnector,
   gdeltMentionsConnector,
+  gdeltWebNgramsConnector,
   nasaFirmsFireConnector,
   openMeteoAirQualityConnector,
   openMeteoFloodConnector,
@@ -52,8 +61,22 @@ export const builtInDataRegistry = createDataRegistry([
       "A production detail request succeeds with the documented API contract.",
     ],
   ),
-  usbrProjectRecordsConnector,
-  usbrRiseConnector,
+  suspendBuiltInCapability(
+    usbrProjectRecordsConnector,
+    "The official www.usbr.gov origin currently returns a gateway-generated Request Rejected page for validated project-page requests from the supported CLI environment, so execution is paused.",
+    [
+      "A representative official project page returns its real HTML rather than the gateway rejection page.",
+      "The project-page live gate parses a title and at least one same-origin record link.",
+    ],
+  ),
+  suspendBuiltInCapability(
+    usbrRiseConnector,
+    "The official RISE legacy API and current EDR beta endpoint currently return a gateway-generated Request Rejected page from the supported CLI environment, so execution is paused.",
+    [
+      "The official RISE endpoint accepts a bounded catalog or location discovery request.",
+      "A known-positive operational time-series request returns validated values within the declared bounds.",
+    ],
+  ),
   usgsWaterInstantaneousValuesConnector,
   youtubePublicContentConnector,
 ]);

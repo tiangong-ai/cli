@@ -36,6 +36,10 @@ const DOC_ARTICLE_RESPONSE = {
   ],
 };
 
+it("declares GDELT DOC's five-second provider request interval", () => {
+  assert.equal(Reflect.get(gdeltDocSearchConnector.endpoints[0]!, "minRequestIntervalMs"), 5_000);
+});
+
 const DOC_TIMELINE_RESPONSE = {
   query_details: { title: "synthetic climate", date_resolution: "15m" },
   timeline: [
@@ -390,6 +394,80 @@ describe("GDELT connectors", () => {
     assert.equal(data.toneBins[0]?.representativeArticles.length, 1);
   });
 
+  it("preserves numeric tone bins including zero and reports malformed bins instead of false no-results", async () => {
+    const result = await executeDataRun(
+      docRequest({ mode: "tonechart", maxRecords: undefined, sort: undefined }),
+      {
+        registry: createDataRegistry([gdeltDocSearchConnector]),
+        environment: {},
+        fetchImpl: (async () =>
+          jsonResponse({
+            tonechart: [
+              { bin: -2, count: 3 },
+              { bin: 0, count: 4 },
+              { bin: "2", count: 1 },
+              { bin: {}, count: 5 },
+              { bin: 3, count: -1 },
+            ],
+          })) as typeof fetch,
+      },
+    );
+    assert.equal(result.status, "partial");
+    assert.equal(result.summary.completeness, "partial");
+    const data = result.data as {
+      toneBins: Array<{ toneBin: string; articleCount: number }>;
+      stopReason: string;
+    };
+    assert.deepEqual(
+      data.toneBins.map((b) => [b.toneBin, b.articleCount]),
+      [
+        ["-2", 3],
+        ["0", 4],
+        ["2", 1],
+      ],
+    );
+    assert.equal(data.stopReason, "partial");
+    assert.equal(result.errors[0]?.details?.invalidBinCount, 2);
+    assert.deepEqual(result.summary.missing, [
+      { kind: "field", identifiers: ["batches[0].tonechart[3]", "batches[0].tonechart[4]"] },
+    ]);
+  });
+
+  it("retains the provider's toparts links in numeric tone bins", async () => {
+    const result = await executeDataRun(
+      docRequest({ mode: "tonechart", maxRecords: undefined, sort: undefined }),
+      {
+        registry: createDataRegistry([gdeltDocSearchConnector]),
+        environment: {},
+        fetchImpl: (async () =>
+          jsonResponse({
+            tonechart: [
+              {
+                bin: -11,
+                count: 3,
+                toparts: [
+                  {
+                    url: "https://news.example.invalid/tone",
+                    title: "Synthetic representative headline",
+                  },
+                ],
+              },
+              { bin: 0, count: 2, toparts: [] },
+            ],
+          })) as typeof fetch,
+      },
+    );
+    assert.equal(result.status, "success");
+    const bins = (
+      result.data as {
+        toneBins: Array<{ representativeArticles: Array<{ url: string; title: string }> }>;
+      }
+    ).toneBins;
+    assert.equal(bins[0]?.representativeArticles.length, 1);
+    assert.equal(bins[0]?.representativeArticles[0]?.url, "https://news.example.invalid/tone");
+    assert.equal(bins[1]?.representativeArticles.length, 0);
+  });
+
   it("fetches each latest file feed through HTTPS and emits closed named columns", async () => {
     for (const [name, feed] of Object.entries(FEEDS) as Array<
       [keyof typeof FEEDS, (typeof FEEDS)[keyof typeof FEEDS]]
@@ -591,7 +669,12 @@ describe("GDELT connectors", () => {
           : zipResponse(bytes)) as typeof fetch,
     });
 
-    assert.equal(result.status, "success", JSON.stringify(result.errors));
+    assert.equal(result.status, "partial", JSON.stringify(result.errors));
+    assert.equal(result.summary.completeness, "partial");
+    assert.equal(result.errors[0]?.code, "partial-result");
+    assert.deepEqual(result.summary.missing, [
+      { kind: "field", identifiers: ["20260301120000.export.CSV.zip:invalid-rows"] },
+    ]);
     assert.equal(result.summary.recordCount, 1);
     const file = (
       result.data as {

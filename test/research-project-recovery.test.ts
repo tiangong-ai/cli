@@ -1,10 +1,11 @@
 import assert from "node:assert/strict";
-import { spawnSync } from "node:child_process";
 import { mkdtemp, readFile, readdir, rename, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, it } from "node:test";
+
+import { runResearchCrashWorker } from "./helpers/research-crash-worker.js";
 
 import { runCli } from "../src/cli.js";
 import { CliError } from "../src/errors.js";
@@ -45,15 +46,11 @@ async function fixture() {
 }
 
 function killFork(root: string, point: string) {
-  return spawnSync(process.execPath, ["--import", "tsx", worker, root, point], {
+  return runResearchCrashWorker({
+    worker,
+    root,
+    point,
     cwd: repo,
-    env: {
-      PATH: process.env.PATH,
-      HOME: process.env.HOME,
-      TMPDIR: process.env.TMPDIR,
-    },
-    encoding: "utf8",
-    timeout: 15_000,
   });
 }
 

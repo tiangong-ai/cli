@@ -32,6 +32,60 @@ function httpClient(input: {
 }
 
 describe("bounded data HTTP", () => {
+  it("classifies a nested response-body timeout with phase and without cause prose", async () => {
+    const client = httpClient({
+      fetchImpl: async () =>
+        new Response(
+          new ReadableStream({
+            start(controller) {
+              controller.error(
+                new TypeError("super-secret-token", {
+                  cause: Object.assign(new Error("private-host"), { code: "UND_ERR_BODY_TIMEOUT" }),
+                }),
+              );
+            },
+          }),
+          { headers: { "content-type": "application/json" } },
+        ),
+    });
+    await assert.rejects(
+      () => client.request({ endpointId: "primary", method: "GET", path: "/v1/items" }),
+      (error: unknown) => {
+        assert.ok(error instanceof DataRuntimeError);
+        const machine = toDataMachineError(error, ["super-secret-token"]);
+        assert.equal(machine.code, "timeout");
+        assert.equal(machine.details?.phase, "response");
+        assert.equal(machine.details?.transportCode, "UND_ERR_BODY_TIMEOUT");
+        assert.equal(machine.details?.attempts, 1);
+        assert.doesNotMatch(JSON.stringify(machine), /super-secret-token|private-host/);
+        return true;
+      },
+    );
+  });
+  it("recognizes Node fetch's nested connection timeout without exposing the cause message", async () => {
+    const client = httpClient({
+      fetchImpl: (async () => {
+        throw new TypeError("fetch failed", {
+          cause: Object.assign(new Error("super-secret-token at private-host:443"), {
+            code: "UND_ERR_CONNECT_TIMEOUT",
+          }),
+        });
+      }) as typeof fetch,
+    });
+    await assert.rejects(
+      () => client.request({ endpointId: "primary", method: "GET", path: "/v1/items" }),
+      (error: unknown) => {
+        assert.ok(error instanceof DataRuntimeError);
+        const machine = toDataMachineError(error, ["super-secret-token"]);
+        assert.equal(machine.code, "timeout");
+        assert.equal(machine.details?.transportCode, "UND_ERR_CONNECT_TIMEOUT");
+        assert.equal(machine.details?.phase, "connect");
+        assert.doesNotMatch(JSON.stringify(machine), /super-secret-token|private-host/);
+        return true;
+      },
+    );
+  });
+
   it("injects a logical credential only after endpoint validation", async () => {
     let authorization = "";
     const client = httpClient({

@@ -205,7 +205,8 @@ function createFeedConnector(definition: FeedDefinition): DataConnectorDefinitio
       ],
       selectionHints: [
         `Choose this capability when the ${definition.kind} table is the intended GDELT schema.`,
-        "Choose GDELT DOC search for recent article discovery or aggregate timelines instead of raw feed rows.",
+        "Choose gdelt.web-ngrams for literal article discovery in known published minutes, or DOC for its query operators and aggregate timelines when available; neither is equivalent to coded table rows.",
+        "GKG provides document annotations, Events provides coded events, and Mentions links events to documents. Select or join only the layers the question requires; no automatic three-table fallback.",
         "Use latest for the current provider file; range bounds may be unaligned, and selection starts at the first 15-minute snapshot at or after the lower bound.",
       ],
       typicalUseCases: [definition.useCase],
@@ -313,7 +314,18 @@ async function executeFeed(
           "No GDELT feed file could be retrieved and validated.",
         );
   }
-  const partial = failures.length > 0;
+  const invalidRowFiles = files
+    .filter((file) => Number(file.invalidRowCount) > 0)
+    .map((file) => `${String(file.fileName)}:invalid-rows`);
+  const missing = [
+    ...(failures.length > 0
+      ? [{ kind: "file" as const, identifiers: failures.map((item) => item.fileName) }]
+      : []),
+    ...(invalidRowFiles.length > 0
+      ? [{ kind: "field" as const, identifiers: invalidRowFiles }]
+      : []),
+  ];
+  const partial = missing.length > 0;
   const truncated = stoppedAtRecordCap || stoppedAtFileCap;
   const stopReason = partial
     ? "partial"
@@ -328,10 +340,14 @@ async function executeFeed(
     ? [
         {
           code: "partial-result",
-          message: "One or more GDELT feed files could not be retrieved or validated.",
+          message:
+            "One or more GDELT feed files or table rows could not be retrieved or validated.",
           retryable: failures.some((failure) => failure.retryable),
           userActionRequired: false,
-          details: { missingFiles: failures.map((failure) => failure.fileName) },
+          details: {
+            missingFiles: failures.map((failure) => failure.fileName),
+            ...(invalidRowFiles.length > 0 ? { invalidRowFiles } : {}),
+          },
         },
       ]
     : [];
@@ -356,13 +372,7 @@ async function executeFeed(
       chunkCount: files.length,
       truncated,
       completeness: partial ? "partial" : "complete",
-      ...(partial
-        ? {
-            missing: [
-              { kind: "file" as const, identifiers: failures.map((item) => item.fileName) },
-            ],
-          }
-        : {}),
+      ...(partial ? { missing } : {}),
     },
     warnings: [
       "GDELT feed rows are automatically coded from uneven monitored-news coverage.",

@@ -87,6 +87,7 @@ export const gdeltDocSearchConnector: DataConnectorDefinition = {
       pathPrefixes: ["/api/v2/doc/"],
       allowedMethods: ["GET"],
       allowedContentTypes: ["application/json"],
+      minRequestIntervalMs: 5_000,
     },
   ],
   license: {
@@ -150,6 +151,7 @@ export const gdeltDocSearchConnector: DataConnectorDefinition = {
     ],
     selectionHints: [
       "Choose DOC search for recent article discovery or aggregate attention/tone trends.",
+      "During legacy search load-shedding, consider gdelt.web-ngrams for explicitly selected literal phrase-to-article discovery in known published minutes; it cannot reproduce DOC operators or aggregate timelines.",
       "Choose the Events, Mentions, or GKG file capability for structured 15-minute feed records.",
       "Treat returned links as candidates for separately governed source retrieval and verification.",
       "Use exactDomains for domainis: filters and domains for suffix-matching domain: filters; each value becomes a separate bounded query batch.",
@@ -159,6 +161,14 @@ export const gdeltDocSearchConnector: DataConnectorDefinition = {
       "Compare the temporal shape of monitored-news attention within a bounded window.",
     ],
     sourceDocumentation: [
+      {
+        title: "Official file-based keyword-search alternative during migration",
+        url: "https://blog.gdeltproject.org/using-the-new-web-ngrams-dataset-to-find-relevant-coverage/",
+      },
+      {
+        title: "Dynamic API load shedding and infrastructure migration",
+        url: "https://blog.gdeltproject.org/scaling-with-gcp-global-load-balancer-why-were-moving-to-gcps-global-load-balancing-infrastructure/",
+      },
       {
         title: "GDELT DOC 2.0 API",
         url: "https://blog.gdeltproject.org/gdelt-doc-2-0-api-debuts/",
@@ -308,11 +318,33 @@ async function executeGdeltDocSearch(
   }
 
   if (query.mode === "tonechart") {
-    const toneBins = batches.flatMap((batch) => normalizeToneBins(batch.payload, batch.query));
+    const normalized = batches.map((batch, index) =>
+      normalizeToneBins(batch.payload, batch.query, index),
+    );
+    const toneBins = normalized.flatMap((batch) => batch.records);
+    const invalidBinCount = normalized.reduce((sum, batch) => sum + batch.invalidBinCount, 0);
+    const invalidPaths = normalized.flatMap((batch) => batch.invalidPaths).slice(0, 20);
+    const tonePartial = partial || invalidBinCount > 0;
+    const missing = [
+      ...(partial
+        ? [{ kind: "range" as const, identifiers: failures.map((item) => item.query) }]
+        : []),
+      ...(invalidPaths.length > 0 ? [{ kind: "field" as const, identifiers: invalidPaths }] : []),
+    ];
+    if (invalidBinCount > 0) {
+      errors.push({
+        code: "partial-result",
+        message:
+          "One or more GDELT DOC tone bins could not be normalized; valid bins were retained.",
+        retryable: false,
+        userActionRequired: false,
+        details: { invalidBinCount, invalidPaths },
+      });
+    }
     const capped = toneBins.slice(0, context.limits.maxRecords);
     const truncated = toneBins.length > capped.length;
     return {
-      status: partial ? "partial" : "success",
+      status: tonePartial ? "partial" : "success",
       data: {
         source: { providerId: "gdelt", endpoint: DOC_PATH, metadataOnly: true },
         query,
@@ -323,7 +355,7 @@ async function executeGdeltDocSearch(
         articles: [],
         timelines: [],
         toneBins: capped,
-        stopReason: partial
+        stopReason: tonePartial
           ? "partial"
           : capped.length === 0
             ? "no-results"
@@ -336,14 +368,8 @@ async function executeGdeltDocSearch(
         pageCount: batches.length,
         chunkCount: batches.length,
         truncated,
-        completeness: partial ? "partial" : "complete",
-        ...(partial
-          ? {
-              missing: [
-                { kind: "range" as const, identifiers: failures.map((item) => item.query) },
-              ],
-            }
-          : {}),
+        completeness: tonePartial ? "partial" : "complete",
+        ...(tonePartial ? { missing } : {}),
       },
       warnings: discoveryWarnings(truncated),
       errors,
@@ -540,21 +566,34 @@ function articleIdentity(article: Record<string, unknown>): string {
 function normalizeToneBins(
   payload: Record<string, unknown>,
   sourceQuery: string,
-): Array<Record<string, unknown>> {
+  batchIndex: number,
+): { records: Array<Record<string, unknown>>; invalidBinCount: number; invalidPaths: string[] } {
   const rawToneChart = payload.tonechart;
   const bins = Array.isArray(rawToneChart)
     ? rawToneChart
     : objectOrNull(rawToneChart) && Array.isArray(objectOrNull(rawToneChart)?.bins)
       ? (objectOrNull(rawToneChart)?.bins as unknown[])
       : [];
-  return bins.flatMap((value, index) => {
+  let invalidBinCount = 0;
+  const invalidPaths: string[] = [];
+  const records = bins.flatMap((value, index) => {
+    const invalid = (): [] => {
+      invalidBinCount += 1;
+      if (invalidPaths.length < 20) invalidPaths.push(`batches[${batchIndex}].tonechart[${index}]`);
+      return [];
+    };
     const bin = objectOrNull(value);
-    if (!bin) return [];
-    const toneBin = looseString(bin.bin ?? bin.tone ?? bin.label);
+    if (!bin) return invalid();
+    const rawTone = bin.bin ?? bin.tone ?? bin.label;
+    const toneBin =
+      typeof rawTone === "number" && Number.isFinite(rawTone)
+        ? String(rawTone)
+        : looseString(rawTone);
     const articleCount = finiteNumber(bin.count ?? bin.value);
-    if (!toneBin || articleCount === null || articleCount < 0) return [];
-    const representativeArticles = Array.isArray(bin.articles)
-      ? bin.articles.flatMap((article, articleIndex) => {
+    if (!toneBin || articleCount === null || articleCount < 0) return invalid();
+    const rawArticles = bin.toparts ?? bin.articles;
+    const representativeArticles = Array.isArray(rawArticles)
+      ? rawArticles.flatMap((article, articleIndex) => {
           const normalized = normalizeArticle(article, articleIndex, sourceQuery);
           return normalized ? [normalized] : [];
         })
@@ -569,6 +608,7 @@ function normalizeToneBins(
       },
     ];
   });
+  return { records, invalidBinCount, invalidPaths };
 }
 
 function validateModePayload(payload: Record<string, unknown>, mode: DocMode): void {

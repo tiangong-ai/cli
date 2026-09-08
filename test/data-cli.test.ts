@@ -53,6 +53,7 @@ describe("data CLI", () => {
           "gdelt.events",
           "gdelt.gkg",
           "gdelt.mentions",
+          "gdelt.web-ngrams",
           "nasa-firms.active-fire",
           "open-meteo.air-quality",
           "open-meteo.flood",

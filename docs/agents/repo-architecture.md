@@ -12,8 +12,8 @@ checkPaths:
   - README.md
   - src/**
   - bin/**
-lastReviewedAt: 2026-09-05
-lastReviewedCommit: 16b436927ca80ae58b2fefc5c47bdf21f850827d
+lastReviewedAt: 2026-09-08
+lastReviewedCommit: c9dae2c
 ---
 
 # Repo Architecture
@@ -213,15 +213,15 @@ storage writes, queueing, and document status transitions.
   immutable registry, public JSON Schemas, canonical digest and receipt rules,
   strict command router, logical credential resolution, bounded HTTPS client,
   stable error taxonomy, and connector execution/conformance contracts. Its
-  built-in registry currently ships seventeen independently discoverable
-  capabilities on the same runtime: AirNow hourly observations, public Bluesky
-  post cascades, EPA EIS records, Federal Register document metadata, four GDELT
-  DOC/table surfaces, NASA FIRMS active-fire detections, three Open-Meteo series,
+  built-in registry currently ships twenty independently discoverable
+  capabilities, fifteen execution-enabled and five suspended, on the same runtime: AirNow hourly observations, public Bluesky
+  post cascades, EPA EIS records, Federal Register document metadata, five GDELT
+  DOC/table/Web-NGrams surfaces, NASA FIRMS active-fire detections, three Open-Meteo series,
   OpenAQ location and sensor measurements, two USBR data surfaces, USGS Water
   instantaneous values, and YouTube public video/comment metadata. The
-  Regulations.gov source definitions remain compiled and fixture-tested but are
-  excluded from the built-in registry until production search/detail and
-  attachment live gates pass. The three
+  GDELT DOC, Regulations.gov, and both USBR source definitions remain
+  discoverable as suspended and fixture-tested, but execution and Research
+  selection are blocked until their production live gates pass. The three
   GDELT table capabilities share one bounded ZIP/feed core without collapsing
   their separate discovery and binding identities; the two YouTube operations
   share one provider and credential contract without merging video discovery
@@ -270,8 +270,9 @@ baseline is Node 24 with the native TypeScript 7.0.2 compiler; that toolchain
 gate is complete before data business logic begins.
 
 The first connector pair deliberately exercises different atomic shapes.
-AirNow plans one official hourly file per UTC hour and isolates missing or
-invalid files while retaining file lineage. Federal Register builds stable,
+AirNow plans one official hourly file per UTC hour from the regional endpoint
+of the official `files.airnowtech.org` S3 bucket and isolates missing or invalid
+files while retaining canonical file lineage. Federal Register builds stable,
 bounded query parameters and paginates metadata without retrieving linked
 content. Neither connector imports the other, performs interpretation, or
 writes Research state.

@@ -69,8 +69,8 @@ describe("AirNow hourly observations connector", () => {
 
     assert.equal(result.status, "success");
     assert.deepEqual(requestedPaths, [
-      "/airnow/2026/20260322/HourlyAQObs_2026032200.dat",
-      "/airnow/2026/20260322/HourlyAQObs_2026032201.dat",
+      "/files.airnowtech.org/airnow/2026/20260322/HourlyAQObs_2026032200.dat",
+      "/files.airnowtech.org/airnow/2026/20260322/HourlyAQObs_2026032201.dat",
     ]);
     assert.equal(result.summary.chunkCount, 2);
     assert.equal(result.summary.recordCount, 4);

@@ -176,7 +176,7 @@ interface CommentRecord {
 export const youtubePublicContentConnector: DataConnectorDefinition = {
   schemaVersion: DATA_MANIFEST_SCHEMA_VERSION,
   capabilityId: "youtube.public-content",
-  capabilityVersion: "1.0.1",
+  capabilityVersion: "1.0.2",
   minimumCliVersion: "0.0.55",
   provider: { providerId: "youtube", name: "YouTube Data API" },
   sourceCategory: "public-video-and-comment-metadata",
@@ -316,7 +316,7 @@ export const youtubePublicContentConnector: DataConnectorDefinition = {
     },
     {
       operationId: "fetch-comments",
-      operationVersion: "1.0.1",
+      operationVersion: "1.0.2",
       features: ["youtube.reply-strategy"],
       summary: "Fetch visible public comments and replies for explicit YouTube video IDs.",
       description:
@@ -558,6 +558,7 @@ async function executeCommentsFetch(
   const failureValues: unknown[] = [];
   const knownThreadsWithReplies = new Set<string>();
   const fullyExpandedThreads = new Set<string>();
+  const excludedByPublishedWindowThreads = new Set<string>();
   let requestCount = 0;
   let threadRequestCount = 0;
   let replyRequestCount = 0;
@@ -636,6 +637,19 @@ async function executeCommentsFetch(
           if (thread.totalReplyCount === 0) continue;
           knownThreadsWithReplies.add(thread.threadId);
           if (!query.includeReplies) {
+            continue;
+          }
+          // A reply is created against an existing parent comment. Only the
+          // parent's original publication time can rule out this entire reply
+          // subtree. Never prune on updatedAt or the lower window boundary:
+          // an older/edited parent may still contain in-window replies.
+          if (
+            query.timeField === "published" &&
+            query.endDateTime !== null &&
+            thread.topLevel.publishedAt !== null &&
+            thread.topLevel.publishedAt >= query.endDateTime
+          ) {
+            excludedByPublishedWindowThreads.add(thread.threadId);
             continue;
           }
 
@@ -761,7 +775,8 @@ async function executeCommentsFetch(
   const truncated = truncationReason !== null;
   const completeReplies = query.includeReplies && !truncated && !partial;
   const knownUnexpandedThreadIds = [...knownThreadsWithReplies].filter(
-    (threadId) => !fullyExpandedThreads.has(threadId),
+    (threadId) =>
+      !fullyExpandedThreads.has(threadId) && !excludedByPublishedWindowThreads.has(threadId),
   );
   return {
     status: partial ? "partial" : "success",
@@ -785,6 +800,9 @@ async function executeCommentsFetch(
         knownThreadsWithReplies: knownThreadsWithReplies.size,
         fullyExpandedThreads: fullyExpandedThreads.size,
         knownUnexpandedThreadIds,
+        ...(excludedByPublishedWindowThreads.size > 0
+          ? { excludedByPublishedWindowThreadIds: [...excludedByPublishedWindowThreads] }
+          : {}),
       },
       stopReason,
     },
@@ -799,6 +817,11 @@ async function executeCommentsFetch(
     warnings: [
       "YouTube comments are mutable user-generated content and can contain personal, sensitive, deceptive, or unsafe material.",
       "Visible comments are self-selected and moderation-dependent; they must not be treated as representative opinion or statistically valid sentiment.",
+      ...(excludedByPublishedWindowThreads.size > 0
+        ? [
+            `Replies for ${excludedByPublishedWindowThreads.size} thread(s) were excluded because their parents were originally published at or after the requested exclusive end; these were not fetched or counted as fully expanded.`,
+          ]
+        : []),
       ...(query.includeReplies
         ? [
             "Replies were read with comments.list rather than the incomplete embedded sample, but explicit request and record limits can still truncate them.",

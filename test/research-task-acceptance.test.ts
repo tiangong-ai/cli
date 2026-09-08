@@ -1,10 +1,11 @@
 import assert from "node:assert/strict";
-import { spawnSync } from "node:child_process";
 import { chmod, cp, mkdtemp, readFile, readdir, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, it } from "node:test";
+
+import { runResearchCrashWorker } from "./helpers/research-crash-worker.js";
 
 import { runCli } from "../src/cli.js";
 import { openArtifactViews } from "../src/research/workspace/artifact-views.js";
@@ -729,15 +730,12 @@ describe("lightweight original task and authorized scope", () => {
       const worker = fileURLToPath(
         new URL("./fixtures/research-recovery/crash-worker.mjs", import.meta.url),
       );
-      const crashed = spawnSync(
-        process.execPath,
-        ["--import", "tsx", worker, fx.root, "scope-committed", proposalSha],
-        {
-          encoding: "utf8",
-          timeout: 15_000,
-          env: { PATH: process.env.PATH, HOME: process.env.HOME, TMPDIR: process.env.TMPDIR },
-        },
-      );
+      const crashed = runResearchCrashWorker({
+        worker,
+        root: fx.root,
+        point: "scope-committed",
+        extraArgs: [proposalSha],
+      });
       assert.equal(crashed.stderr, "");
       assert.ok(crashed.signal || crashed.status !== 0);
       assert.equal(await readFile(join(fx.root, "fault-point.txt"), "utf8"), "scope-committed");

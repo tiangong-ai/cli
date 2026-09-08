@@ -12,8 +12,8 @@ checkPaths:
   - package.json
   - bin/**
   - src/**
-lastReviewedAt: 2026-09-04
-lastReviewedCommit: 25b236a15c846c0168ffb84f8afa390d71985f4b
+lastReviewedAt: 2026-09-08
+lastReviewedCommit: 79b6b941060e525ebc0b9c5e1f6968e1806c1901
 ---
 
 # Tiangong AI CLI
@@ -87,6 +87,13 @@ Operation input schemas include field-level descriptions and examples.
 Operations may also publish stable feature IDs for Skills that depend on a
 specific compatible behavior within the same contract major.
 
+GDELT DOC requests are paced at least five seconds apart within one CLI process,
+including split queries and retries. Missing-header 429 responses use bounded
+exponential backoff and remain `rate-limited`, never `no-results`. Independent
+processes sharing an egress must be coordinated by the caller. The opt-in positive
+live gate and its timing/throughput definitions are documented in
+[repository validation](docs/agents/repo-validation.md#gdelt-doc-live-acceptance).
+
 Auto Research keeps three budgets separate: connector acquisition limits,
 Evidence package bytes/files, and the Agent-visible context view. A validated
 result is persisted in full when it fits the Evidence package budget;
@@ -112,7 +119,9 @@ The built-in capabilities are:
   list. Results retain source-file lineage and always state that AirNow data are
   preliminary and unsuitable as regulatory-grade AQS evidence. Independent
   hourly files use bounded concurrency while output files and records retain
-  deterministic UTC-hour order.
+  deterministic UTC-hour order. Execution uses the official
+  `files.airnowtech.org` S3 bucket through its regional S3 endpoint so a failing
+  CloudFront edge does not make the underlying public object unavailable.
 - `bluesky.public-posts` / `fetch-cascades`: fetches bounded public Bluesky
   post seeds from search, an author feed, a custom feed, or a list feed and can
   flatten visible reply cascades. Ranking, counters, moderation visibility, and
@@ -131,7 +140,15 @@ The built-in capabilities are:
 - `gdelt.doc-search` / `search`: searches the rolling GDELT DOC 2.0 index for
   bounded article-link metadata or supported aggregate timelines. Automated
   multilingual extraction and uneven monitored-source coverage are explicit;
-  it does not retrieve article bodies or establish ground-truth facts.
+  it does not retrieve article bodies or establish ground-truth facts. The
+  capability is currently suspended because representative modes do not pass a
+  stable live gate under the provider's dynamic load shedding.
+- `gdelt.web-ngrams` / `search`: searches literal 1–4-word phrases in one
+  explicit published UTC minute's GZIP NGrams/TOC pair, returning matched
+  article links with file-scoped IDs. This local candidate extension is a
+  separately selected file-based alternative to DOC discovery, not a DOC query
+  or timeline substitute. Missing files block; malformed rows and omitted
+  matches are partial. No implicit time-range sampling or automatic fallback.
 - `gdelt.events`, `gdelt.gkg`, and `gdelt.mentions` / `fetch`: independently
   discoverable GDELT 2.0 table capabilities backed by one bounded TypeScript
   file-feed core. They fetch either the latest provider entry or at most twenty
@@ -163,12 +180,16 @@ The built-in capabilities are:
 - `usbr.project-records` / `fetch`: inventories caller-supplied official
   `www.usbr.gov` project or program pages plus bounded same-origin links. It
   preserves page response provenance but does not follow, download, parse, or
-  assess linked records and is not USBR-wide search.
+  assess linked records and is not USBR-wide search. Execution is currently
+  suspended because the official origin returns a gateway rejection page in
+  the supported CLI environment.
 - `usbr.rise` / `discover-items` and `fetch-results`: scans bounded Bureau of
   Reclamation RISE catalog pages for client-filtered candidate item IDs, then
   retrieves bounded result rows for explicitly selected items. Provider scan
   order is not ranking, and operational values require item metadata and domain
-  context before interpretation.
+  context before interpretation. Execution is currently suspended because both
+  the legacy API and the official EDR beta endpoint are rejected by the
+  provider gateway in the supported CLI environment.
 - `usgs.water-instantaneous-values` / `fetch`: retrieves bounded legacy USGS
   WaterServices instantaneous observations while preserving site, parameter,
   qualifier, provisional status, and source lifecycle warnings.
@@ -177,13 +198,13 @@ The built-in capabilities are:
   comment/reply text for explicit video IDs. It does not download media or
   transcripts and does not treat ranking or comments as representative opinion.
 
-Regulations.gov comment and attachment capabilities remain discoverable with
-`availability.status=suspended`, a stable reason code, and explicit resume
-criteria. `doctor` and `run` block locally without network access, and Auto
-Research excludes them from its executable projection until production
-search/detail/attachment live gates qualify them again.
+GDELT DOC, Regulations.gov comment/attachment, USBR RISE, and USBR project
+records remain discoverable with `availability.status=suspended`, a stable
+reason code, and explicit resume criteria. `doctor` and `run` block locally
+without network access, and Auto Research excludes them from its executable
+projection until their production live gates qualify them again.
 
-Fourteen capabilities are keyless. NASA FIRMS requires `NASA_FIRMS_MAP_KEY`, which the
+Of the fifteen execution-enabled capabilities, twelve are keyless. NASA FIRMS requires `NASA_FIRMS_MAP_KEY`, which the
 CLI injects as a protected provider path segment; OpenAQ requires
 `OPENAQ_API_KEY`, and YouTube requires `YOUTUBE_API_KEY`; the CLI injects the
 latter two as protected provider headers, with YouTube using `X-Goog-Api-Key`
