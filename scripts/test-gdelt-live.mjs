@@ -22,7 +22,7 @@ assert.ok(process.argv[3]);
 const directory = resolve(process.argv[3]);
 mkdirSync(directory); // Refuse overwrite/reuse of historical evidence.
 const root = fileURLToPath(new URL("../", import.meta.url));
-const bin = resolve(root, "bin/tiangong-ai.js");
+const qualificationRunner = resolve(root, "scripts/run-gdelt-doc-qualification.mjs");
 const version = JSON.parse(readFileSync(resolve(root, "package.json"))).version;
 if (process.argv[4] !== undefined) {
   assert.equal(process.argv[4], "--case");
@@ -60,7 +60,8 @@ const summary = {
   transportSourceSha256: createHash("sha256")
     .update(readFileSync(resolve(root, "src/data/runtime/bounded-http.ts")))
     .digest("hex"),
-  scope: "GDELT DOC live CLI only; no Auto Research, no file feeds, no Regulations.gov",
+  scope:
+    "GDELT DOC maintainer qualification only; public catalog/doctor/run remain suspended; no Auto Research, file feeds, or Regulations.gov",
   throughputDefinition:
     "Decoded provider bytes / complete CLI wall seconds (includes connection, pacing and retries); NOT wire transfer rate or provider capacity",
   runs: [],
@@ -84,14 +85,9 @@ for (const item of cases) {
     [
       "--import",
       resolve(root, "scripts/gdelt-live-http-observer.mjs"),
-      bin,
-      "data",
-      "run",
-      "gdelt.doc-search",
-      "search",
+      qualificationRunner,
       "--input",
       inputPath,
-      "--json",
     ],
     {
       cwd: root,
@@ -116,7 +112,7 @@ for (const item of cases) {
   }
   let validationError;
   try {
-    assert.equal(child.status, 0, "CLI must exit successfully");
+    assert.equal(child.status, 0, "qualification runner must exit successfully");
     assert.equal(result?.status, "success");
     assert.equal(result?.summary?.completeness, "complete");
     assert.ok(result.summary.recordCount > 0, "A no-results response does not prove positive E2E");

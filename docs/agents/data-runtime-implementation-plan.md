@@ -1,7 +1,7 @@
 ---
 docType: runbook
 scope: repo
-status: proposed
+status: current
 authoritative: true
 owner: cli
 language: zh-CN
@@ -18,19 +18,19 @@ checkPaths:
   - src/data/**
   - src/research/workspace/data-evidence-adapter.ts
   - test/**
-lastReviewedAt: 2026-09-05
-lastReviewedCommit: 16b436927ca3967673b46be41135e415f87704d9
+lastReviewedAt: 2026-09-08
+lastReviewedCommit: 79b6b941060e525ebc0b9c5e1f6968e1806c1901
 ---
 
 # 原子数据运行时实施计划
 
-## 当前基线和停止点
+## 当前状态和约束
 
-- 计划基线：`origin/main` at
-  `7b7fc682698778edf5b77d69f0fa3f944e6da4a6`。
-- 计划分支：`codex/atomic-data-runtime-plan`，使用独立干净 worktree。
-- 现有含未提交 Research 变更的 checkout 不做 pull、stash、reset、rebase 或复用。
-- 本文和目标架构完成后停止；没有下一次明确确认，不开始工具链或业务代码改造。
+- TypeScript 7、原子数据运行时、首批及后续 connector、薄 Skills binding 和 Research
+  adapter 已进入候选实现；本文继续记录实现边界、资格验证和发布顺序。
+- CLI 仍是执行契约与 connector 的基座；Skills 只在兼容 CLI 候选得到验证后更新绑定。
+- 当前改动必须保留用户无关修改、使用可审阅提交，并通过本文及 `AGENTS.md` 声明的门禁。
+- 历史计划 checkout、一次性暂停指令和已完成的审批节点不再构成当前执行约束。
 
 ## 总体顺序
 
@@ -674,6 +674,23 @@ CLI 拥有唯一 TS7 实现；新薄 Skill 仅负责路由，Research 由当前 
 8.08 MiB 有效响应；当日 minute 实测扫描 969,712 行、返回 19 篇，5.739 秒、7.45 MiB。
 两次均无重试或 429。线上验证与 DOC 恢复门槛分开记录，不将新路径成功计作 DOC 成功。
 
+## GDELT DOC 暂停能力的维护者资格验证
+
+公开 `catalog`、`doctor` 和 `run` 必须继续拒绝 suspended capability。恢复探测只能使用
+仓库内显式维护者入口：它把未暂停的原始 DOC connector 单独注册到临时 registry，仍经
+`executeDataRun`、公共 bounded transport、Schema、limits 和 receipt 执行，但不会改变
+built-in registry 或给普通调用方提供绕过开关。
+
+```bash
+npm run build
+node scripts/test-gdelt-live.mjs --output-dir /absolute/new/evidence-directory
+```
+
+可用 `--case articles` 或 `--case timeline` 单独探测；输出目录必须全新。只有 article-list
+与 timeline 两种代表请求都在声明的 pacing/retry 上限内取得正向数据，并由重复运行确认
+稳定，才满足 manifest 中的恢复标准。429、网络失败、空结果或单一模式成功都只作为资格
+证据保存，不得自动解除 suspended 状态。
+
 ## 每阶段通用验收
 
 - 先写外部行为/安全回归并在要求的 clean container 中观察 RED，再实现 GREEN。
@@ -684,8 +701,8 @@ CLI 拥有唯一 TS7 实现；新薄 Skill 仅负责路由，Research 由当前 
 - 完成 AGENTS 列出的全仓门禁和 `npm pack --dry-run`；依赖/容器输入变化必须 cold gate。
 - 每个 PR 记录兼容性、迁移/回退方式和未完成项，不以聊天记录作为事实来源。
 
-## 准备完成定义
+## 当前交付定义
 
-准备完成是指：两个仓库都从最新 `origin/main` 建立了不污染现有工作的干净分支，CLI
-和 Skills 的权威边界、TypeScript 7 顺序、试点、PR 依赖和验收门槛已持久化并通过文档
-治理检查。准备完成不代表已经授权修改 package、运行时或 Skill。
+候选交付要求 CLI 与 Skills 的权威边界、TypeScript 7 实现、connector/Research 行为、
+PR 依赖、资格验证、回退方式和剩余 suspended 能力均已持久化并通过相应治理检查。历史
+准备阶段的分支位置或暂停指令不参与当前完成判断。

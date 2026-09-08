@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { once } from "node:events";
 import { createServer } from "node:http";
+import { connect, type Socket } from "node:net";
 import { it } from "node:test";
 import { Agent, getGlobalDispatcher } from "undici";
 import { withBoundedTransport } from "../src/data/runtime/http-transport.js";
@@ -67,6 +68,82 @@ it("uses a Node-24-compatible dispatcher with real HTTP and consumes the body be
     server.closeAllConnections();
     server.close();
     await once(server, "close");
+  }
+});
+
+it("preserves opt-in environment proxy routing and NO_PROXY bypasses", async () => {
+  const targetServer = createServer((request, response) => {
+    response.setHeader("content-type", "application/json");
+    response.end(JSON.stringify({ path: request.url }));
+  });
+  const proxyAuthorities: string[] = [];
+  const proxySockets = new Set<Socket>();
+  const proxyServer = createServer();
+  proxyServer.on("connection", (socket) => {
+    proxySockets.add(socket);
+    socket.once("close", () => proxySockets.delete(socket));
+  });
+  proxyServer.on("connect", (request, clientSocket, head) => {
+    proxyAuthorities.push(request.url ?? "");
+    const address = targetServer.address();
+    assert.ok(address && typeof address === "object");
+    const upstream = connect(address.port, "127.0.0.1", () => {
+      clientSocket.write("HTTP/1.1 200 Connection Established\r\n\r\n");
+      if (head.byteLength > 0) upstream.write(head);
+      clientSocket.pipe(upstream);
+      upstream.pipe(clientSocket);
+    });
+    upstream.on("error", (error) => clientSocket.destroy(error));
+  });
+
+  targetServer.listen(0, "127.0.0.1");
+  proxyServer.listen(0, "127.0.0.1");
+  await Promise.all([once(targetServer, "listening"), once(proxyServer, "listening")]);
+  const targetAddress = targetServer.address();
+  const proxyAddress = proxyServer.address();
+  assert.ok(targetAddress && typeof targetAddress === "object");
+  assert.ok(proxyAddress && typeof proxyAddress === "object");
+
+  const environmentKeys = [
+    "NODE_USE_ENV_PROXY",
+    "HTTP_PROXY",
+    "http_proxy",
+    "NO_PROXY",
+    "no_proxy",
+  ];
+  const previousEnvironment = new Map(
+    environmentKeys.map((key) => [key, process.env[key]] as const),
+  );
+  try {
+    process.env.NODE_USE_ENV_PROXY = "1";
+    process.env.HTTP_PROXY = `http://127.0.0.1:${proxyAddress.port}`;
+    delete process.env.http_proxy;
+    process.env.NO_PROXY = "";
+    delete process.env.no_proxy;
+
+    const proxied = await withBoundedTransport(15_000, undefined, async (fetchImpl) =>
+      (await fetchImpl("http://review-provider.invalid/data")).json(),
+    );
+    assert.deepEqual(proxied, { path: "/data" });
+    assert.deepEqual(proxyAuthorities, ["review-provider.invalid:80"]);
+
+    process.env.NO_PROXY = "127.0.0.1";
+    const direct = await withBoundedTransport(15_000, undefined, async (fetchImpl) =>
+      (await fetchImpl(`http://127.0.0.1:${targetAddress.port}/bypass`)).json(),
+    );
+    assert.deepEqual(direct, { path: "/bypass" });
+    assert.deepEqual(proxyAuthorities, ["review-provider.invalid:80"]);
+  } finally {
+    for (const [key, value] of previousEnvironment) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+    for (const socket of proxySockets) socket.destroy();
+    targetServer.closeAllConnections();
+    proxyServer.closeAllConnections();
+    targetServer.close();
+    proxyServer.close();
+    await Promise.all([once(targetServer, "close"), once(proxyServer, "close")]);
   }
 });
 
