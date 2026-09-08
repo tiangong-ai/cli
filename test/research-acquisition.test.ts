@@ -1,5 +1,4 @@
 import assert from "node:assert/strict";
-import { spawnSync } from "node:child_process";
 import { chmod, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -7,6 +6,8 @@ import { fileURLToPath } from "node:url";
 import { describe, it } from "node:test";
 
 import { PDFDocument } from "pdf-lib";
+
+import { runResearchCrashWorker } from "./helpers/research-crash-worker.js";
 
 import { runCli } from "../src/cli.js";
 import { CliError } from "../src/errors.js";
@@ -176,10 +177,10 @@ describe("research acquisition and evidence snapshots", () => {
         const worker = fileURLToPath(
           new URL("./fixtures/research-recovery/crash-worker.mjs", import.meta.url),
         );
-        const killed = spawnSync(process.execPath, ["--import", "tsx", worker, root, point], {
-          encoding: "utf8",
-          timeout: 15_000,
-          env: { PATH: process.env.PATH, HOME: process.env.HOME, TMPDIR: process.env.TMPDIR },
+        const killed = runResearchCrashWorker({
+          worker,
+          root,
+          point,
         });
         assert.equal(killed.stderr, "");
         assert.ok(killed.signal || killed.status !== 0);
