@@ -117,9 +117,9 @@ it("preserves opt-in environment proxy routing and NO_PROXY bypasses", async () 
   try {
     process.env.NODE_USE_ENV_PROXY = "1";
     process.env.HTTP_PROXY = `http://127.0.0.1:${proxyAddress.port}`;
-    delete process.env.http_proxy;
+    process.env.http_proxy = process.env.HTTP_PROXY;
     process.env.NO_PROXY = "";
-    delete process.env.no_proxy;
+    process.env.no_proxy = process.env.NO_PROXY;
 
     const proxied = await withBoundedTransport(15_000, undefined, async (fetchImpl) =>
       (await fetchImpl("http://review-provider.invalid/data")).json(),
@@ -128,6 +128,7 @@ it("preserves opt-in environment proxy routing and NO_PROXY bypasses", async () 
     assert.deepEqual(proxyAuthorities, ["review-provider.invalid:80"]);
 
     process.env.NO_PROXY = "127.0.0.1";
+    process.env.no_proxy = process.env.NO_PROXY;
     const direct = await withBoundedTransport(15_000, undefined, async (fetchImpl) =>
       (await fetchImpl(`http://127.0.0.1:${targetAddress.port}/bypass`)).json(),
     );
