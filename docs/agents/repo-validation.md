@@ -19,7 +19,7 @@ checkPaths:
   - test/**
   - .github/workflows/**
 lastReviewedAt: 2026-09-10
-lastReviewedCommit: dcf4075f496ebbbfd31b9a1c79931a408d3789d1
+lastReviewedCommit: 8ce5cd33c960a5176e3a9dd959f5ce6bf5a06343
 ---
 
 # Repo Validation
@@ -750,4 +750,8 @@ candidate check uses an offline npm fixture; it cannot establish live registry
 or package publication facts. `test/research-setup-release.test.ts` covers the
 actual flat npm metadata shape, fixed registry/scope arguments, numeric version
 bounds, combined output caps, environment filtering and bounded process cleanup.
+POSIX process fixtures remain POSIX-only; native Windows fixtures exercise the
+real cmd.exe/npm.cmd chain and owned-tree cleanup without registry access.
+A process-spawn mock verifies exact taskkill arguments and rejects signaling an
+unspawned helper before its error event has been delivered.
 Clean-container RED/GREEN remains authoritative; host results are supplemental.
