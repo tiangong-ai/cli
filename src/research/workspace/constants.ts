@@ -5,6 +5,7 @@ import { fileURLToPath } from "node:url";
 export const RESEARCH_CONTROL_DIRECTORY = ".tiangong-research";
 export const RESEARCH_PROTOCOL_VERSION = 1 as const;
 export const RESEARCH_PACKAGE_NAME = "@tiangong-ai/cli" as const;
+export const SETUP_UPGRADING_MARKER = "tiangong-research-workspace-upgrading";
 
 export const ALLOWED_CAPABILITY_PERMISSIONS = new Set([
   "project-read",

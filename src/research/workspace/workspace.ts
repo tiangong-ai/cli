@@ -4,7 +4,12 @@ import { basename, isAbsolute, join, resolve } from "node:path";
 
 import { CliError } from "../../errors.js";
 import { loadCapabilityDeclarations, verifyCapabilities } from "./capabilities.js";
-import { packageVersion, RESEARCH_PACKAGE_NAME, RESEARCH_PROTOCOL_VERSION } from "./constants.js";
+import {
+  packageVersion,
+  RESEARCH_PACKAGE_NAME,
+  RESEARCH_PROTOCOL_VERSION,
+  SETUP_UPGRADING_MARKER,
+} from "./constants.js";
 import { inspectResearchContext, isWorkspaceMarker } from "./context.js";
 import { inspectCapabilityCredentialEnvironment } from "./credentials.js";
 import { appendJournalEvent, verifyJournal } from "./journal.js";
@@ -334,6 +339,22 @@ export async function loadWorkspaceMarker(root: string): Promise<WorkspaceMarker
     workspacePaths(root).marker,
     "Research workspace marker",
   );
+  if (isObject(marker) && marker.kind === SETUP_UPGRADING_MARKER) {
+    throw new CliError(
+      "Complete or roll back the recorded setup upgrade before using this workspace.",
+      {
+        code: "RESEARCH_SETUP_UPGRADE_PENDING",
+        exitCode: 3,
+        details: {
+          candidatePlanSha256:
+            typeof marker.setupUpgradePlanSha256 === "string" &&
+            /^[a-f0-9]{64}$/.test(marker.setupUpgradePlanSha256)
+              ? marker.setupUpgradePlanSha256
+              : null,
+        },
+      },
+    );
+  }
   if (!isWorkspaceMarker(marker)) {
     throw new CliError("Research workspace marker has an unsupported shape.", {
       code: "RESEARCH_WORKSPACE_INVALID",

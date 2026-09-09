@@ -20,6 +20,7 @@ import { setTimeout as sleep } from "node:timers/promises";
 import { CliError } from "../../errors.js";
 import { loadCapabilityDeclarations } from "./capabilities.js";
 import { inspectResearchContext } from "./context.js";
+import { inspectExactResearchCliRelease } from "./setup-release.js";
 import {
   inspectCapabilityCredentialEnvironment,
   loadCapabilityCredentialMapForIds,
@@ -84,7 +85,12 @@ import {
   writeJsonAtomic,
   writeTextAtomic,
 } from "./storage.js";
-import { packageRoot, packageVersion, RESEARCH_PACKAGE_NAME } from "./constants.js";
+import {
+  packageRoot,
+  packageVersion,
+  RESEARCH_PACKAGE_NAME,
+  SETUP_UPGRADING_MARKER,
+} from "./constants.js";
 import { inspectReviewerBridgeStatus } from "./review-executor.js";
 import {
   exactResearchCliCommand,
@@ -196,7 +202,16 @@ export interface ResearchSetupPlan {
     target: string;
     reason: string;
   }>;
+  upgrade?: ResearchSetupUpgradeBinding;
   planSha256: string;
+}
+
+export interface ResearchSetupUpgradeBinding {
+  schemaVersion: 1;
+  parentPlanSha256: string;
+  parentRuntimeLockSha256: string;
+  parentConfigSha256: string;
+  parentMarkerSha256: string;
 }
 
 export interface ResearchSetupState {
@@ -240,6 +255,8 @@ export interface ResearchSetupPlanInput {
   declarativeConfigurationSha256?: string;
   environment?: NodeJS.ProcessEnv;
   targetRoots?: Partial<Record<ResearchSetupAgent, string>>;
+  /** Internal candidate creation; never a public bypass of plan verification. */
+  upgrade?: ResearchSetupUpgradeBinding;
 }
 
 export interface SetupCommandResult {
@@ -263,6 +280,17 @@ export interface ApplyResearchSetupOptions {
   sleeper?: (milliseconds: number) => Promise<unknown>;
   executor?: DoctorOptions["executor"];
   skipDoctor?: boolean;
+  upgradeCheckpoint?: (point: string) => Promise<void>;
+  /** Setup-upgrade preparation only; no public CLI flag exposes these paths. */
+  sourceCacheWorkspace?: string;
+  installerCacheDirectory?: string;
+}
+
+export interface ApplyResearchSetupResult {
+  schemaVersion: 1;
+  plan: ResearchSetupPlan;
+  state: ResearchSetupState;
+  report: Awaited<ReturnType<typeof doctorResearchSetup>> | null;
 }
 
 export type ResearchSetupCompanionInput =
@@ -504,6 +532,7 @@ export async function createResearchSetupPlan(
       agentSmokeCost: input.agentSmoke === true,
     },
     mutations: setupMutations(root, targets, selected, instructionRouting),
+    ...(input.upgrade ? { upgrade: input.upgrade } : {}),
   };
   const plan: ResearchSetupPlan = {
     ...unsigned,
@@ -513,6 +542,13 @@ export async function createResearchSetupPlan(
   await ensureDirectory(paths.control);
   const release = await acquireFileLock(paths.setupLock, setupLockPayload(plan.planSha256));
   try {
+    if (plan.upgrade) {
+      await assertUpgradeParent(plan);
+      const candidatePath = researchSetupUpgradeCandidatePath(plan);
+      await assertNoSymlinkedExistingPath(dirname(candidatePath), root);
+      await writeJsonAtomic(candidatePath, plan, 0o444);
+      return plan;
+    }
     if ((await pathExists(paths.setupPlan)) && !input.replacePlan) {
       throw setupError({
         code: "RESEARCH_SETUP_PLAN_EXISTS",
@@ -572,7 +608,9 @@ export async function loadAndVerifyResearchSetupPlan(planPath: string): Promise<
   return plan;
 }
 
-async function loadHashVerifiedResearchSetupPlan(planPath: string): Promise<ResearchSetupPlan> {
+export async function loadHashVerifiedResearchSetupPlan(
+  planPath: string,
+): Promise<ResearchSetupPlan> {
   if (!isAbsolute(planPath)) {
     throw setupError({
       code: "RESEARCH_SETUP_PLAN_INVALID",
@@ -631,7 +669,31 @@ export async function createResearchSetupUpgradePlan(input: {
   }
   const prior = await loadHashVerifiedResearchSetupPlan(workspacePaths(root).setupPlan);
   const selected = resolveSetupSkills(prior.selection.skillIds);
-  validateLicenseAcceptances(selected, input.acceptedLicenseIds);
+  const acceptedLicenseIds = [
+    ...new Set([
+      ...input.acceptedLicenseIds,
+      ...prior.acceptedLicenses
+        .filter((accepted) =>
+          selected.some(
+            (skill) => skill.id === accepted.skillId && skill.license.id === accepted.licenseId,
+          ),
+        )
+        .map((accepted) => accepted.licenseId),
+    ]),
+  ];
+  validateLicenseAcceptances(selected, acceptedLicenseIds);
+  const paths = workspacePaths(root);
+  for (const path of [paths.runtimeLock, paths.config, paths.marker]) {
+    await assertNoSymlinkedExistingPath(path, root);
+  }
+  const currentConfig = await loadWorkspaceConfig(root);
+  const upgrade: ResearchSetupUpgradeBinding = {
+    schemaVersion: 1,
+    parentPlanSha256: prior.planSha256,
+    parentRuntimeLockSha256: await sha256File(paths.runtimeLock),
+    parentConfigSha256: await sha256File(paths.config),
+    parentMarkerSha256: await sha256File(paths.marker),
+  };
   return createResearchSetupPlan({
     workspace: root,
     name: prior.workspace.name,
@@ -642,12 +704,20 @@ export async function createResearchSetupUpgradePlan(input: {
     ),
     scope: prior.install.scope,
     agents: prior.install.agents,
-    acceptedLicenseIds: input.acceptedLicenseIds,
+    acceptedLicenseIds,
     credentialEnvironment: Object.fromEntries(
       prior.credentialSources.map((credential) => [credential.id, credential.fromEnvironment]),
     ),
     settings: prior.settings,
-    agentRoutes: prior.agentRoutes,
+    agentRoutes: {
+      producerAgent: currentConfig.producer.agent,
+      reviewerAgent: currentConfig.reviewer.agent,
+      producerModel: currentConfig.producer.model,
+      reviewerModel: currentConfig.reviewer.model,
+      producerPricing: currentConfig.producer.pricing ?? null,
+      reviewerPricing: currentConfig.reviewer.pricing ?? null,
+    },
+    reviewerExecution: currentConfig.reviewerExecution,
     liveChecks: prior.checks.live,
     allowSyntheticUnstructureUpload: prior.checks.allowSyntheticUnstructureUpload,
     agentSmoke: prior.checks.agentSmoke,
@@ -655,6 +725,7 @@ export async function createResearchSetupUpgradePlan(input: {
     confirmGlobalMutation: prior.install.scope === "global",
     confirmAgentSmokeCost: prior.checks.agentSmoke,
     replacePlan: true,
+    upgrade,
     targetRoots: Object.fromEntries(
       prior.install.targets.map((target) => [target.agent, target.root]),
     ),
@@ -662,11 +733,45 @@ export async function createResearchSetupUpgradePlan(input: {
   });
 }
 
+export function researchSetupUpgradeCandidatePath(plan: ResearchSetupPlan): string {
+  return join(
+    workspacePaths(plan.workspace.path).control,
+    "setup-candidates",
+    `${plan.planSha256}.json`,
+  );
+}
+
+export async function assertUpgradeParent(plan: ResearchSetupPlan): Promise<ResearchSetupPlan> {
+  const paths = workspacePaths(plan.workspace.path);
+  const prior = await loadHashVerifiedResearchSetupPlan(paths.setupPlan);
+  if (
+    !plan.upgrade ||
+    prior.planSha256 !== plan.upgrade.parentPlanSha256 ||
+    (await sha256File(paths.runtimeLock)) !== plan.upgrade.parentRuntimeLockSha256 ||
+    (await sha256File(paths.config)) !== plan.upgrade.parentConfigSha256 ||
+    (await sha256File(paths.marker)) !== plan.upgrade.parentMarkerSha256
+  ) {
+    throw setupError({
+      code: "RESEARCH_SETUP_UPGRADE_CONFLICT",
+      step: "upgrade-parent",
+      reason: "The active generation changed after this upgrade was planned.",
+      minimumAction: "Inspect the current setup and create a new reviewed upgrade candidate.",
+      retryCommand: `tiangong-ai research setup status --workspace ${plan.workspace.path} --json`,
+      exitCode: 3,
+    });
+  }
+  return prior;
+}
+
 export async function applyResearchSetupPlan(
   planPath: string,
   options: ApplyResearchSetupOptions = {},
-) {
+): Promise<ApplyResearchSetupResult> {
   const plan = await loadAndVerifyResearchSetupPlan(resolve(planPath));
+  if (plan.upgrade) {
+    const { applyManagedSetupUpgrade } = await import("./setup-upgrade.js");
+    return applyManagedSetupUpgrade(plan, options);
+  }
   const root = plan.workspace.path;
   const paths = workspacePaths(root);
   const environment = options.environment ?? process.env;
@@ -677,7 +782,10 @@ export async function applyResearchSetupPlan(
   const release = await acquireFileLock(paths.setupLock, setupLockPayload(plan.planSha256));
   let installerCacheDirectory: string;
   try {
-    installerCacheDirectory = await mkdtemp(join(tmpdir(), "tiangong-research-npm-cache-"));
+    installerCacheDirectory =
+      options.installerCacheDirectory ??
+      (await mkdtemp(join(tmpdir(), "tiangong-research-npm-cache-")));
+    await ensureDirectory(installerCacheDirectory);
   } catch (error) {
     await release();
     throw error;
@@ -746,7 +854,14 @@ export async function applyResearchSetupPlan(
         try {
           sourceDirectories.set(
             sourceId,
-            await ensureSetupSourceCheckout(plan, sourceId, runner, setupInstallerEnvironment),
+            await ensureSetupSourceCheckout(
+              options.sourceCacheWorkspace
+                ? { ...plan, workspace: { ...plan.workspace, path: options.sourceCacheWorkspace } }
+                : plan,
+              sourceId,
+              runner,
+              setupInstallerEnvironment,
+            ),
           );
         } catch (error) {
           throw await annotateSetupSourceCheckoutFailure(error, plan, sourceId);
@@ -898,7 +1013,8 @@ export async function applyResearchSetupPlan(
     });
   } finally {
     try {
-      await rm(installerCacheDirectory, { recursive: true, force: true });
+      if (!options.installerCacheDirectory)
+        await rm(installerCacheDirectory, { recursive: true, force: true });
     } finally {
       await release();
     }
@@ -911,6 +1027,50 @@ export async function inspectResearchSetupStatus(
 ) {
   const requestedRoot = requireAbsoluteWorkspace(resolve(workspace));
   const requestedPaths = workspacePaths(requestedRoot);
+  const marker: unknown = (await pathExists(requestedPaths.marker))
+    ? await readJsonFile(requestedPaths.marker, "Research workspace marker")
+    : null;
+  if (isObject(marker) && marker.kind === SETUP_UPGRADING_MARKER) {
+    const candidateHash = marker.setupUpgradePlanSha256;
+    let recovery: Record<string, unknown> = {};
+    if (typeof candidateHash === "string" && /^[a-f0-9]{64}$/.test(candidateHash)) {
+      const planPath = join(requestedPaths.control, "setup-candidates", `${candidateHash}.json`);
+      const candidate = await loadHashVerifiedResearchSetupPlan(planPath).catch(() => null);
+      const canonicalRoot = await realpath(requestedRoot).catch(() => requestedRoot);
+      if (
+        candidate?.upgrade &&
+        candidate.planSha256 === candidateHash &&
+        candidate.workspace.path === canonicalRoot
+      ) {
+        recovery = {
+          planPath,
+          retryCommand: researchSetupApplyCommand({ version: candidate.cli.version, planPath }),
+          rollbackCommand: exactResearchCliCommand(
+            [
+              "research",
+              "setup",
+              "upgrade",
+              "--rollback",
+              "--candidate",
+              planPath,
+              "--workspace",
+              canonicalRoot,
+              "--json",
+            ],
+            candidate.cli.version,
+          ),
+        };
+      }
+    }
+    throw new CliError(
+      "Complete or roll back the recorded setup upgrade before inspecting readiness.",
+      {
+        code: "RESEARCH_SETUP_UPGRADE_PENDING",
+        exitCode: 3,
+        details: recovery,
+      },
+    );
+  }
   const plan = await loadAndVerifyResearchSetupPlan(requestedPaths.setupPlan);
   const canonicalRequestedRoot = await realpath(requestedRoot).catch(() => requestedRoot);
   if (canonicalRequestedRoot !== plan.workspace.path) {
@@ -2285,6 +2445,7 @@ export async function retryResearchSetup(input: {
 export async function checkResearchSetupUpdates(
   workspace: string,
   environment: NodeJS.ProcessEnv = process.env,
+  candidateVersion?: string,
 ) {
   const root = requireAbsoluteWorkspace(resolve(workspace));
   const plan = await loadHashVerifiedResearchSetupPlan(workspacePaths(root).setupPlan);
@@ -2320,12 +2481,41 @@ export async function checkResearchSetupUpdates(
     plan.cli.version === packageVersion()
       ? null
       : { planned: plan.cli.version, active: packageVersion() };
-  const updateAvailable = drift.length > 0 || cliVersionDrift !== null;
+  const releaseCandidate =
+    candidateVersion === undefined
+      ? null
+      : await inspectExactResearchCliRelease(candidateVersion, {
+          installedVersion: plan.cli.version,
+          environment,
+        });
+  const candidateUpgradeCommand =
+    releaseCandidate?.status === "newer"
+      ? exactResearchCliCommand(
+          [
+            "research",
+            "setup",
+            "upgrade",
+            "--plan",
+            "--confirm-upgrade",
+            "--workspace",
+            root,
+            "--json",
+          ],
+          releaseCandidate.requestedVersion,
+        ).replace(
+          /^npx /,
+          "npx --registry=https://registry.npmjs.org --@tiangong-ai:registry=https://registry.npmjs.org --strict-ssl=true ",
+        )
+      : null;
+  const updateAvailable =
+    drift.length > 0 || cliVersionDrift !== null || releaseCandidate?.status === "newer";
   return {
     schemaVersion: 1 as const,
     workspace: root,
     checkedAt: new Date().toISOString(),
     updateAvailable,
+    releaseCandidate,
+    candidateUpgradeCommand,
     cliVersionDrift,
     drift,
     currentInstaller: RESEARCH_SETUP_INSTALLER,
@@ -2496,7 +2686,8 @@ function parseResearchSetupPlan(value: unknown): ResearchSetupPlan {
         typeof mutation.reason !== "string",
     ) ||
     typeof value.planSha256 !== "string" ||
-    !/^[0-9a-f]{64}$/.test(value.planSha256)
+    !/^[0-9a-f]{64}$/.test(value.planSha256) ||
+    (value.upgrade !== undefined && !validUpgradeBinding(value.upgrade))
   ) {
     throw setupError({
       code: "RESEARCH_SETUP_PLAN_INVALID",
@@ -2508,6 +2699,20 @@ function parseResearchSetupPlan(value: unknown): ResearchSetupPlan {
     });
   }
   return value as unknown as ResearchSetupPlan;
+}
+
+function validUpgradeBinding(value: unknown): value is ResearchSetupUpgradeBinding {
+  if (!isObject(value) || value.schemaVersion !== 1) return false;
+  const keys = [
+    "parentPlanSha256",
+    "parentRuntimeLockSha256",
+    "parentConfigSha256",
+    "parentMarkerSha256",
+  ];
+  return (
+    Object.keys(value).length === keys.length + 1 &&
+    keys.every((key) => typeof value[key] === "string" && /^[0-9a-f]{64}$/.test(String(value[key])))
+  );
 }
 
 function assertPlanMatchesCatalog(plan: ResearchSetupPlan): void {
@@ -3036,7 +3241,16 @@ function setupAgentRoute(
   return {
     agent,
     executionMode,
-    binary: agent === "codex" ? "codex" : agent === "claude" ? "claude" : `${agent}-native-host`,
+    binary: sameAgent
+      ? current.binary
+      : agent === "codex"
+        ? "codex"
+        : agent === "claude"
+          ? "claude"
+          : `${agent}-native-host`,
+    ...(sameAgent && current.wrapperTargetBinary !== undefined
+      ? { wrapperTargetBinary: current.wrapperTargetBinary }
+      : {}),
     model: plannedModel ?? (sameAgent ? current.model : null),
     effort: sameAgent ? (current.effort ?? "low") : "low",
     ...(agent === "codex" ? { verbosity: sameAgent ? (current.verbosity ?? "low") : "low" } : {}),
