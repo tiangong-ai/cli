@@ -5,6 +5,7 @@ import { CliError } from "../../errors.js";
 import { appendJournalEvent, readVerifiedJournal } from "./journal.js";
 import { exactResearchCliCommand, researchSetupApplyCommand } from "./setup-invocation.js";
 import { SETUP_UPGRADING_MARKER } from "./constants.js";
+import { assertResearchSetupRuntimeIntegrity } from "./setup-runtime-integrity.js";
 import {
   applyResearchSetupPlan,
   assertUpgradeParent,
@@ -697,6 +698,7 @@ export async function rollbackResearchSetupUpgrade(
   const plan = await loadAndVerifyResearchSetupPlan(resolve(candidatePath));
   if (!plan.upgrade || plan.workspace.path !== resolve(workspace))
     throw fail("Rollback must select the exact candidate and workspace.");
+  await assertResearchSetupRuntimeIntegrity(plan.upgrade.cliRuntimeSha256);
   const root = plan.workspace.path,
     p = workspacePaths(root),
     dir = directory(root, plan.planSha256);

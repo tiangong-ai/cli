@@ -22,6 +22,10 @@ import { loadCapabilityDeclarations } from "./capabilities.js";
 import { inspectResearchContext } from "./context.js";
 import { inspectExactResearchCliRelease } from "./setup-release.js";
 import {
+  researchSetupRuntimeSha256,
+  assertResearchSetupRuntimeIntegrity,
+} from "./setup-runtime-integrity.js";
+import {
   inspectCapabilityCredentialEnvironment,
   loadCapabilityCredentialMapForIds,
   reconcileCapabilityCredentialEnvironment,
@@ -208,6 +212,7 @@ export interface ResearchSetupPlan {
 
 export interface ResearchSetupUpgradeBinding {
   schemaVersion: 1;
+  cliRuntimeSha256: string;
   parentPlanSha256: string;
   parentRuntimeLockSha256: string;
   parentConfigSha256: string;
@@ -689,6 +694,7 @@ export async function createResearchSetupUpgradePlan(input: {
   const currentConfig = await loadWorkspaceConfig(root);
   const upgrade: ResearchSetupUpgradeBinding = {
     schemaVersion: 1,
+    cliRuntimeSha256: await researchSetupRuntimeSha256(),
     parentPlanSha256: prior.planSha256,
     parentRuntimeLockSha256: await sha256File(paths.runtimeLock),
     parentConfigSha256: await sha256File(paths.config),
@@ -769,6 +775,7 @@ export async function applyResearchSetupPlan(
 ): Promise<ApplyResearchSetupResult> {
   const plan = await loadAndVerifyResearchSetupPlan(resolve(planPath));
   if (plan.upgrade) {
+    await assertResearchSetupRuntimeIntegrity(plan.upgrade.cliRuntimeSha256);
     const { applyManagedSetupUpgrade } = await import("./setup-upgrade.js");
     return applyManagedSetupUpgrade(plan, options);
   }
@@ -2704,6 +2711,7 @@ function parseResearchSetupPlan(value: unknown): ResearchSetupPlan {
 function validUpgradeBinding(value: unknown): value is ResearchSetupUpgradeBinding {
   if (!isObject(value) || value.schemaVersion !== 1) return false;
   const keys = [
+    "cliRuntimeSha256",
     "parentPlanSha256",
     "parentRuntimeLockSha256",
     "parentConfigSha256",

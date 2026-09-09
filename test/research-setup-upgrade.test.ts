@@ -51,6 +51,78 @@ import {
 // Two synthetic catalog generations, each installed through the real plan/apply
 // factory. Their hashes are computed from actual regular trees, not forged plans.
 describe("managed setup upgrade generations", () => {
+  it("rejects a same-version CLI whose runtime bytes differ from the reviewed upgrade candidate", async () => {
+    const root = await realpath(await mkdtemp(join(tmpdir(), "upgrade-code-binding-")));
+    const shadow = await realpath(await mkdtemp(join(tmpdir(), "upgrade-code-shadow-")));
+    try {
+      await createResearchSetupPlan({
+        workspace: root,
+        mode: "smoke-test",
+        evidenceProfile: "none",
+        skillIds: [],
+        acceptedLicenseIds: [],
+        confirmNetworkDownloads: false,
+      });
+      await applyResearchSetupPlan(workspacePaths(root).setupPlan, { skipDoctor: true });
+      const candidate = await createResearchSetupUpgradePlan({
+        workspace: root,
+        acceptedLicenseIds: [],
+        confirmUpgrade: true,
+      });
+      const before = await controlBytes(root);
+      for (const name of ["bin", "dist", "package.json"])
+        await cp(join(packageRoot(), name), join(shadow, name), { recursive: true });
+      await symlink(
+        join(packageRoot(), "node_modules"),
+        join(shadow, "node_modules"),
+        process.platform === "win32" ? "junction" : "dir",
+      );
+      const changedModule = join(shadow, "dist/research/workspace/constants.js");
+      await writeFile(
+        changedModule,
+        (await readFile(changedModule, "utf8")) +
+          "\n// Same version, different reviewed runtime bytes.\n",
+      );
+      const result = await new Promise<{ code: number | null; stdout: string; stderr: string }>(
+        (resolve, reject) => {
+          const child = spawn(
+            process.execPath,
+            [
+              join(shadow, "bin/tiangong-ai.js"),
+              "research",
+              "setup",
+              "apply",
+              "--plan",
+              candidatePath(root, candidate.planSha256),
+              "--skip-doctor",
+              "--json",
+            ],
+            { stdio: ["ignore", "pipe", "pipe"], timeout: 15000 },
+          );
+          let stdout = "",
+            stderr = "";
+          child.stdout.on("data", (x) => {
+            stdout += x;
+          });
+          child.stderr.on("data", (x) => {
+            stderr += x;
+          });
+          child.on("error", reject);
+          child.on("close", (code) => resolve({ code, stdout, stderr }));
+        },
+      );
+      assert.equal(
+        JSON.parse(result.stdout || result.stderr).error?.code,
+        "RESEARCH_SETUP_CLI_INTEGRITY_MISMATCH",
+        result.stderr || result.stdout,
+      );
+      assert.deepEqual(await controlBytes(root), before);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+      await rm(shadow, { recursive: true, force: true });
+    }
+  });
+
   it(
     "checks an exact candidate through the public CLI without changing the active generation",
     { skip: process.platform === "win32" },
