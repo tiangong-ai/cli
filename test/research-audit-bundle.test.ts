@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { chmod, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -266,6 +267,182 @@ describe("portable research audit bundles", () => {
       ]);
       assert.equal(cliVerified.exitCode, 0, cliVerified.stderr);
       assert.equal(JSON.parse(cliVerified.stdout).status, "verified");
+    } finally {
+      await Promise.all([
+        rm(root, { recursive: true, force: true }),
+        rm(destination, { recursive: true, force: true }),
+      ]);
+    }
+  });
+
+  it("reports a safe bundle locator when a JSON input embeds the host workspace root", async () => {
+    const root = await mkdtemp(join(tmpdir(), "tiangong-audit-json-root-"));
+    const destination = join(tmpdir(), `tiangong-audit-json-root-${process.pid}-${Date.now()}`);
+    try {
+      await initializeResearchWorkspace(root, "JSON root locator fixture");
+      await initializeProject(
+        root,
+        "json-root-locator",
+        "Do not export a host-specific workspace path.",
+      );
+      const inputPath = join(root, "field-log.json");
+      const bytes = Buffer.from(
+        `${JSON.stringify({ note: `Recorded under ${root}: json-root-marker-4c2a.` })}\n`,
+        "utf8",
+      );
+      await writeFile(inputPath, bytes);
+      await addProjectInput(root, "json-root-locator", inputPath, "primary");
+      const sha256 = createHash("sha256").update(bytes).digest("hex");
+      await assert.rejects(
+        exportProjectAuditBundle({ root, projectId: "json-root-locator", destination }),
+        (error: unknown) => {
+          const cliError = error as {
+            code?: string;
+            message?: string;
+            details?: { path?: string };
+          };
+          assert.equal(cliError.code, "RESEARCH_AUDIT_BUNDLE_NONPORTABLE");
+          assert.equal(cliError.details?.path, `inputs/${sha256}`);
+          const echoed = `${cliError.message ?? ""}${JSON.stringify(cliError.details ?? {})}`;
+          assert.doesNotMatch(echoed, new RegExp(escapeRegExp(root)));
+          assert.doesNotMatch(echoed, /json-root-marker-4c2a/);
+          return true;
+        },
+      );
+    } finally {
+      await Promise.all([
+        rm(root, { recursive: true, force: true }),
+        rm(destination, { recursive: true, force: true }),
+      ]);
+    }
+  });
+
+  it("rejects host-root text in hash-named extension-less text inputs", async () => {
+    const root = await mkdtemp(join(tmpdir(), "tiangong-audit-plain-root-"));
+    const destination = join(tmpdir(), `tiangong-audit-plain-root-${process.pid}-${Date.now()}`);
+    try {
+      await initializeResearchWorkspace(root, "Plain text root fixture");
+      await initializeProject(
+        root,
+        "plain-root-locator",
+        "Extension-less text must still be scanned.",
+      );
+      const inputPath = join(root, "field-notes");
+      const bytes = Buffer.from(
+        `Transcribed at ${root} during the fixture: plain-root-marker-9f31.\n`,
+        "utf8",
+      );
+      await writeFile(inputPath, bytes);
+      await addProjectInput(root, "plain-root-locator", inputPath, "primary");
+      const sha256 = createHash("sha256").update(bytes).digest("hex");
+      await assert.rejects(
+        exportProjectAuditBundle({ root, projectId: "plain-root-locator", destination }),
+        (error: unknown) => {
+          const cliError = error as {
+            code?: string;
+            message?: string;
+            details?: { path?: string };
+          };
+          assert.equal(cliError.code, "RESEARCH_AUDIT_BUNDLE_NONPORTABLE");
+          assert.equal(cliError.details?.path, `inputs/${sha256}`);
+          const echoed = `${cliError.message ?? ""}${JSON.stringify(cliError.details ?? {})}`;
+          assert.doesNotMatch(echoed, new RegExp(escapeRegExp(root)));
+          assert.doesNotMatch(echoed, /plain-root-marker-9f31/);
+          return true;
+        },
+      );
+    } finally {
+      await Promise.all([
+        rm(root, { recursive: true, force: true }),
+        rm(destination, { recursive: true, force: true }),
+      ]);
+    }
+  });
+
+  it("rejects credential-like text in hash-named extension-less text inputs without echoing it", async () => {
+    const root = await mkdtemp(join(tmpdir(), "tiangong-audit-plain-secret-"));
+    const destination = join(tmpdir(), `tiangong-audit-plain-secret-${process.pid}-${Date.now()}`);
+    try {
+      await initializeResearchWorkspace(root, "Plain text credential fixture");
+      await initializeProject(
+        root,
+        "plain-secret-locator",
+        "Extension-less credential text must still be rejected.",
+      );
+      const inputPath = join(root, "secret-notes");
+      const bytes = Buffer.from("token: 'fixture-hash-named-secret'\n", "utf8");
+      await writeFile(inputPath, bytes);
+      await addProjectInput(root, "plain-secret-locator", inputPath, "primary");
+      await assert.rejects(
+        exportProjectAuditBundle({ root, projectId: "plain-secret-locator", destination }),
+        (error: unknown) => {
+          const cliError = error as { code?: string; message?: string; details?: unknown };
+          assert.equal(cliError.code, "RESEARCH_AUDIT_BUNDLE_SENSITIVE");
+          const echoed = `${cliError.message ?? ""}${JSON.stringify(cliError.details ?? {})}`;
+          assert.doesNotMatch(echoed, new RegExp(escapeRegExp(root)));
+          assert.doesNotMatch(echoed, /fixture-hash-named-secret/);
+          return true;
+        },
+      );
+    } finally {
+      await Promise.all([
+        rm(root, { recursive: true, force: true }),
+        rm(destination, { recursive: true, force: true }),
+      ]);
+    }
+  });
+
+  it("still exports safe UTF-8, CSV, Markdown, hash-named text, and binary inputs unchanged", async () => {
+    const root = await mkdtemp(join(tmpdir(), "tiangong-audit-safe-scan-"));
+    const destination = join(tmpdir(), `tiangong-audit-safe-scan-${process.pid}-${Date.now()}`);
+    try {
+      await initializeResearchWorkspace(root, "Safe scan fixture");
+      const projectId = "safe-scan";
+      await initializeProject(root, projectId, "Portable safe inputs stay byte-exact.");
+      const inputs: Array<{ path: string; bytes: Buffer }> = [
+        {
+          path: join(root, "notes.md"),
+          bytes: Buffer.from(
+            "# Field notes\n\nSafe markdown for the portable audit fixture.\n",
+            "utf8",
+          ),
+        },
+        {
+          path: join(root, "observations.txt"),
+          bytes: Buffer.from("Plain observations recorded without host-specific detail.\n", "utf8"),
+        },
+        {
+          path: join(root, "summary.csv"),
+          bytes: Buffer.from("id,value\ncase-1,7\n", "utf8"),
+        },
+        {
+          path: join(root, "field-log"),
+          bytes: Buffer.from("Hash-named plain text that stays portable.\n", "utf8"),
+        },
+        {
+          path: join(root, "snapshot.bin"),
+          bytes: Buffer.concat([
+            Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
+            Buffer.alloc(32, 0),
+            Buffer.from("binary-payload", "utf8"),
+          ]),
+        },
+      ];
+      for (const input of inputs) {
+        await writeFile(input.path, input.bytes);
+        await addProjectInput(root, projectId, input.path, "primary");
+      }
+      const exported = await exportProjectAuditBundle({ root, projectId, destination });
+      assert.equal(exported.projectId, projectId);
+      assert.equal((await verifyProjectAuditBundle(destination)).status, "verified");
+      for (const input of inputs) {
+        const sha256 = createHash("sha256").update(input.bytes).digest("hex");
+        assert.equal(
+          (await readFile(join(destination, "inputs", sha256))).equals(input.bytes),
+          true,
+          input.path,
+        );
+      }
     } finally {
       await Promise.all([
         rm(root, { recursive: true, force: true }),
