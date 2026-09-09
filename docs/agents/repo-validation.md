@@ -18,8 +18,8 @@ checkPaths:
   - scripts/**
   - test/**
   - .github/workflows/**
-lastReviewedAt: 2026-09-09
-lastReviewedCommit: 35696cc29ec7c0cd7edba9468138963136e93b23
+lastReviewedAt: 2026-09-10
+lastReviewedCommit: 1fca1347fb87a130bfe0f52b8b110df1f46aa232
 ---
 
 # Repo Validation
@@ -743,7 +743,8 @@ Managed upgrade regression coverage in `test/research-setup-upgrade.test.ts`
 uses two real factory-created synthetic catalog generations and an older
 factory-selected runtime version. It covers zero-write candidates, owned and
 modified/link destinations, both install roots, config/launcher preservation,
-stale parents, prepared-record tampering, interrupted apply/rollback, real
+stale parents, a separately copied same-version CLI with changed executable
+bytes, prepared-record tampering, interrupted apply/rollback, real
 SIGKILL recovery, and exact prior-generation restoration. The public CLI
 candidate check uses an offline npm fixture; it cannot establish live registry
 or package publication facts. `test/research-setup-release.test.ts` covers the

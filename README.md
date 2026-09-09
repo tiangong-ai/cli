@@ -12,8 +12,8 @@ checkPaths:
   - package.json
   - bin/**
   - src/**
-lastReviewedAt: 2026-09-09
-lastReviewedCommit: 35696cc29ec7c0cd7edba9468138963136e93b23
+lastReviewedAt: 2026-09-10
+lastReviewedCommit: 1fca1347fb87a130bfe0f52b8b110df1f46aa232
 ---
 
 # Tiangong AI CLI
@@ -454,7 +454,11 @@ npx --yes --registry=https://registry.npmjs.org \
   --workspace /absolute/path/to/workspace --json
 ```
 
-Review the returned immutable `planPath` and execute its `applyCommand`. Planning
+Review the returned immutable `planPath` and execute its `applyCommand`. The
+candidate also binds the SHA-256 identity of `package.json`, `bin/` and `dist/`;
+apply and rollback reject changed CLI runtime bytes before workspace mutation.
+This content binding excludes installed dependencies and is not a publisher
+signature. Ordinary research commands do not rescan these trees. Planning
 leaves the active plan, runtime lock, configuration and installed Skills intact.
 Apply stages the complete selected generation, verifies each prior-owned tree,
 and reuses unchanged trees and verified downloads. Modified or linked targets
@@ -467,6 +471,8 @@ candidate recovery command. Repeat that candidate's apply to resume, or use its
 `rollbackCommand` to restore the directly bound prior generation with the new
 updater. Rollback refuses conflicting owner changes or subsequent research
 activity. Interrupted rollback remains blocked and resumes with the same command.
+Private rollback preimages (including configured credentials) and prepared caches
+are retained for recovery; they are excluded from portable setup audit exports.
 Doctor runs after coherent activation; a repeated apply does not repeat a paid
 check that already started. If its result was lost, explicitly inspect status
 and run Doctor as needed. Old readiness attestations never certify new bytes.

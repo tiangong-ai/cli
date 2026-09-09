@@ -12,8 +12,8 @@ checkPaths:
   - README.md
   - src/**
   - bin/**
-lastReviewedAt: 2026-09-09
-lastReviewedCommit: 35696cc29ec7c0cd7edba9468138963136e93b23
+lastReviewedAt: 2026-09-10
+lastReviewedCommit: 1fca1347fb87a130bfe0f52b8b110df1f46aa232
 ---
 
 # Repo Architecture
@@ -335,7 +335,10 @@ or overwrites drift.
 
 Managed setup upgrades use a separate candidate and an upgrade-specific
 transaction, without adding work to ordinary research execution. The candidate
-binds the immediate parent plan and exact runtime/config/marker hashes. Preparation
+binds the immediate parent plan, exact runtime/config/marker hashes and the
+selected CLI package manifest/bin/dist content hash. Only upgrade planning, apply
+and rollback compute that runtime-file binding; ordinary research/status paths
+retain their existing checks. Preparation
 runs existing setup in an isolated staging workspace, reusing exact source and
 installer caches. Private preimages and file/tree intents are anchored in the
 hash-chained workspace journal. Under the existing setup/workspace leases, a
