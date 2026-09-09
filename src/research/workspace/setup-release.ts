@@ -313,7 +313,13 @@ const defaultSetupReleaseRunner: SetupCommandRunner = (input) =>
           }
         }
         // The helper was spawned by this query and must never outlive it.
-        if (treeKill && treeKill.exitCode === null && !treeKill.killed) {
+        if (
+          treeKill &&
+          typeof treeKill.pid === "number" &&
+          treeKill.pid > 0 &&
+          treeKill.exitCode === null &&
+          !treeKill.killed
+        ) {
           try {
             treeKill.kill("SIGKILL");
           } catch {

@@ -1,15 +1,22 @@
 import assert from "node:assert/strict";
-import { spawnSync } from "node:child_process";
+import childProcess, { spawnSync } from "node:child_process";
+import { EventEmitter } from "node:events";
+import { syncBuiltinESMExports } from "node:module";
+import { PassThrough } from "node:stream";
 import { randomUUID } from "node:crypto";
 import { readFileSync, rmSync } from "node:fs";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { isAbsolute, join } from "node:path";
+import { delimiter, isAbsolute, join } from "node:path";
 import { afterEach, describe, it } from "node:test";
 
 import { CliError } from "../src/errors.js";
 import { inspectExactResearchCliRelease } from "../src/research/workspace/setup-release.js";
 import type { SetupCommandRunner } from "../src/research/workspace/setup.js";
+
+function sleepSync(milliseconds: number): void {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, milliseconds);
+}
 
 const REGISTRY = "https://registry.npmjs.org";
 const PACKAGE_NAME = "@tiangong-ai/cli";
@@ -434,22 +441,45 @@ describe("inspectExactResearchCliRelease", () => {
 // Escalation fixtures can outlive a failing assertion: when the implementation
 // under test never settles, the test framework timeout fires while the fixture
 // child keeps burning CPU. Cleanup must therefore not depend on the awaited
-// promise or on timers owned by the implementation. The abort listener and the
-// afterEach hook SIGKILL only processes whose command line contains our own
-// uniquely named fixture bin directory, never any other process.
-const activeFixtureBins = new Set<string>();
+// promise or on timers owned by the implementation. Every fixture process
+// registers its own pid in the fixture's pids.log; cleanup and survivor
+// assertions work from that log on every platform. POSIX additionally keeps a
+// pgrep sweep for descendants that never registered, guarded so the missing
+// Windows tool cannot crash the suite.
+type ActiveFixture = { binDirectory: string; pidLogPath: string };
+const activeFixtures = new Set<ActiveFixture>();
+
+function registeredFixturePids(pidLogPath: string): number[] {
+  try {
+    return readFileSync(pidLogPath, "utf8")
+      .split("\n")
+      .map((line) => Number(line.trim()))
+      .filter((pid) => Number.isSafeInteger(pid) && pid > 0);
+  } catch {
+    // The log appears when the first fixture process starts.
+    return [];
+  }
+}
 
 function killOwnedFixtureProcesses(): void {
-  for (const binDirectory of activeFixtureBins) {
-    const listed = spawnSync("pgrep", ["-f", `${binDirectory}/`]);
-    if (listed.status !== 0 && listed.stdout.length === 0) continue;
-    for (const line of listed.stdout.toString().split("\n")) {
-      const pid = Number(line.trim());
-      if (Number.isSafeInteger(pid) && pid > 0) {
-        try {
-          process.kill(pid, "SIGKILL");
-        } catch {
-          // The pid may have exited between pgrep and the kill.
+  for (const fixture of activeFixtures) {
+    for (const pid of registeredFixturePids(fixture.pidLogPath)) {
+      try {
+        process.kill(pid, "SIGKILL");
+      } catch {
+        // The pid may have exited between the log read and the kill.
+      }
+    }
+    if (process.platform !== "win32") {
+      const listed = spawnSync("pgrep", ["-f", `${fixture.binDirectory}/`]);
+      for (const line of (listed.stdout ?? "").toString().split("\n")) {
+        const pid = Number(line.trim());
+        if (Number.isSafeInteger(pid) && pid > 0) {
+          try {
+            process.kill(pid, "SIGKILL");
+          } catch {
+            // The pid may have exited between pgrep and the kill.
+          }
         }
       }
     }
@@ -460,12 +490,37 @@ afterEach(() => {
   killOwnedFixtureProcesses();
 });
 
-// Every fixture process (root, descendant, fake taskkill) carries the unique
-// mkdtemp bin directory in its command line, so pgrep can enumerate exactly
-// the processes we own and nothing else.
-function assertNoSurvivors(binDirectory: string): void {
+// Every fixture process registers its pid and carries the unique mkdtemp bin
+// directory in its command line, so enumeration covers exactly the processes
+// we own and nothing else.
+function assertNoSurvivors(binDirectory: string, pidLogPath: string): void {
+  // A SIGKILL takes one scheduler/reaper tick to retire a pid, and a reaped
+  // child can linger as <defunct>; on POSIX both read as "alive" to
+  // process.kill(pid, 0), so the ps stat is the authoritative death check.
+  const isLive = (pid: number): boolean => {
+    try {
+      process.kill(pid, 0);
+    } catch {
+      return false;
+    }
+    if (process.platform !== "win32") {
+      const stat = spawnSync("ps", ["-p", String(pid), "-o", "stat="]);
+      if (stat.status === 0 && stat.stdout.toString().trim().startsWith("Z")) return false;
+    }
+    return true;
+  };
+  const deadline = Date.now() + 2000;
+  let surviving = registeredFixturePids(pidLogPath).filter(isLive);
+  while (surviving.length > 0 && Date.now() < deadline) {
+    sleepSync(50);
+    surviving = registeredFixturePids(pidLogPath).filter(isLive);
+  }
+  for (const pid of surviving) {
+    assert.fail(`owned fixture process ${pid} survived the settle`);
+  }
+  if (process.platform === "win32") return;
   const listed = spawnSync("pgrep", ["-f", `${binDirectory}/`]);
-  const survivors = listed.stdout
+  const survivors = ((listed.stdout ?? "") as string | Buffer)
     .toString()
     .split("\n")
     .filter((line) => line.trim().length > 0);
@@ -474,44 +529,61 @@ function assertNoSurvivors(binDirectory: string): void {
 
 type MockNpmFixture = {
   binDirectory: string;
+  pidLogPath: string;
   lines: () => Promise<string[]>;
   dispose: () => Promise<void>;
 };
 
 async function createMockNpmExecutable(
-  scriptBodyOrFactory: string | ((binDirectory: string) => string),
+  scriptBodyOrFactory: string | ((paths: { binDirectory: string; pidLogPath: string }) => string),
   options: {
     file?: string;
     recordArgv?: boolean;
-    extraExecutables?: Array<{ file: string; body: string }>;
+    extraExecutables?: Array<{
+      file: string;
+      body: string | ((paths: { binDirectory: string; pidLogPath: string }) => string);
+    }>;
   } = {},
 ): Promise<MockNpmFixture> {
   const directory = await mkdtemp(join(tmpdir(), "tiangong-release-mock-"));
   const binDirectory = join(directory, "bin");
   await mkdir(binDirectory);
+  const pidLogPath = join(directory, "pids.log");
   const logPath = join(directory, "invocations.log");
   const record = options.recordArgv
     ? `for arg in "$@"; do echo "$arg" >> ${JSON.stringify(logPath)}; done`
     : `echo "$@" >> ${JSON.stringify(logPath)}`;
+  const paths = { binDirectory, pidLogPath };
   const scriptBody =
-    typeof scriptBodyOrFactory === "function"
-      ? scriptBodyOrFactory(binDirectory)
-      : scriptBodyOrFactory;
+    typeof scriptBodyOrFactory === "function" ? scriptBodyOrFactory(paths) : scriptBodyOrFactory;
   const executablePath = join(binDirectory, options.file ?? "npm");
-  await writeFile(executablePath, `#!/bin/sh\n${record}\n${scriptBody}\n`, { mode: 0o755 });
+  await writeFile(
+    executablePath,
+    `#!/bin/sh\necho $$ >> ${JSON.stringify(pidLogPath)}\n${record}\n${scriptBody}\n`,
+    { mode: 0o755 },
+  );
   for (const extra of options.extraExecutables ?? []) {
-    await writeFile(join(binDirectory, extra.file), `${extra.body}\n`, { mode: 0o755 });
+    const body = typeof extra.body === "function" ? extra.body(paths) : extra.body;
+    const registered = body.startsWith("#!/")
+      ? body.replace(
+          /^#![^\n]*/,
+          (shebang) => `${shebang}\necho $$ >> ${JSON.stringify(pidLogPath)}\n`,
+        )
+      : body;
+    await writeFile(join(binDirectory, extra.file), `${registered}\n`, { mode: 0o755 });
   }
-  activeFixtureBins.add(binDirectory);
+  const fixture = { binDirectory, pidLogPath };
+  activeFixtures.add(fixture);
   return {
     binDirectory,
+    pidLogPath,
     lines: async () =>
       (await readFile(logPath, "utf8").catch(() => ""))
         .split("\n")
         .filter((line) => line.length > 0),
     dispose: async () => {
       killOwnedFixtureProcesses();
-      activeFixtureBins.delete(binDirectory);
+      activeFixtures.delete(fixture);
       await rm(directory, { recursive: true, force: true });
     },
   };
@@ -527,7 +599,7 @@ function waitForReadiness(path: string): void {
       readFileSync(path, "utf8");
       return;
     } catch {
-      spawnSync("/bin/sleep", ["0.02"]);
+      sleepSync(20);
     }
   }
   assert.fail("fixture child never signalled readiness");
@@ -547,9 +619,29 @@ function waitForLogLines(path: string, minLines: number): void {
       // The log file appears when the fixture process first runs.
     }
     if (lines.length >= minLines) return;
-    spawnSync("/bin/sleep", ["0.02"]);
+    sleepSync(20);
   }
   assert.fail(`fixture log never reached ${minLines} lines`);
+}
+
+function firstRegisteredPid(pidLogPath: string): number | null {
+  return registeredFixturePids(pidLogPath)[0] ?? null;
+}
+
+// Waits for a real OS pid to exit within a bounded real-time window; returns
+// false on timeout so the caller can decide whether the mock grace must run.
+function waitForPidExit(pid: number | null, timeoutMs: number): boolean {
+  if (pid === null) return false;
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    try {
+      process.kill(pid, 0);
+    } catch {
+      return true;
+    }
+    sleepSync(50);
+  }
+  return false;
 }
 
 describe("inspectExactResearchCliRelease default runner", () => {
@@ -573,210 +665,195 @@ describe("inspectExactResearchCliRelease default runner", () => {
     ].join("\n");
   }
 
-  it("runs the real npm query through PATH and reports a newer verified release", async () => {
-    const fixture = await createMockNpmExecutable(registryJsonScript());
-    try {
-      const result = await inspectExactResearchCliRelease("0.0.61", {
-        environment: { PATH: fixture.binDirectory },
-        installedVersion: "0.0.60",
-      });
-      assert.equal(result.status, "newer");
-      assert.equal(result.reason, null);
-      assert.deepEqual(result.metadata, {
-        version: "0.0.61",
-        integrity: VALID_INTEGRITY,
-        tarball: `${REGISTRY}/${PACKAGE_NAME}/-/cli-0.0.61.tgz`,
-        gitHead: VALID_GIT_HEAD,
-      });
-      assert.equal((await fixture.lines()).length, 1);
-      assertNoLeak(result);
-    } finally {
-      await fixture.dispose();
-    }
-  });
-
-  it("routes Windows execution through the fixed cmd.exe branch with constant argv", async () => {
-    const fixture = await createMockNpmExecutable(registryJsonScript(), {
-      file: "cmd.exe",
-      recordArgv: true,
-    });
-    const originalPlatform = process.platform;
-    Object.defineProperty(process, "platform", { value: "win32" });
-    try {
-      const result = await inspectExactResearchCliRelease("0.0.61", {
-        environment: { PATH: fixture.binDirectory },
-        installedVersion: "0.0.60",
-      });
-      assert.equal(result.status, "newer");
-      assert.deepEqual(await fixture.lines(), [
-        "/d",
-        "/s",
-        "/c",
-        "npm",
-        "view",
-        "@tiangong-ai/cli@0.0.61",
-        "name",
-        "version",
-        "dist.integrity",
-        "dist.tarball",
-        "gitHead",
-        "--json",
-        "--registry",
-        REGISTRY,
-        "--@tiangong-ai:registry=https://registry.npmjs.org",
-        "--strict-ssl=true",
-      ]);
-    } finally {
-      Object.defineProperty(process, "platform", { value: originalPlatform });
-      await fixture.dispose();
-    }
-  });
-
-  it("reports unavailable when npm cannot be resolved without crashing", async () => {
-    const directory = await mkdtemp(join(tmpdir(), "tiangong-release-mock-"));
-    const binDirectory = join(directory, "bin");
-    await mkdir(binDirectory);
-    try {
-      const result = await inspectExactResearchCliRelease("0.0.61", {
-        environment: { PATH: binDirectory },
-        installedVersion: "0.0.60",
-      });
-      assertUnreachableStatus(result);
-      assert.equal(result.reason, "RESEARCH_SETUP_RELEASE_QUERY_FAILED");
-    } finally {
-      await rm(directory, { recursive: true, force: true });
-    }
-  });
-
-  it("bounds oversized registry output without echoing it", async () => {
-    const fixture = await createMockNpmExecutable(
-      [
-        'echo "SECRET-BIG-OUTPUT-MARKER"',
-        "i=0",
-        'while [ "$i" -lt 2200 ]; do',
-        `  printf '%s' '${"A".repeat(500)}'`,
-        "  i=$((i + 1))",
-        "done",
-      ].join("\n"),
-    );
-    try {
-      const result = await inspectExactResearchCliRelease("0.0.61", {
-        environment: { PATH: fixture.binDirectory },
-        installedVersion: "0.0.60",
-      });
-      assertUnreachableStatus(result);
-      assert.equal(result.reason, "RESEARCH_SETUP_RELEASE_QUERY_FAILED");
-      assert.equal((await fixture.lines()).length, 1);
-    } finally {
-      await fixture.dispose();
-    }
-  });
-
-  it("maps nonzero npm exits and non-JSON output to unavailable", async () => {
-    const failure = await createMockNpmExecutable('echo "npm ERR! mock failure" >&2\nexit 1');
-    try {
-      const result = await inspectExactResearchCliRelease("0.0.61", {
-        environment: { PATH: failure.binDirectory },
-        installedVersion: "0.0.60",
-      });
-      assertUnreachableStatus(result);
-      assert.equal(result.reason, "RESEARCH_SETUP_RELEASE_QUERY_FAILED");
-      assert.equal((await failure.lines()).length, 1);
-    } finally {
-      await failure.dispose();
-    }
-    const garbage = await createMockNpmExecutable('echo "<html>mock registry</html>"');
-    try {
-      const result = await inspectExactResearchCliRelease("0.0.61", {
-        environment: { PATH: garbage.binDirectory },
-        installedVersion: "0.0.60",
-      });
-      assertUnreachableStatus(result);
-      assert.equal(result.reason, "RESEARCH_SETUP_RELEASE_METADATA_INVALID");
-      assert.equal((await garbage.lines()).length, 1);
-    } finally {
-      await garbage.dispose();
-    }
-  });
-
-  it("applies the output cap to stdout and stderr combined", async () => {
-    const flood = "A".repeat(500);
-    const fixture = await createMockNpmExecutable(
-      [
-        "i=0",
-        'while [ "$i" -lt 1573 ]; do',
-        `  printf '%s\\n' '${flood}'`,
-        "  i=$((i + 1))",
-        "done",
-        "i=0",
-        'while [ "$i" -lt 1573 ]; do',
-        `  echo '${flood}' >&2`,
-        "  i=$((i + 1))",
-        "done",
-      ].join("\n"),
-    );
-    try {
-      const result = await inspectExactResearchCliRelease("0.0.61", {
-        environment: { PATH: fixture.binDirectory },
-        installedVersion: "0.0.60",
-      });
-      assertUnreachableStatus(result);
-      assert.equal(result.reason, "RESEARCH_SETUP_RELEASE_QUERY_FAILED");
-      assert.equal((await fixture.lines()).length, 1);
-    } finally {
-      await fixture.dispose();
-    }
-  });
-
-  it("escalates past a TERM-ignoring child and always settles", { timeout: 8000 }, async (t) => {
-    const readyPath = join(tmpdir(), `tiangong-release-ready-${randomUUID()}`);
-    const fixture = await createMockNpmExecutable(
-      `trap '' TERM\necho ready > ${JSON.stringify(readyPath)}\nwhile :; do :; done`,
-    );
-    t.mock.timers.enable({ apis: ["setTimeout"] });
-    const killOnAbort = () => killOwnedFixtureProcesses();
-    t.signal.addEventListener("abort", killOnAbort);
-    try {
-      const pending = inspectExactResearchCliRelease("0.0.61", {
-        environment: { PATH: fixture.binDirectory },
-        installedVersion: "0.0.60",
-      });
-      waitForReadiness(readyPath);
-      t.mock.timers.tick(30_000);
-      t.mock.timers.tick(120_000);
-      const result = await pending;
-      assertUnreachableStatus(result);
-      assert.equal(result.reason, "RESEARCH_SETUP_RELEASE_QUERY_FAILED");
-    } finally {
-      await fixture.dispose();
-      rmSync(readyPath, { force: true });
-    }
-  });
+  it(
+    "runs the real npm query through PATH and reports a newer verified release",
+    { skip: process.platform === "win32" },
+    async () => {
+      const fixture = await createMockNpmExecutable(registryJsonScript());
+      try {
+        const result = await inspectExactResearchCliRelease("0.0.61", {
+          environment: { PATH: fixture.binDirectory },
+          installedVersion: "0.0.60",
+        });
+        assert.equal(result.status, "newer");
+        assert.equal(result.reason, null);
+        assert.deepEqual(result.metadata, {
+          version: "0.0.61",
+          integrity: VALID_INTEGRITY,
+          tarball: `${REGISTRY}/${PACKAGE_NAME}/-/cli-0.0.61.tgz`,
+          gitHead: VALID_GIT_HEAD,
+        });
+        assert.equal((await fixture.lines()).length, 1);
+        assertNoLeak(result);
+      } finally {
+        await fixture.dispose();
+      }
+    },
+  );
 
   it(
-    "forces the Windows process tree with taskkill /T /F when the query window times out",
-    { timeout: 8000 },
-    async (t) => {
-      const readyPath = join(tmpdir(), `tiangong-release-ready-${randomUUID()}`);
-      const taskkillLog = join(tmpdir(), `tiangong-release-taskkill-${randomUUID()}.log`);
-      const fixture = await createMockNpmExecutable(
-        `trap '' TERM\necho ready > ${JSON.stringify(readyPath)}\nwhile :; do :; done`,
-        {
-          file: "cmd.exe",
-          extraExecutables: [
-            {
-              file: "taskkill",
-              body: [
-                "#!/bin/sh",
-                `for arg in "$@"; do echo "$arg" >> ${JSON.stringify(taskkillLog)}; done`,
-                'kill -9 "$2"',
-              ].join("\n"),
-            },
-          ],
-        },
-      );
+    "routes Windows execution through the fixed cmd.exe branch with constant argv",
+    // The argv shape is asserted against the POSIX emulation of the branch;
+    // real Windows coverage lives in the native npm.cmd fixtures below.
+    { skip: process.platform === "win32" },
+    async () => {
+      const fixture = await createMockNpmExecutable(registryJsonScript(), {
+        file: "cmd.exe",
+        recordArgv: true,
+      });
       const originalPlatform = process.platform;
       Object.defineProperty(process, "platform", { value: "win32" });
+      try {
+        const result = await inspectExactResearchCliRelease("0.0.61", {
+          environment: { PATH: fixture.binDirectory },
+          installedVersion: "0.0.60",
+        });
+        assert.equal(result.status, "newer");
+        assert.deepEqual(await fixture.lines(), [
+          "/d",
+          "/s",
+          "/c",
+          "npm",
+          "view",
+          "@tiangong-ai/cli@0.0.61",
+          "name",
+          "version",
+          "dist.integrity",
+          "dist.tarball",
+          "gitHead",
+          "--json",
+          "--registry",
+          REGISTRY,
+          "--@tiangong-ai:registry=https://registry.npmjs.org",
+          "--strict-ssl=true",
+        ]);
+      } finally {
+        Object.defineProperty(process, "platform", { value: originalPlatform });
+        await fixture.dispose();
+      }
+    },
+  );
+
+  it(
+    "reports unavailable when npm cannot be resolved without crashing",
+    { skip: process.platform === "win32" },
+    async () => {
+      const directory = await mkdtemp(join(tmpdir(), "tiangong-release-mock-"));
+      const binDirectory = join(directory, "bin");
+      await mkdir(binDirectory);
+      try {
+        const result = await inspectExactResearchCliRelease("0.0.61", {
+          environment: { PATH: binDirectory },
+          installedVersion: "0.0.60",
+        });
+        assertUnreachableStatus(result);
+        assert.equal(result.reason, "RESEARCH_SETUP_RELEASE_QUERY_FAILED");
+      } finally {
+        await rm(directory, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it(
+    "bounds oversized registry output without echoing it",
+    { skip: process.platform === "win32" },
+    async () => {
+      const fixture = await createMockNpmExecutable(
+        [
+          'echo "SECRET-BIG-OUTPUT-MARKER"',
+          "i=0",
+          'while [ "$i" -lt 2200 ]; do',
+          `  printf '%s' '${"A".repeat(500)}'`,
+          "  i=$((i + 1))",
+          "done",
+        ].join("\n"),
+      );
+      try {
+        const result = await inspectExactResearchCliRelease("0.0.61", {
+          environment: { PATH: fixture.binDirectory },
+          installedVersion: "0.0.60",
+        });
+        assertUnreachableStatus(result);
+        assert.equal(result.reason, "RESEARCH_SETUP_RELEASE_QUERY_FAILED");
+        assert.equal((await fixture.lines()).length, 1);
+      } finally {
+        await fixture.dispose();
+      }
+    },
+  );
+
+  it(
+    "maps nonzero npm exits and non-JSON output to unavailable",
+    { skip: process.platform === "win32" },
+    async () => {
+      const failure = await createMockNpmExecutable('echo "npm ERR! mock failure" >&2\nexit 1');
+      try {
+        const result = await inspectExactResearchCliRelease("0.0.61", {
+          environment: { PATH: failure.binDirectory },
+          installedVersion: "0.0.60",
+        });
+        assertUnreachableStatus(result);
+        assert.equal(result.reason, "RESEARCH_SETUP_RELEASE_QUERY_FAILED");
+        assert.equal((await failure.lines()).length, 1);
+      } finally {
+        await failure.dispose();
+      }
+      const garbage = await createMockNpmExecutable('echo "<html>mock registry</html>"');
+      try {
+        const result = await inspectExactResearchCliRelease("0.0.61", {
+          environment: { PATH: garbage.binDirectory },
+          installedVersion: "0.0.60",
+        });
+        assertUnreachableStatus(result);
+        assert.equal(result.reason, "RESEARCH_SETUP_RELEASE_METADATA_INVALID");
+        assert.equal((await garbage.lines()).length, 1);
+      } finally {
+        await garbage.dispose();
+      }
+    },
+  );
+
+  it(
+    "applies the output cap to stdout and stderr combined",
+    { skip: process.platform === "win32" },
+    async () => {
+      const flood = "A".repeat(500);
+      const fixture = await createMockNpmExecutable(
+        [
+          "i=0",
+          'while [ "$i" -lt 1573 ]; do',
+          `  printf '%s\\n' '${flood}'`,
+          "  i=$((i + 1))",
+          "done",
+          "i=0",
+          'while [ "$i" -lt 1573 ]; do',
+          `  echo '${flood}' >&2`,
+          "  i=$((i + 1))",
+          "done",
+        ].join("\n"),
+      );
+      try {
+        const result = await inspectExactResearchCliRelease("0.0.61", {
+          environment: { PATH: fixture.binDirectory },
+          installedVersion: "0.0.60",
+        });
+        assertUnreachableStatus(result);
+        assert.equal(result.reason, "RESEARCH_SETUP_RELEASE_QUERY_FAILED");
+        assert.equal((await fixture.lines()).length, 1);
+      } finally {
+        await fixture.dispose();
+      }
+    },
+  );
+
+  it(
+    "escalates past a TERM-ignoring child and always settles",
+    { timeout: 8000, skip: process.platform === "win32" },
+    async (t) => {
+      const readyPath = join(tmpdir(), `tiangong-release-ready-${randomUUID()}`);
+      const fixture = await createMockNpmExecutable(
+        `trap '' TERM\necho ready > ${JSON.stringify(readyPath)}\nwhile :; do :; done`,
+      );
       t.mock.timers.enable({ apis: ["setTimeout"] });
       const killOnAbort = () => killOwnedFixtureProcesses();
       t.signal.addEventListener("abort", killOnAbort);
@@ -787,32 +864,76 @@ describe("inspectExactResearchCliRelease default runner", () => {
         });
         waitForReadiness(readyPath);
         t.mock.timers.tick(30_000);
-        // Let the real taskkill helper record its argv and act before any
-        // further mock-clock advance can race it.
-        waitForLogLines(taskkillLog, 4);
         t.mock.timers.tick(120_000);
         const result = await pending;
         assertUnreachableStatus(result);
         assert.equal(result.reason, "RESEARCH_SETUP_RELEASE_QUERY_FAILED");
-        const argv = (await readFile(taskkillLog, "utf8").catch(() => ""))
-          .split("\n")
-          .filter((line) => line.length > 0);
-        assert.equal(argv[0], "/pid");
-        assert.match(argv[1] ?? "", /^\d+$/);
-        assert.equal(argv[2], "/T");
-        assert.equal(argv[3], "/F");
       } finally {
-        Object.defineProperty(process, "platform", { value: originalPlatform });
-        rmSync(taskkillLog, { force: true });
-        rmSync(readyPath, { force: true });
         await fixture.dispose();
+        rmSync(readyPath, { force: true });
       }
     },
   );
 
+  it("does not signal an unspawned Windows tree-kill helper and preserves the exact taskkill target", async (t) => {
+    const originalPlatform = process.platform;
+    const originalSpawn = childProcess.spawn;
+    const calls: Array<{ command: string; args: readonly string[] }> = [];
+    let rootSignals = 0,
+      helperSignals = 0;
+    const root = Object.assign(new EventEmitter(), {
+      pid: 12345,
+      exitCode: null,
+      killed: false,
+      stdout: new PassThrough(),
+      stderr: new PassThrough(),
+      kill: () => {
+        rootSignals++;
+        return true;
+      },
+    });
+    const helper = Object.assign(new EventEmitter(), {
+      pid: undefined,
+      exitCode: null,
+      killed: false,
+      kill: () => {
+        helperSignals++;
+        return false;
+      },
+    });
+    try {
+      Object.defineProperty(process, "platform", { value: "win32" });
+      childProcess.spawn = ((command: string, args: readonly string[]) => {
+        calls.push({ command, args });
+        return calls.length === 1 ? root : helper;
+      }) as typeof childProcess.spawn;
+      syncBuiltinESMExports();
+      t.mock.timers.enable({ apis: ["setTimeout"] });
+      const pending = inspectExactResearchCliRelease("0.0.61", {
+        installedVersion: "0.0.60",
+        environment: { PATH: "fixture-only" },
+      });
+      t.mock.timers.tick(30_000);
+      t.mock.timers.tick(6_000);
+      const result = await pending;
+      assert.equal(result.reason, "RESEARCH_SETUP_RELEASE_QUERY_FAILED");
+      assert.equal(calls.length, 2);
+      assert.deepEqual(calls[1], { command: "taskkill", args: ["/pid", "12345", "/T", "/F"] });
+      assert.ok(rootSignals > 0, "the valid owned root still receives the bounded fallback");
+      assert.equal(helperSignals, 0, "an unspawned process handle has no owned PID to signal");
+    } finally {
+      t.mock.timers.reset();
+      childProcess.spawn = originalSpawn;
+      syncBuiltinESMExports();
+      Object.defineProperty(process, "platform", { value: originalPlatform });
+      root.stdout.destroy();
+      root.stderr.destroy();
+    }
+  });
+
   it(
     "settles by timeout plus finite grace when a descendant keeps the inherited pipes open",
-    { timeout: 8000 },
+    { timeout: 8000, skip: process.platform === "win32" },
     async (t) => {
       // The root npm process exits on its own, but its descendant inherits the
       // root's stdout/stderr pipes and keeps them open while ignoring TERM.
@@ -822,8 +943,10 @@ describe("inspectExactResearchCliRelease default runner", () => {
       // timeout+grace budget and every owned process must be gone afterwards.
       const readyPath = join(tmpdir(), `tiangong-release-ready-${randomUUID()}`);
       const fixture = await createMockNpmExecutable(
-        (binDirectory) =>
-          [`${JSON.stringify(join(binDirectory, "descendant"))} &`, "echo root-exited"].join("\n"),
+        (paths) =>
+          [`${JSON.stringify(join(paths.binDirectory, "descendant"))} &`, "echo root-exited"].join(
+            "\n",
+          ),
         {
           extraExecutables: [
             {
@@ -847,7 +970,7 @@ describe("inspectExactResearchCliRelease default runner", () => {
         const result = await pending;
         assertUnreachableStatus(result);
         assert.equal(result.reason, "RESEARCH_SETUP_RELEASE_QUERY_FAILED");
-        assertNoSurvivors(fixture.binDirectory);
+        assertNoSurvivors(fixture.binDirectory, fixture.pidLogPath);
       } finally {
         await fixture.dispose();
         rmSync(readyPath, { force: true });
@@ -855,3 +978,180 @@ describe("inspectExactResearchCliRelease default runner", () => {
     },
   );
 });
+
+// Native Windows fixtures for the default runner. The child PATH must reach
+// both the fixture npm.cmd and the real System32 tools (cmd.exe, taskkill);
+// a fixture-only PATH cannot resolve them and is asserted separately. All
+// metadata comes from a local file; no real npm, registry, or provider call.
+describe(
+  "inspectExactResearchCliRelease default runner on Windows",
+  { skip: process.platform !== "win32" },
+  () => {
+    async function createWindowsNpmFixture(
+      behavior: "valid" | "garbage" | "exit-failure" | "oversize" | "hung",
+    ): Promise<{ binDirectory: string; pidLogPath: string; dispose(): Promise<void> }> {
+      const directory = await mkdtemp(join(tmpdir(), "tiangong-release-win-"));
+      const binDirectory = join(directory, "bin");
+      await mkdir(binDirectory);
+      const pidLogPath = join(directory, "pids.log");
+      const fixture = { binDirectory, pidLogPath };
+      activeFixtures.add(fixture);
+      const metadataPath = join(directory, "metadata.json");
+      await writeFile(metadataPath, payload());
+      const hook = [
+        'const fs = require("node:fs");',
+        `fs.appendFileSync(${JSON.stringify(pidLogPath)}, String(process.pid) + "\\n");`,
+        `const behavior = ${JSON.stringify(behavior)};`,
+        "const argv = process.argv.slice(2);",
+        'const pins = ["--@tiangong-ai:registry=https://registry.npmjs.org", "--strict-ssl=true"];',
+        "if (!pins.every((pin) => argv.includes(pin))) process.exit(99);",
+        'if (behavior === "valid") {',
+        `  fs.writeSync(1, fs.readFileSync(${JSON.stringify(metadataPath)}, "utf8"));`,
+        "  process.exit(0);",
+        "}",
+        'if (behavior === "garbage") { fs.writeSync(1, "<html>mock registry</html>\\n"); process.exit(0); }',
+        'if (behavior === "exit-failure") process.exit(1);',
+        'if (behavior === "oversize") { process.stdout.write("A".repeat(1200000), () => process.exit(0)); return; }',
+        "setInterval(() => {}, 10000);",
+        "",
+      ].join("\n");
+      await writeFile(join(binDirectory, "npm-hook.cjs"), hook);
+      const batch = [
+        "@echo off",
+        `"${process.execPath}" "${join(binDirectory, "npm-hook.cjs")}" %*`,
+        "",
+      ].join("\r\n");
+      await writeFile(join(binDirectory, "npm.cmd"), batch);
+      return {
+        binDirectory,
+        pidLogPath,
+        dispose: async () => {
+          killOwnedFixtureProcesses();
+          activeFixtures.delete(fixture);
+          await rm(directory, { recursive: true, force: true });
+        },
+      };
+    }
+
+    function childPath(binDirectory: string): string {
+      const system32 = join(process.env.SystemRoot ?? "C:\\Windows", "System32");
+      return `${binDirectory}${delimiter}${system32}`;
+    }
+
+    it("answers the pinned query through a real cmd.exe and npm.cmd chain with file-backed metadata", async () => {
+      const fixture = await createWindowsNpmFixture("valid");
+      try {
+        const result = await inspectExactResearchCliRelease("0.0.61", {
+          environment: { PATH: childPath(fixture.binDirectory) },
+          installedVersion: "0.0.60",
+        });
+        assert.equal(result.status, "newer");
+        assert.equal(result.reason, null);
+        assert.deepEqual(result.metadata, {
+          version: "0.0.61",
+          integrity: VALID_INTEGRITY,
+          tarball: `${REGISTRY}/${PACKAGE_NAME}/-/cli-0.0.61.tgz`,
+          gitHead: VALID_GIT_HEAD,
+        });
+      } finally {
+        await fixture.dispose();
+      }
+    });
+
+    it("maps nonzero exits and garbage output from a real npm.cmd to unavailable", async () => {
+      const failure = await createWindowsNpmFixture("exit-failure");
+      try {
+        const result = await inspectExactResearchCliRelease("0.0.61", {
+          environment: { PATH: childPath(failure.binDirectory) },
+          installedVersion: "0.0.60",
+        });
+        assertUnreachableStatus(result);
+        assert.equal(result.reason, "RESEARCH_SETUP_RELEASE_QUERY_FAILED");
+      } finally {
+        await failure.dispose();
+      }
+      const garbage = await createWindowsNpmFixture("garbage");
+      try {
+        const result = await inspectExactResearchCliRelease("0.0.61", {
+          environment: { PATH: childPath(garbage.binDirectory) },
+          installedVersion: "0.0.60",
+        });
+        assertUnreachableStatus(result);
+        assert.equal(result.reason, "RESEARCH_SETUP_RELEASE_METADATA_INVALID");
+      } finally {
+        await garbage.dispose();
+      }
+    });
+
+    it(
+      "bounds oversized npm.cmd output and cleans its own process tree",
+      { timeout: 15000 },
+      async () => {
+        const fixture = await createWindowsNpmFixture("oversize");
+        try {
+          const result = await inspectExactResearchCliRelease("0.0.61", {
+            environment: { PATH: childPath(fixture.binDirectory) },
+            installedVersion: "0.0.60",
+          });
+          assertUnreachableStatus(result);
+          assert.equal(result.reason, "RESEARCH_SETUP_RELEASE_QUERY_FAILED");
+        } finally {
+          await fixture.dispose();
+        }
+      },
+    );
+
+    it(
+      "settles the timeout path within its bounded budget and leaves no owned process behind",
+      { timeout: 45_000 },
+      async (t) => {
+        const fixture = await createWindowsNpmFixture("hung");
+        let settledResult: Awaited<ReturnType<typeof inspectExactResearchCliRelease>> | undefined;
+        try {
+          t.mock.timers.enable({ apis: ["setTimeout"] });
+          const killOnAbort = () => killOwnedFixtureProcesses();
+          t.signal.addEventListener("abort", killOnAbort);
+          const pending = inspectExactResearchCliRelease("0.0.61", {
+            environment: { PATH: childPath(fixture.binDirectory) },
+            installedVersion: "0.0.60",
+          });
+          waitForLogLines(fixture.pidLogPath, 1);
+          t.mock.timers.tick(30_000);
+          // The real asynchronous taskkill now owns the tree kill; give it a
+          // bounded real-time window before advancing the mock grace, so the
+          // watchdog cannot reap the helper before it executes.
+          const rootPid = firstRegisteredPid(fixture.pidLogPath);
+          if (!waitForPidExit(rootPid, 5_000)) {
+            t.mock.timers.tick(10_000);
+          }
+          t.mock.timers.tick(120_000);
+          settledResult = await pending;
+          // Production cleanup is asserted before any test-side sweep; the
+          // finally block below stays an independent failure-path backstop.
+          assert.ok(settledResult, "the bounded query never settled");
+          assertUnreachableStatus(settledResult);
+          assert.equal(settledResult.reason, "RESEARCH_SETUP_RELEASE_QUERY_FAILED");
+          assertNoSurvivors(fixture.binDirectory, fixture.pidLogPath);
+        } finally {
+          await fixture.dispose();
+        }
+      },
+    );
+
+    it("reports unavailable when required executables are absent from the child PATH", async () => {
+      const directory = await mkdtemp(join(tmpdir(), "tiangong-release-win-"));
+      const binDirectory = join(directory, "bin");
+      await mkdir(binDirectory);
+      try {
+        const result = await inspectExactResearchCliRelease("0.0.61", {
+          environment: { PATH: binDirectory },
+          installedVersion: "0.0.60",
+        });
+        assertUnreachableStatus(result);
+        assert.equal(result.reason, "RESEARCH_SETUP_RELEASE_QUERY_FAILED");
+      } finally {
+        await rm(directory, { recursive: true, force: true });
+      }
+    });
+  },
+);
