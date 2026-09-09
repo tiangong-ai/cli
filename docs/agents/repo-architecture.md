@@ -186,7 +186,8 @@ storage writes, queueing, and document status transitions.
   real-record construct-canary artifacts, pilot-methods invariants, complete-lifecycle
   review/revision reservations, and target-specific reapproval for every
   authoritative fork or addendum generation,
-  mechanical publication assessment, required manuscript sections, explicit
+  mechanical publication assessment, required manuscript sections with
+  conservative decimal numbering normalization, explicit
   role-complete submission-file manifests, immutable final-manuscript
   generations that bind content/inference/graph/reproducibility objects,
   append-only fresh-session and configured other-agent-family enforcement

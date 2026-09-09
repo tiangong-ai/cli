@@ -329,7 +329,7 @@ describe("portable research audit bundles", () => {
       );
       const inputPath = join(root, "field-notes");
       const bytes = Buffer.from(
-        `Transcribed at ${root} during the fixture: plain-root-marker-9f31.\n`,
+        `观测记录来自 ${root} during the fixture: plain-root-marker-9f31.\n`,
         "utf8",
       );
       await writeFile(inputPath, bytes);
@@ -409,7 +409,7 @@ describe("portable research audit bundles", () => {
         },
         {
           path: join(root, "observations.txt"),
-          bytes: Buffer.from("Plain observations recorded without host-specific detail.\n", "utf8"),
+          bytes: Buffer.from("无私有路径的观测记录。Plain observations stay portable.\n", "utf8"),
         },
         {
           path: join(root, "summary.csv"),
@@ -425,6 +425,13 @@ describe("portable research audit bundles", () => {
             Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
             Buffer.alloc(32, 0),
             Buffer.from("binary-payload", "utf8"),
+          ]),
+        },
+        {
+          path: join(root, "non-utf8.bin"),
+          bytes: Buffer.concat([
+            Buffer.from([0xff, 0xfe, 0xc0]),
+            Buffer.from("token: 'opaque-binary-fixture'", "ascii"),
           ]),
         },
       ];

@@ -782,7 +782,10 @@ overloading one hash with both meanings.
 After base closure, the current native host writes a final Markdown/plain-text
 manuscript, schema-valid publication assessment, and an explicit submission
 manifest. The manuscript must contain Abstract, Introduction, Methods, Results,
-Discussion, Data availability, Code availability, and References. The
+Discussion, Data availability, Code availability, and References. Decimal
+section prefixes such as `1. Introduction`, `2 Methods`, `3.1 Results`, and
+`4) Discussion` are accepted when separated from the title by whitespace;
+unrelated titles and body text still cannot satisfy a required section. The
 submission manifest must bind distinct absolute files for cover letter, title
 page, reporting checklist, data availability, code availability, and source
 data; figure/table index, extended data, and supplementary methods are optional.
@@ -839,6 +842,10 @@ from credential fields. It checks raw text and read-only decoded JSON/JSONL,
 including escaped keys and nested string payloads, while retaining the exact
 evidence and ledger bytes. Authentication values remain blocked even when wrapped
 in arrays or objects; an identifier's UUID shape is never a credential exemption.
+Within the existing 16 MiB per-file text scan bound, valid UTF-8 inputs are also
+checked after staging under extensionless content hashes. Binary inputs remain
+byte-preserving. A nonportable-path error reports a bundle-relative `details.path`
+without disclosing the original host path or the matched source text.
 
 ```bash
 tiangong-ai research project audit export top-journal-paper \

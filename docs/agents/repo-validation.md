@@ -645,6 +645,11 @@ exported ledger bytes exactly. Credential regressions retain true session UUID,
 prefixed API/password and OAuth secret checks, preserve JSON validity with escaped
 quotes/backslashes, and reject Unicode-escaped keys, JSONL and nested credential
 payloads without exempting whole events or UUID values.
+Extensionless UTF-8 input tests include non-ASCII content, host-path rejection,
+credential rejection, safe CSV/Markdown and byte-identical binary/non-UTF-8
+inputs. Nonportable diagnostics identify only the safe bundle-relative file.
+Full publication-freeze regressions accept conservative decimal section
+numbering while rejecting missing, unrelated, unseparated and body-only titles.
 Production tests additionally require an external
 public-internet plan and block downstream work when any capability marked
 `requiredForDiscovery` lacks a broker receipt. The failure distinguishes a

@@ -1146,6 +1146,9 @@ async function validateSubmissionManuscript(path: string): Promise<void> {
   const content = await readRegularTextFile(canonical, "submission manuscript");
   const headings = [...content.matchAll(/^#{1,6}\s+(.+?)\s*$/gmu)].map((match) =>
     (match[1] ?? "")
+      // Strip only a conservative section number ("1", "3.1") optionally closed
+      // by "." or ")" and followed by required whitespace; "1Introduction" stays.
+      .replace(/^\d+(?:\.\d+)*[.)]?[ \t]+/u, "")
       .trim()
       .toLowerCase()
       .replaceAll(/[^a-z0-9]+/gu, " ")

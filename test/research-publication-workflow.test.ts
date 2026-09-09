@@ -495,9 +495,7 @@ describe("top-journal publication workflow", () => {
         sectionManuscript(STANDARD_SECTIONS.filter(([heading]) => heading !== "Discussion")),
         ["discussion"],
       );
-      await expectMissing(sectionManuscript(withHeading("Methods", "2 Methodology")), [
-        "methods",
-      ]);
+      await expectMissing(sectionManuscript(withHeading("Methods", "2 Methodology")), ["methods"]);
       await expectMissing(
         sectionManuscript(
           STANDARD_SECTIONS.map(([heading, body]): [string, string] =>
