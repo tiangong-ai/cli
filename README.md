@@ -13,7 +13,7 @@ checkPaths:
   - bin/**
   - src/**
 lastReviewedAt: 2026-09-10
-lastReviewedCommit: 1fca1347fb87a130bfe0f52b8b110df1f46aa232
+lastReviewedCommit: dcf4075f496ebbbfd31b9a1c79931a408d3789d1
 ---
 
 # Tiangong AI CLI
@@ -439,7 +439,8 @@ pins the public npm registry and package scope, has finite time/output limits,
 and reports `newer`, `same`, `older`, or `unavailable`. Metadata includes the
 exact version, tarball URL, SHA-512 integrity and Git commit. This validates
 registry metadata; it does not independently download or authenticate the
-package. An unavailable query never means that no update exists.
+package. An unavailable query never means that no update exists: when there is
+no separately confirmed local migration, `updateAvailable` is `null`.
 
 An older workspace resolver deliberately continues selecting its recorded CLI.
 To use an upgrade-capable candidate, select its exact published version and run
