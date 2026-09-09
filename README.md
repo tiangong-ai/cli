@@ -12,8 +12,8 @@ checkPaths:
   - package.json
   - bin/**
   - src/**
-lastReviewedAt: 2026-09-08
-lastReviewedCommit: 79b6b941060e525ebc0b9c5e1f6968e1806c1901
+lastReviewedAt: 2026-09-10
+lastReviewedCommit: 8ce5cd33c960a5176e3a9dd959f5ce6bf5a06343
 ---
 
 # Tiangong AI CLI
@@ -429,6 +429,57 @@ bytes still proven to be setup-owned. Status and Doctor verify the installed
 bytes and report that a new native-host session is required before the routing
 instruction becomes active. Global-scope Skill installation does not create
 project instruction files.
+
+### Reviewed setup upgrades
+
+Use `research setup update --check --candidate-version <exact-stable-version>`
+to inspect one explicitly selected release. Omitting `--candidate-version` keeps
+this a local catalog comparison with no registry request. The optional query
+pins the public npm registry and package scope, has finite time/output limits,
+and reports `newer`, `same`, `older`, or `unavailable`. Metadata includes the
+exact version, tarball URL, SHA-512 integrity and Git commit. This validates
+registry metadata; it does not independently download or authenticate the
+package. An unavailable query never means that no update exists: when there is
+no separately confirmed local migration, `updateAvailable` is `null`.
+
+An older workspace resolver deliberately continues selecting its recorded CLI.
+To use an upgrade-capable candidate, select its exact published version and run
+that version directly; do not edit the runtime lock or use floating `latest`:
+
+```bash
+REVIEWED_UPGRADE_CLI_VERSION=X.Y.Z # replace with one reviewed exact stable release
+npx --yes --registry=https://registry.npmjs.org \
+  --@tiangong-ai:registry=https://registry.npmjs.org --strict-ssl=true \
+  --package "@tiangong-ai/cli@$REVIEWED_UPGRADE_CLI_VERSION" -- tiangong-ai \
+  research setup upgrade --plan --confirm-upgrade \
+  --workspace /absolute/path/to/workspace --json
+```
+
+Review the returned immutable `planPath` and execute its `applyCommand`. The
+candidate also binds the SHA-256 identity of `package.json`, `bin/` and `dist/`;
+apply and rollback reject changed CLI runtime bytes before workspace mutation.
+This content binding excludes installed dependencies and is not a publisher
+signature. Ordinary research commands do not rescan these trees. Planning
+leaves the active plan, runtime lock, configuration and installed Skills intact.
+Apply stages the complete selected generation, verifies each prior-owned tree,
+and reuses unchanged trees and verified downloads. Modified or linked targets
+remain protected. It preserves the workspace identity, evidence, credentials,
+budgets, current model/pricing choices, custom launchers and reviewer transport.
+Changed license choices remain explicit; unchanged accepted licenses carry forward.
+
+An interrupted commit blocks ordinary workspace use and reports the exact
+candidate recovery command. Repeat that candidate's apply to resume, or use its
+`rollbackCommand` to restore the directly bound prior generation with the new
+updater. Rollback refuses conflicting owner changes or subsequent research
+activity. Interrupted rollback remains blocked and resumes with the same command.
+Private rollback preimages (including configured credentials) and prepared caches
+are retained for recovery; they are excluded from portable setup audit exports.
+Doctor runs after coherent activation; a repeated apply does not repeat a paid
+check that already started. If its result was lost, explicitly inspect status
+and run Doctor as needed. Old readiness attestations never certify new bytes.
+A legacy already-mixed plan/lock fails with
+`RESEARCH_SETUP_LEGACY_UPGRADE_RECOVERY_REQUIRED`; preserve its directly linked
+setup history for diagnosis rather than deleting Skills or rewriting locks.
 
 ### Declarative setup
 

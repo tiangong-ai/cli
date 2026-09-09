@@ -22,6 +22,7 @@ import {
   checkResearchSetupUpdates,
   createResearchSetupPlan,
   createResearchSetupUpgradePlan,
+  researchSetupUpgradeCandidatePath,
   doctorResearchSetup,
   inspectResearchSetupStatus,
   retryResearchSetup,
@@ -31,6 +32,10 @@ import {
   type ResearchSetupAgentRoutePlan,
   type ResearchSetupEvidenceProfile,
 } from "./workspace/setup.js";
+import {
+  exactResearchCliCommand,
+  researchSetupApplyCommand,
+} from "./workspace/setup-invocation.js";
 import { isObject, workspacePaths } from "./workspace/storage.js";
 import type { ResearchMode } from "./workspace/types.js";
 import {
@@ -91,8 +96,9 @@ export function researchSetupHelp(): string {
   tiangong-ai research setup companion run --id tiangong.document-granular-decompose --input <absolute-file> --output <absolute-new-file> [--timeout <seconds>] [--workspace <absolute-path>] [--json]
   tiangong-ai research setup companion run --id tiangong.academic-paper-download (--doi <doi> | --title <exact-title> [--author <name>] [--year <yyyy>]) --out <absolute-existing-directory> [--timeout <seconds>] [--workspace <absolute-path>] [--json]
   tiangong-ai research setup retry --step <recorded-step> [--clear-stale-lock --confirm-clear-stale-lock] [--workspace <absolute-path>] [--json]
-  tiangong-ai research setup update --check [--workspace <absolute-path>] [--json]
-  tiangong-ai research setup upgrade --plan --confirm-upgrade --accept-license <csv> [--workspace <absolute-path>] [--json]
+  tiangong-ai research setup update --check [--candidate-version <exact-stable-version>] [--workspace <absolute-path>] [--json]
+  tiangong-ai research setup upgrade --rollback --candidate <absolute-plan-path> --workspace <absolute-path> [--json]
+  tiangong-ai research setup upgrade --plan --confirm-upgrade [--accept-license <csv>] [--workspace <absolute-path>] [--json]
 
 Safety defaults:
   Skills are never bundled or installed implicitly. Plans pin the installer,
@@ -559,7 +565,7 @@ async function runRetry(argv: string[], io: CliIO): Promise<number> {
 async function runUpdate(argv: string[], io: CliIO): Promise<number> {
   const args = parseStrictArgs(
     argv,
-    { ...WORKSPACE_OPTIONS, check: "boolean" },
+    { ...WORKSPACE_OPTIONS, check: "boolean", "candidate-version": "string" },
     "research setup update",
   );
   if (strictBoolean(args, "help")) return writeSetupHelp(io);
@@ -567,7 +573,11 @@ async function runUpdate(argv: string[], io: CliIO): Promise<number> {
   if (!strictBoolean(args, "check")) {
     throw invalidSetupArgument("research setup update is read-only and requires --check.");
   }
-  const result = await checkResearchSetupUpdates(workspaceArgument(args), io.env);
+  const result = await checkResearchSetupUpdates(
+    workspaceArgument(args),
+    io.env,
+    strictString(args, "candidate-version"),
+  );
   writeSetupJson(io, result, args);
   return 0;
 }
@@ -580,11 +590,29 @@ async function runUpgrade(argv: string[], io: CliIO): Promise<number> {
       plan: "boolean",
       "confirm-upgrade": "boolean",
       "accept-license": "string",
+      rollback: "boolean",
+      candidate: "string",
     },
     "research setup upgrade",
   );
   if (strictBoolean(args, "help")) return writeSetupHelp(io);
   rejectPositionals(args.positionals, "research setup upgrade");
+  if (strictBoolean(args, "rollback")) {
+    const candidate = strictString(args, "candidate");
+    if (!candidate || !isAbsolute(candidate) || strictBoolean(args, "plan"))
+      throw invalidSetupArgument(
+        "Rollback requires one absolute --candidate path and cannot generate a plan.",
+      );
+    const { rollbackResearchSetupUpgrade } = await import("./workspace/setup-upgrade.js");
+    writeSetupJson(
+      io,
+      await rollbackResearchSetupUpgrade(candidate, workspaceArgument(args)),
+      args,
+    );
+    return 0;
+  }
+  if (strictString(args, "candidate"))
+    throw invalidSetupArgument("--candidate is used only with --rollback.");
   if (!strictBoolean(args, "plan")) {
     throw invalidSetupArgument(
       "Upgrade is plan-only; pass --plan and review the result before apply.",
@@ -596,7 +624,31 @@ async function runUpgrade(argv: string[], io: CliIO): Promise<number> {
     confirmUpgrade: strictBoolean(args, "confirm-upgrade"),
     environment: io.env,
   });
-  writeSetupJson(io, result, args);
+  const planPath = researchSetupUpgradeCandidatePath(result);
+  writeSetupJson(
+    io,
+    {
+      ...result,
+      planPath,
+      applyCommand: researchSetupApplyCommand({ version: result.cli.version, planPath }),
+      rollbackCommand: exactResearchCliCommand(
+        [
+          "research",
+          "setup",
+          "upgrade",
+          "--rollback",
+          "--candidate",
+          planPath,
+          "--workspace",
+          result.workspace.path,
+          "--json",
+        ],
+        result.cli.version,
+      ),
+      activePlanUnchanged: true,
+    },
+    args,
+  );
   return 0;
 }
 

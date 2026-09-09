@@ -12,8 +12,8 @@ checkPaths:
   - README.md
   - src/**
   - bin/**
-lastReviewedAt: 2026-09-08
-lastReviewedCommit: c9dae2c
+lastReviewedAt: 2026-09-10
+lastReviewedCommit: 8ce5cd33c960a5176e3a9dd959f5ce6bf5a06343
 ---
 
 # Repo Architecture
@@ -332,6 +332,24 @@ source commit, whole-tree SHA-256, exact destination, settings, credential
 variable names, and declared mutations. It never installs a Skill from a
 research package, resolves system/Python dependencies, silently updates a pin,
 or overwrites drift.
+
+Managed setup upgrades use a separate candidate and an upgrade-specific
+transaction, without adding work to ordinary research execution. The candidate
+binds the immediate parent plan, exact runtime/config/marker hashes and the
+selected CLI package manifest/bin/dist content hash. Only upgrade planning, apply
+and rollback compute that runtime-file binding; ordinary research/status paths
+retain their existing checks. Preparation
+runs existing setup in an isolated staging workspace, reusing exact source and
+installer caches. Private preimages and file/tree intents are anchored in the
+hash-chained workspace journal. Under the existing setup/workspace leases, a
+transient marker prevents both old and new runtimes from accepting a mixed
+generation while verified trees and control files are activated. The final
+marker and runtime format remain unchanged. Retry uses the recorded transition;
+rollback preflights all destinations before reversing any writes and refuses
+rollback after subsequent research activity. It preserves owner changes by refusing conflicts.
+Only the current candidate CLI interprets the new recovery command. Publication
+metadata discovery remains an optional, bounded, read-only npm query for one
+explicit stable version; it is not an automatic updater or package attestation.
 
 The recommended `tiangong-auto-research` tree is an external orchestrator role,
 not an evidence capability. Wizard selection is explicit and project-local by

@@ -18,8 +18,8 @@ checkPaths:
   - scripts/**
   - test/**
   - .github/workflows/**
-lastReviewedAt: 2026-09-08
-lastReviewedCommit: c9dae2c
+lastReviewedAt: 2026-09-10
+lastReviewedCommit: 8ce5cd33c960a5176e3a9dd959f5ce6bf5a06343
 ---
 
 # Repo Validation
@@ -738,3 +738,20 @@ change, compare labels/IDs/order/required flags with the Skills forms and its
 installed Markdown templates under the shared workspace reporting policy.
 Check an actual packed artifact before release and audit any changed Skill pin
 only after its source commit is merged.
+
+Managed upgrade regression coverage in `test/research-setup-upgrade.test.ts`
+uses two real factory-created synthetic catalog generations and an older
+factory-selected runtime version. It covers zero-write candidates, owned and
+modified/link destinations, both install roots, config/launcher preservation,
+stale parents, a separately copied same-version CLI with changed executable
+bytes, prepared-record tampering, interrupted apply/rollback, real
+SIGKILL recovery, and exact prior-generation restoration. The public CLI
+candidate check uses an offline npm fixture; it cannot establish live registry
+or package publication facts. `test/research-setup-release.test.ts` covers the
+actual flat npm metadata shape, fixed registry/scope arguments, numeric version
+bounds, combined output caps, environment filtering and bounded process cleanup.
+POSIX process fixtures remain POSIX-only; native Windows fixtures exercise the
+real cmd.exe/npm.cmd chain and owned-tree cleanup without registry access.
+A process-spawn mock verifies exact taskkill arguments and rejects signaling an
+unspawned helper before its error event has been delivered.
+Clean-container RED/GREEN remains authoritative; host results are supplemental.
