@@ -443,6 +443,88 @@ describe("top-journal publication workflow", () => {
     }
   });
 
+  it("accepts conservative numbered section headings at publication freeze", async () => {
+    const fixture = await publicationFixture("numbered-sections");
+    try {
+      await writeFile(fixture.manuscript, sectionManuscript(NUMBERED_SECTIONS));
+      const frozen = await freezePublicationManuscript({
+        root: fixture.root,
+        projectId: fixture.projectId,
+        manuscriptPath: fixture.manuscript,
+        assessmentPath: fixture.assessment,
+        supplementPaths: [],
+        submissionFiles: fixture.submissionFiles,
+        producerAgent: "codex",
+        producerSessionId: "numbered-sections-producer",
+      });
+      assert.equal(frozen.status, "manuscript-frozen");
+    } finally {
+      await rm(fixture.root, { recursive: true, force: true });
+    }
+  });
+
+  it("still rejects missing, unrelated, unseparated, and body-text section matches", async () => {
+    const fixture = await publicationFixture("section-rejections");
+    try {
+      const freeze = () =>
+        freezePublicationManuscript({
+          root: fixture.root,
+          projectId: fixture.projectId,
+          manuscriptPath: fixture.manuscript,
+          assessmentPath: fixture.assessment,
+          supplementPaths: [],
+          submissionFiles: fixture.submissionFiles,
+          producerAgent: "codex",
+          producerSessionId: "section-rejection-producer",
+        });
+      const expectMissing = async (manuscript: string, missing: string[]) => {
+        await writeFile(fixture.manuscript, manuscript);
+        await assert.rejects(freeze(), (error: unknown) => {
+          assert.equal(errorCode(error), "RESEARCH_PUBLICATION_MANUSCRIPT_INCOMPLETE");
+          const details = (error as { details?: { missingSections?: string[] } }).details;
+          assert.deepEqual([...(details?.missingSections ?? [])].sort(), missing);
+          return true;
+        });
+      };
+      const withHeading = (from: string, to: string): Array<[string, string]> =>
+        STANDARD_SECTIONS.map(([heading, body]): [string, string] => [
+          heading === from ? to : heading,
+          body,
+        ]);
+      await expectMissing(
+        sectionManuscript(STANDARD_SECTIONS.filter(([heading]) => heading !== "Discussion")),
+        ["discussion"],
+      );
+      await expectMissing(sectionManuscript(withHeading("Methods", "2 Methodology")), ["methods"]);
+      await expectMissing(
+        sectionManuscript(
+          STANDARD_SECTIONS.map(([heading, body]): [string, string] =>
+            heading === "Introduction"
+              ? ["1Introduction", body]
+              : heading === "Methods"
+                ? ["2Methods", body]
+                : [heading, body],
+          ),
+        ),
+        ["introduction", "methods"],
+      );
+      await expectMissing(
+        sectionManuscript([
+          [
+            "Abstract",
+            "1. Introduction appears in chapter one. 2 Methods were compared across sites.",
+          ],
+          ...STANDARD_SECTIONS.filter(
+            ([heading]) => heading !== "Abstract" && heading !== "Introduction",
+          ),
+        ]),
+        ["introduction"],
+      );
+    } finally {
+      await rm(fixture.root, { recursive: true, force: true });
+    }
+  });
+
   it("rejects an internally hash-valid but semantically disconnected Claim-Evidence Graph", async () => {
     const fixture = await publicationFixture("submission-graph-binding");
     try {
@@ -699,6 +781,42 @@ describe("top-journal publication workflow", () => {
     }
   });
 });
+
+const STANDARD_SECTIONS: Array<[string, string]> = [
+  ["Abstract", "The independently reproduced central outcome was one unit."],
+  ["Introduction", "This study tests the declared central claim."],
+  ["Methods", "We executed the frozen computational analysis with seed 42."],
+  ["Results", "The central outcome was one unit."],
+  ["Discussion", "The result applies only to this synthetic fixture."],
+  ["Data availability", "The frozen source-data file accompanies this submission."],
+  [
+    "Code availability",
+    "The command and environment hashes are recorded in the reproducibility manifest.",
+  ],
+  ["References", "1. Peer-reviewed fixture source."],
+];
+
+const NUMBERED_SECTIONS: Array<[string, string]> = [
+  ["Abstract", "The independently reproduced central outcome was one unit."],
+  ["1. Introduction", "This study tests the declared central claim."],
+  ["2 Methods", "We executed the frozen computational analysis with seed 42."],
+  ["3.1 Results", "The central outcome was one unit."],
+  ["4) Discussion", "The result applies only to this synthetic fixture."],
+  ["Data availability", "The frozen source-data file accompanies this submission."],
+  [
+    "Code availability",
+    "The command and environment hashes are recorded in the reproducibility manifest.",
+  ],
+  ["References", "1. Peer-reviewed fixture source."],
+];
+
+function sectionManuscript(sections: Array<[string, string]>): string {
+  return [
+    "# Observed central outcome in a validated study",
+    ...sections.flatMap(([heading, body]) => [`## ${heading}`, body]),
+    "",
+  ].join("\n\n");
+}
 
 async function publicationFixture(
   projectId: string,

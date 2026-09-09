@@ -307,6 +307,13 @@ tool/model work. Its provider view and manual `--compatibility claude-code`
 share one adapter; constraints, literal values and the canonical validation
 schema remain unchanged. Scientific-execution failures retain bounded sanitized
 exit diagnostics in both the structured error and journal, never the full prompt.
+Returned-result regressions retain safe over-budget and otherwise rejected JSON
+with its packet/run/usage binding while the gate remains unpassed. They cover
+nonzero exits, wrong packet identity, invalid usage, raw/escaped secrets,
+oversized and malformed JSON, and unavailable capture storage. Digests and
+omission reasons remain inspectable without retaining unsafe text. A successful
+review/replay creates no failure-capture files and invokes the executor once;
+explicit retry preserves the earlier immutable failure record.
 Executor regressions consume Claude's actual `structured_output` envelope,
 prefer it over informal `result` text, and reject `is_error`/error-subtype results
 even when a wrapper exits zero. Structured errors take priority over incidental
@@ -638,6 +645,11 @@ exported ledger bytes exactly. Credential regressions retain true session UUID,
 prefixed API/password and OAuth secret checks, preserve JSON validity with escaped
 quotes/backslashes, and reject Unicode-escaped keys, JSONL and nested credential
 payloads without exempting whole events or UUID values.
+Extensionless UTF-8 input tests include non-ASCII content, host-path rejection,
+credential rejection, safe CSV/Markdown and byte-identical binary/non-UTF-8
+inputs. Nonportable diagnostics identify only the safe bundle-relative file.
+Full publication-freeze regressions accept conservative decimal section
+numbering while rejecting missing, unrelated, unseparated and body-only titles.
 Production tests additionally require an external
 public-internet plan and block downstream work when any capability marked
 `requiredForDiscovery` lacks a broker receipt. The failure distinguishes a

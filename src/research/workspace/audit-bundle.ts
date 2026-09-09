@@ -1,3 +1,4 @@
+import { isUtf8 } from "node:buffer";
 import { randomUUID } from "node:crypto";
 import { constants as fsConstants } from "node:fs";
 import { chmod, copyFile, lstat, mkdir, readFile, rename, rm } from "node:fs/promises";
@@ -531,6 +532,7 @@ async function assertPortableTextFiles(root: string, forbiddenRoot?: string): Pr
         throw new CliError("Audit bundle contains a host-specific workspace path.", {
           code: "RESEARCH_AUDIT_BUNDLE_NONPORTABLE",
           exitCode: 3,
+          details: { path: relative(root, path).split(sep).join("/") },
         });
       }
       if (sanitizeResearchText(value) !== value) sensitive();
@@ -594,7 +596,7 @@ function looksTextual(path: string, bytes: Buffer): boolean {
   if (bytes.includes(0)) return false;
   if (/\.(?:csv|json|jsonl|md|txt|tsv|ya?ml)$/iu.test(path)) return true;
   const start = bytes.subarray(0, 64).toString("utf8").trimStart();
-  return start.startsWith("{") || start.startsWith("[");
+  return start.startsWith("{") || start.startsWith("[") || isUtf8(bytes);
 }
 
 async function validateNewDestination(value: string): Promise<string> {
