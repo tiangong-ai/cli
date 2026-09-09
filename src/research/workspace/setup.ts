@@ -2514,8 +2514,13 @@ export async function checkResearchSetupUpdates(
           "npx --registry=https://registry.npmjs.org --@tiangong-ai:registry=https://registry.npmjs.org --strict-ssl=true ",
         )
       : null;
+  const localUpdateAvailable = drift.length > 0 || cliVersionDrift !== null;
   const updateAvailable =
-    drift.length > 0 || cliVersionDrift !== null || releaseCandidate?.status === "newer";
+    localUpdateAvailable || releaseCandidate?.status === "newer"
+      ? true
+      : releaseCandidate?.status === "unavailable"
+        ? null
+        : false;
   return {
     schemaVersion: 1 as const,
     workspace: root,
@@ -2530,9 +2535,14 @@ export async function checkResearchSetupUpdates(
     policy: {
       automaticUpdate: false,
       floatingUpdate: false,
-      minimumAction: updateAvailable
-        ? "Use the active exact CLI release to create, review, and apply a replacement immutable plan; upgrade never runs a floating CLI or Skills update."
-        : "No catalog migration is required. Installed tree drift is reported separately by setup status/doctor.",
+      minimumAction:
+        releaseCandidate?.status === "unavailable"
+          ? "Exact release metadata is unavailable. Preserve the active generation and retry the same explicit candidate check when access is restored; local catalog drift is reported separately."
+          : updateAvailable
+            ? "Use the active exact CLI release to create, review, and apply a replacement immutable plan; upgrade never runs a floating CLI or Skills update."
+            : releaseCandidate === null
+              ? "No local catalog migration is required; no external release was checked. Pass an explicitly reviewed candidate version to check it. Installed tree drift is reported separately by setup status/doctor."
+              : "The checked exact release is not newer and no local catalog migration is required. Installed tree drift is reported separately by setup status/doctor.",
     },
   };
 }

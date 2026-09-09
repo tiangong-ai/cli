@@ -51,6 +51,55 @@ import {
 // Two synthetic catalog generations, each installed through the real plan/apply
 // factory. Their hashes are computed from actual regular trees, not forged plans.
 describe("managed setup upgrade generations", () => {
+  it("reports unavailable release discovery as unknown rather than no update through the public CLI", async () => {
+    const root = await realpath(await mkdtemp(join(tmpdir(), "upgrade-offline-query-")));
+    try {
+      await createResearchSetupPlan({
+        workspace: root,
+        mode: "smoke-test",
+        evidenceProfile: "none",
+        skillIds: [],
+        acceptedLicenseIds: [],
+        confirmNetworkDownloads: false,
+      });
+      let stdout = "",
+        stderr = "";
+      const code = await runCli(
+        [
+          "research",
+          "setup",
+          "update",
+          "--check",
+          "--candidate-version",
+          packageVersion(),
+          "--workspace",
+          root,
+          "--json",
+        ],
+        {
+          env: { PATH: join(root, "missing-bin"), HOME: root },
+          stdout: {
+            write: (text: string) => {
+              stdout += text;
+            },
+          },
+          stderr: {
+            write: (text: string) => {
+              stderr += text;
+            },
+          },
+        },
+      );
+      assert.equal(code, 0, stderr);
+      const result = JSON.parse(stdout);
+      assert.equal(result.releaseCandidate.status, "unavailable");
+      assert.equal(result.updateAvailable, null, "unavailable metadata is not proof of no update");
+      assert.match(result.policy.minimumAction, /unavailable/u);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
   it("rejects a same-version CLI whose runtime bytes differ from the reviewed upgrade candidate", async () => {
     const root = await realpath(await mkdtemp(join(tmpdir(), "upgrade-code-binding-")));
     const shadow = await realpath(await mkdtemp(join(tmpdir(), "upgrade-code-shadow-")));
