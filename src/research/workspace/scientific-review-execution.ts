@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 import { constants } from "node:fs";
-import { copyFile, lstat, mkdtemp, open, readFile, rm } from "node:fs/promises";
+import { copyFile, lstat, mkdir, mkdtemp, open, readFile, rm } from "node:fs/promises";
 import { dirname, join } from "node:path";
 
 import { CliError } from "../../errors.js";
@@ -192,6 +192,7 @@ export async function executeScientificReview(
     let callStartedAt: bigint | null = null;
     let usageSettled = false;
     let failureDiagnostic: Record<string, unknown> | null = null;
+    let returnedResult: ExecutionResult | null = null;
     try {
       await copyPacketInputs(input.root, capsuleProject, packet, project.publicationPolicy!);
       await writeJsonAtomic(join(capsuleProject, "inputs/scientific-review-packet.json"), packet);
@@ -264,7 +265,7 @@ export async function executeScientificReview(
         executor ??
         createReviewExecutor({ root: input.root, execution: config.reviewerExecution }).execute;
       callStartedAt = process.hrtime.bigint();
-      const result = await execute({
+      const result = (returnedResult = await execute({
         route: config.reviewer,
         prompt,
         outputSchema: schema,
@@ -283,7 +284,7 @@ export async function executeScientificReview(
         artifactViews: { index: artifactViews, packetSha256: packet.packetSha256 },
         brokerUrl: null,
         environment: input.environment,
-      });
+      }));
       if (result.artifactReads?.length) {
         await persistArtifactReads(
           join(paths.projects, project.id),
@@ -459,6 +460,33 @@ export async function executeScientificReview(
         await saveProject(input.root, project);
       }
       if (started) {
+        // Capture only the failure path: successful execution already has its
+        // immutable output/receipt and must not pay for duplicate persistence.
+        if (returnedResult) {
+          let retention: Record<string, unknown>;
+          try {
+            retention = {
+              executionRecord: await retainFailedExecution({
+                root: input.root,
+                projectId: project.id,
+                packet,
+                runId,
+                result: returnedResult,
+                failureCode:
+                  error instanceof CliError
+                    ? error.code
+                    : "RESEARCH_SCIENTIFIC_REVIEW_EXECUTION_FAILED",
+                config,
+                environment: input.environment,
+              }),
+            };
+          } catch {
+            // Disk/namespace failure must not masquerade as a retained result
+            // or hide the original budget/runtime rejection.
+            retention = { outputRetention: "storage-unavailable" };
+          }
+          failureDiagnostic = { ...failureDiagnostic, ...retention };
+        }
         await appendJournalEvent(paths.journal, "scientific-review.execution.failed", project.id, {
           role: input.role,
           packetSha256: packet.packetSha256,
@@ -470,10 +498,21 @@ export async function executeScientificReview(
           capsuleDisposition: "retained-failed-execution",
         });
       }
-      if (error instanceof CliError) throw error;
+      if (error instanceof CliError) {
+        if (!failureDiagnostic) throw error;
+        throw new CliError(error.message, {
+          code: error.code,
+          exitCode: error.exitCode,
+          details: {
+            ...(isObject(error.details) ? error.details : {}),
+            ...failureDiagnostic,
+          },
+        });
+      }
       throw executionError(
         "RESEARCH_SCIENTIFIC_REVIEW_EXECUTION_FAILED",
         "The isolated reviewer failed. Its packet and failed execution remain available for explicit recovery.",
+        failureDiagnostic ?? undefined,
       );
     } finally {
       if (
@@ -510,6 +549,89 @@ export async function executeScientificReview(
     receiptSha256: prepared.receiptSha256,
     replayed: prepared.replayed,
   };
+}
+
+async function retainFailedExecution(input: {
+  root: string;
+  projectId: string;
+  packet: ScientificReviewPacket;
+  runId: string;
+  result: ExecutionResult;
+  failureCode: string;
+  config: WorkspaceConfig;
+  environment: NodeJS.ProcessEnv;
+}): Promise<{ locator: string; sha256: string }> {
+  const { result } = input;
+  const secrets = configuredResearchSecrets(input.environment);
+  const bytes = Buffer.byteLength(result.stdout);
+  let disposition = "retained-json";
+  if (bytes > Math.min(MAX_EXECUTION_RECEIPT_BYTES, input.config.budget.maxOutputTokens * 16)) {
+    disposition = "omitted-oversized";
+  } else if (sanitizeResearchText(result.stdout, secrets) !== result.stdout) {
+    disposition = "omitted-unsafe";
+  } else {
+    try {
+      const parsed: unknown = JSON.parse(result.stdout);
+      if (canonicalJson(sanitizeResearchValue(parsed, secrets)) !== canonicalJson(parsed)) {
+        disposition = "omitted-unsafe";
+      }
+    } catch {
+      // Only inspectable JSON can pass the structured sensitive-field check.
+      // Malformed output keeps its digest/size, not unchecked raw text.
+      disposition = "omitted-invalid-json";
+    }
+  }
+  let reportedUsage: ReturnType<typeof checkedUsage> | null = null;
+  try {
+    reportedUsage = checkedUsage(result);
+  } catch {
+    // Invalid reported usage is not zero usage or a settled invoice.
+  }
+  const reportedBinding = sanitizeResearchValue(
+    {
+      model: result.model,
+      runtime: result.runtime ?? null,
+      isolation: result.isolation ?? null,
+      reviewAttestation: result.reviewAttestation ?? null,
+    },
+    secrets,
+  );
+  const bindingBytes = canonicalJson(reportedBinding);
+  const record = {
+    schemaVersion: 1,
+    kind: "tiangong-scientific-review-failed-execution",
+    acceptance: "not-submitted",
+    projectId: input.projectId,
+    role: input.packet.role,
+    packetSha256: input.packet.packetSha256,
+    reviewerSessionSha256: input.packet.reviewer.sessionSha256,
+    runId: input.runId,
+    failureCode: input.failureCode,
+    exitCode: Number.isSafeInteger(result.exitCode) ? result.exitCode : null,
+    reportedUsage,
+    // Reported identities remain unverified observations, never acceptance proof.
+    reportedBinding: Buffer.byteLength(bindingBytes) <= 64 * 1024 ? reportedBinding : null,
+    reportedBindingSha256: sha256Text(bindingBytes),
+    output: {
+      disposition,
+      bytes,
+      sha256: sha256Text(result.stdout),
+      stdout: disposition === "retained-json" ? result.stdout : null,
+    },
+    stderrSha256: sha256Text(result.stderr),
+  };
+  const sha256 = sha256Text(JSON.stringify(record, null, 2) + "\n");
+  const locator = `projects/${input.projectId}/scientific/failed-executions/${sha256}.json`;
+  const path = resolveContained(workspacePaths(input.root).control, locator);
+  const parent = await lstat(dirname(dirname(path)));
+  if (!parent.isDirectory() || parent.isSymbolicLink()) throw new Error("Unsafe capture parent");
+  await mkdir(dirname(path), { recursive: true, mode: 0o700 });
+  const directory = await lstat(dirname(path));
+  if (!directory.isDirectory() || directory.isSymbolicLink()) {
+    throw new Error("Unsafe capture directory");
+  }
+  await writeJsonAtomic(path, record, 0o444);
+  return { locator, sha256 };
 }
 
 async function readReceipt(

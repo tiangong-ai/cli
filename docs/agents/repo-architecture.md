@@ -179,6 +179,9 @@ storage writes, queueing, and document status transitions.
   decision-consequence graphs, Policy-owned future-gate obligations, exact
   Policy/design/session bindings, three ordered independent scientific review
   gates at discovery and post-acquisition analysis boundaries,
+  failure-only content-addressed reviewer result retention separated from
+  scientific submission, with safe JSON capture, bounded reported identity/usage,
+  explicit omission/storage-failure diagnostics and no extra success-path capture,
   frozen-snapshot source/full-text/date revalidation, exact promoted
   real-record construct-canary artifacts, pilot-methods invariants, complete-lifecycle
   review/revision reservations, and target-specific reapproval for every

@@ -726,7 +726,22 @@ replayed without another model call after revalidating its immutable proof.
 Failures require explicit `--retry` and remain bounded by the attempt budget;
 unreported usage and interrupted wall time retain conservative reservations.
 Failed processes return a bounded, sanitized exit diagnostic and record it in
-the journal; no full prompt or raw authentication output is persisted. Automatic
+the journal; no full prompt or raw authentication output is persisted.
+When the reviewer returns but submission is rejected, the error and failed
+journal event also return an `executionRecord` locator and SHA-256. The locator
+is relative to `.tiangong-research/` and points to an immutable
+`scientific/failed-executions/` record containing the packet/run binding,
+reported usage and identity, rejection code, and safely retained JSON stdout.
+These are unaccepted execution observations, not a review receipt or permission
+to pass a gate. Inspecting them does not call the provider; another execution
+still requires explicit `--retry`.
+Retained stdout is limited to the smaller of 1 MiB and the configured output
+capture allowance. Unsafe, oversized, or malformed JSON keeps only its digest,
+size and omission reason. If storage fails, `outputRetention=storage-unavailable`
+is reported with the original error instead of claiming that a result was saved.
+Successful review and replay use their existing output/receipt without this
+additional failure capture.
+Automatic
 Claude invocation uses the same dialect-annotation conversion as
 `research schema show NAME --compatibility claude-code`; canonical controller
 validation and its scientific constraints remain unchanged.

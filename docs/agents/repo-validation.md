@@ -307,6 +307,13 @@ tool/model work. Its provider view and manual `--compatibility claude-code`
 share one adapter; constraints, literal values and the canonical validation
 schema remain unchanged. Scientific-execution failures retain bounded sanitized
 exit diagnostics in both the structured error and journal, never the full prompt.
+Returned-result regressions retain safe over-budget and otherwise rejected JSON
+with its packet/run/usage binding while the gate remains unpassed. They cover
+nonzero exits, wrong packet identity, invalid usage, raw/escaped secrets,
+oversized and malformed JSON, and unavailable capture storage. Digests and
+omission reasons remain inspectable without retaining unsafe text. A successful
+review/replay creates no failure-capture files and invokes the executor once;
+explicit retry preserves the earlier immutable failure record.
 Executor regressions consume Claude's actual `structured_output` envelope,
 prefer it over informal `result` text, and reject `is_error`/error-subtype results
 even when a wrapper exits zero. Structured errors take priority over incidental
