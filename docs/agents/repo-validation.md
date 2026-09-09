@@ -18,8 +18,8 @@ checkPaths:
   - scripts/**
   - test/**
   - .github/workflows/**
-lastReviewedAt: 2026-09-08
-lastReviewedCommit: c9dae2c
+lastReviewedAt: 2026-09-09
+lastReviewedCommit: 35696cc29ec7c0cd7edba9468138963136e93b23
 ---
 
 # Repo Validation
@@ -738,3 +738,15 @@ change, compare labels/IDs/order/required flags with the Skills forms and its
 installed Markdown templates under the shared workspace reporting policy.
 Check an actual packed artifact before release and audit any changed Skill pin
 only after its source commit is merged.
+
+Managed upgrade regression coverage in `test/research-setup-upgrade.test.ts`
+uses two real factory-created synthetic catalog generations and an older
+factory-selected runtime version. It covers zero-write candidates, owned and
+modified/link destinations, both install roots, config/launcher preservation,
+stale parents, prepared-record tampering, interrupted apply/rollback, real
+SIGKILL recovery, and exact prior-generation restoration. The public CLI
+candidate check uses an offline npm fixture; it cannot establish live registry
+or package publication facts. `test/research-setup-release.test.ts` covers the
+actual flat npm metadata shape, fixed registry/scope arguments, numeric version
+bounds, combined output caps, environment filtering and bounded process cleanup.
+Clean-container RED/GREEN remains authoritative; host results are supplemental.
