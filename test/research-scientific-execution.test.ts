@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { openArtifactViews } from "../src/research/workspace/artifact-views.js";
-import { chmod, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, it } from "node:test";
@@ -27,6 +27,262 @@ import { scientificDesignInput } from "./helpers/scientific-design.js";
 import { appendJournalEvent, readVerifiedJournal } from "../src/research/workspace/journal.js";
 
 describe("explicit isolated scientific review execution", () => {
+  it("retains a completed over-budget response without accepting it or spending on recovery", async () => {
+    const fixture = await preparedFixture("execution-over-budget-retention");
+    try {
+      const response = { ...result(fixture.packet), tokens: 200001, inputTokens: 199981 };
+      let calls = 0;
+      let recordBinding: { locator: string; sha256: string } | undefined;
+      const execute = async () => {
+        calls++;
+        return response;
+      };
+      await assert.rejects(
+        executeScientificReview(
+          { ...fixture, role: "research-design", confirmCost: true, environment: {} },
+          execute,
+        ),
+        (error: unknown) => {
+          const value = error as {
+            code?: string;
+            details?: { executionRecord?: typeof recordBinding };
+          };
+          assert.equal(value.code, "RESEARCH_BUDGET_EXCEEDED");
+          recordBinding = value.details?.executionRecord;
+          assert.ok(recordBinding, "the error must locate the safely retained returned result");
+          return true;
+        },
+      );
+      const paths = workspacePaths(fixture.root);
+      assert.ok(recordBinding);
+      assert.equal(
+        recordBinding.locator,
+        `projects/${fixture.projectId}/scientific/failed-executions/${recordBinding.sha256}.json`,
+      );
+      const bytes = await readFile(join(paths.control, recordBinding.locator), "utf8");
+      assert.equal(sha256Text(bytes), recordBinding.sha256);
+      const record = JSON.parse(bytes);
+      assert.equal(record.acceptance, "not-submitted");
+      assert.equal(record.packetSha256, fixture.packet.packetSha256);
+      assert.equal(record.reviewerSessionSha256, fixture.packet.reviewer.sessionSha256);
+      assert.equal(record.failureCode, "RESEARCH_BUDGET_EXCEEDED");
+      assert.equal(record.output.disposition, "retained-json");
+      assert.equal(record.output.stdout, response.stdout);
+      assert.equal(record.output.sha256, sha256Text(response.stdout));
+      assert.equal(record.reportedUsage.tokens, 200001);
+      assert.equal(record.reportedUsage.inputTokens, 199981);
+      const project = await loadProject(fixture.root, fixture.projectId);
+      assert.equal(project.usage.tokens, 200001);
+      assert.equal(project.scientificDesign?.gates["research-design"].status, "prepared");
+      const event = (await readVerifiedJournal(paths.journal)).findLast(
+        (entry) => entry.type === "scientific-review.execution.failed",
+      )!;
+      assert.deepEqual(event.payload.executionRecord, recordBinding);
+      assert.equal(event.payload.runId, record.runId);
+      await assert.rejects(
+        executeScientificReview(
+          { ...fixture, role: "research-design", confirmCost: true, environment: {} },
+          execute,
+        ),
+        { code: "RESEARCH_SCIENTIFIC_REVIEW_RETRY_REQUIRED" },
+      );
+      assert.equal(calls, 1, "inspection/recovery never reruns the paid provider implicitly");
+      const acceptedOutputs = await readdir(
+        join(paths.projects, fixture.projectId, "scientific/execution-outputs"),
+      ).catch(() => []);
+      assert.deepEqual(acceptedOutputs, []);
+      const retry = await executeScientificReview(
+        { ...fixture, role: "research-design", confirmCost: true, retry: true, environment: {} },
+        async () => {
+          calls++;
+          return result(fixture.packet);
+        },
+      );
+      assert.equal(retry.status, "passed");
+      assert.equal(calls, 2);
+      assert.equal(
+        await readFile(join(paths.control, recordBinding.locator), "utf8"),
+        bytes,
+        "a new accepted retry does not overwrite the prior unaccepted result",
+      );
+    } finally {
+      await fixture.cleanup();
+    }
+  });
+
+  for (const scenario of [
+    "nonzero",
+    "binding",
+    "malformed",
+    "sensitive",
+    "escaped-secret",
+    "oversized",
+    "invalid-usage",
+  ] as const) {
+    it(`records a bounded unaccepted ${scenario} result without promoting or leaking it`, async () => {
+      const fixture = await preparedFixture(`execution-retention-${scenario}`);
+      try {
+        const secret = "retention-private-value-1234";
+        const config = await loadWorkspaceConfig(fixture.root);
+        const response = result(fixture.packet);
+        let expectedCode = "RESEARCH_SCIENTIFIC_REVIEW_EXECUTION_FAILED";
+        let disposition = "retained-json";
+        if (scenario === "nonzero") response.exitCode = 1;
+        if (scenario === "binding") {
+          response.stdout = JSON.stringify({
+            ...review(fixture.packet),
+            packetSha256: "0".repeat(64),
+          });
+          expectedCode = "RESEARCH_SCIENTIFIC_REVIEW_BINDING_INVALID";
+        }
+        if (scenario === "malformed") {
+          response.stdout = '{"broken":';
+          expectedCode = "RESEARCH_SCIENTIFIC_REVIEW_INVALID";
+          disposition = "omitted-invalid-json";
+        }
+        if (scenario === "sensitive" || scenario === "escaped-secret") {
+          response.stdout = JSON.stringify({
+            ...review(fixture.packet),
+            boundedRecommendation: secret,
+          });
+          if (scenario === "escaped-secret")
+            response.stdout = response.stdout.replace(
+              secret,
+              [...secret]
+                .map((character) => "\\u" + character.charCodeAt(0).toString(16).padStart(4, "0"))
+                .join(""),
+            );
+          expectedCode = "RESEARCH_SCIENTIFIC_REVIEW_OUTPUT_UNSAFE";
+          disposition = "omitted-unsafe";
+        }
+        if (scenario === "oversized") {
+          response.stdout = JSON.stringify({
+            ...review(fixture.packet),
+            boundedRecommendation: "x".repeat(config.budget.maxOutputTokens * 16 + 1),
+          });
+          expectedCode = "RESEARCH_SCIENTIFIC_REVIEW_OUTPUT_UNSAFE";
+          disposition = "omitted-oversized";
+        }
+        if (scenario === "invalid-usage") {
+          response.tokens = -1;
+          expectedCode = "RESEARCH_SCIENTIFIC_REVIEW_EXECUTION_BINDING_INVALID";
+        }
+        await assert.rejects(
+          executeScientificReview(
+            {
+              ...fixture,
+              role: "research-design",
+              confirmCost: true,
+              environment: { ANTHROPIC_API_KEY: secret },
+            },
+            async () => response,
+          ),
+          { code: expectedCode },
+        );
+        const paths = workspacePaths(fixture.root);
+        const event = (await readVerifiedJournal(paths.journal)).findLast(
+          (entry) => entry.type === "scientific-review.execution.failed",
+        )!;
+        const binding = event.payload.executionRecord as { locator: string; sha256: string };
+        assert.ok(
+          binding,
+          "every returned result has a safe failure record, even when its body cannot be retained",
+        );
+        const bytes = await readFile(join(paths.control, binding.locator), "utf8");
+        assert.equal(sha256Text(bytes), binding.sha256);
+        const record = JSON.parse(bytes);
+        assert.equal(record.acceptance, "not-submitted");
+        assert.equal(record.failureCode, expectedCode);
+        assert.equal(record.output.disposition, disposition);
+        assert.equal(record.output.bytes, Buffer.byteLength(response.stdout));
+        assert.equal(record.output.sha256, sha256Text(response.stdout));
+        assert.equal(
+          record.output.stdout,
+          disposition === "retained-json" ? response.stdout : null,
+        );
+        assert.equal(record.reportedUsage === null, scenario === "invalid-usage");
+        assert.ok(!bytes.includes(secret));
+        assert.ok(!JSON.stringify(event).includes(secret));
+        assert.equal(
+          (await loadProject(fixture.root, fixture.projectId)).scientificDesign?.gates[
+            "research-design"
+          ].status,
+          "prepared",
+        );
+      } finally {
+        await fixture.cleanup();
+      }
+    });
+  }
+
+  it("reports unavailable failure storage without replacing the original execution error", async () => {
+    const fixture = await preparedFixture("execution-retention-storage-failure");
+    try {
+      await writeTextAtomic(
+        join(
+          workspacePaths(fixture.root).projects,
+          fixture.projectId,
+          "scientific/failed-executions",
+        ),
+        "not a directory",
+      );
+      await assert.rejects(
+        executeScientificReview(
+          { ...fixture, role: "research-design", confirmCost: true, environment: {} },
+          async () => ({ ...result(fixture.packet), tokens: 200001, inputTokens: 199981 }),
+        ),
+        (error: unknown) => {
+          const value = error as { code?: string; details?: Record<string, unknown> };
+          assert.equal(value.code, "RESEARCH_BUDGET_EXCEEDED");
+          assert.equal(value.details?.outputRetention, "storage-unavailable");
+          assert.equal(value.details?.executionRecord, undefined);
+          return true;
+        },
+      );
+      const event = (await readVerifiedJournal(workspacePaths(fixture.root).journal)).findLast(
+        (entry) => entry.type === "scientific-review.execution.failed",
+      )!;
+      assert.equal(event.payload.outputRetention, "storage-unavailable");
+      assert.equal(event.payload.executionRecord, undefined);
+      assert.equal((await loadProject(fixture.root, fixture.projectId)).usage.tokens, 200001);
+    } finally {
+      await fixture.cleanup();
+    }
+  });
+
+  it("keeps successful review replay free of failure-capture files and extra executor calls", async () => {
+    const fixture = await preparedFixture("execution-success-no-failure-capture");
+    try {
+      let calls = 0;
+      const input = {
+        ...fixture,
+        role: "research-design" as const,
+        confirmCost: true,
+        environment: {},
+      };
+      const execute = async () => {
+        calls++;
+        return result(fixture.packet);
+      };
+      const accepted = await executeScientificReview(input, execute);
+      const replay = await executeScientificReview(input, execute);
+      assert.equal(accepted.status, "passed");
+      assert.equal(replay.replayed, true);
+      assert.equal(calls, 1);
+      assert.deepEqual(
+        await readdir(
+          join(
+            workspacePaths(fixture.root).projects,
+            fixture.projectId,
+            "scientific/failed-executions",
+          ),
+        ).catch(() => []),
+        [],
+      );
+    } finally {
+      await fixture.cleanup();
+    }
+  });
   it("uses the approved finite cost ceiling instead of treating a rough read-cost estimate as exact", async () => {
     const fixture = await preparedFixture("execution-estimated-read-cost");
     try {
