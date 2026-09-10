@@ -1979,7 +1979,10 @@ keeps its reservation and cannot be blindly replayed or replaced. A one-shot
 process guard retains the deadline independently of the observer and terminates
 the calculation if that observer disconnects; missing durable results remain
 unresolved rather than being reconstructed as success. Status exposes current
-authority, reservations and the permitted next action. `select` records a
+authority, reservations and the permitted next action. Unresolved attempt status
+and promoted `task run inspect` also check the local supervisor process identity;
+a missing or mismatched process never establishes completion or permits retry.
+These local coordinates stay outside portable audit records. `select` records a
 candidate; `close` records why investigation stopped and releases unused cost
 allocation while preserving history. It refuses closure with unresolved work.
 
@@ -2003,7 +2006,9 @@ before the task is answered.
 Portable audits retain the investigation, attempt, candidate, promotion,
 certification and closure relationships. A successor includes the explicitly
 referenced source investigation's immutable records and blobs, excluding local
-routing and unrelated investigations. Hash/relationship verification does not
+routing and unrelated investigations. Verification reconstructs the scientific
+view at promotion and certification start, so a later freeze cannot retroactively
+certify an earlier run. Hash/relationship verification does not
 establish authorship, hermetic execution or scientific truth.
 
 ## Research Search
