@@ -335,6 +335,11 @@ describe("sandbox-bridge reviewer execution", () => {
         assert.doesNotMatch(JSON.stringify(sidecar), /clientToken|privateKey|bridge-secret/);
 
         const bridgeStatus = await inspectReviewerBridgeStatus(fixture.root);
+        assert.equal(bridgeStatus.configuredReviewer?.cliFamily, "claude");
+        assert.equal(
+          bridgeStatus.configuredReviewer?.providerRouting.identityVerification,
+          "unverified",
+        );
         assert.deepEqual(bridgeStatus.negativeProbes, {
           outsideReadBlocked: true,
           outsideWriteBlocked: true,
@@ -455,6 +460,12 @@ describe("sandbox-bridge reviewer execution", () => {
           "pass",
         );
         assert.equal(sidecarExecutions, 1);
+        assert.equal(
+          JSON.parse(
+            doctor.checks.find((check) => check.id === "reviewer-configured-routing")!.detail,
+          ).identityVerification,
+          "unverified",
+        );
       } finally {
         await sidecar.close();
         await Promise.all([

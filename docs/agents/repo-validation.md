@@ -196,6 +196,14 @@ Both PR workflows cancel obsolete runs for the same pull request. Pushes to
 
 ## Local Gates
 
+`test/research-provider-routing.test.ts` uses synthetic gateways and executables
+to verify unchanged-binary routing drift blocks material-bearing execution,
+model mappings reach the capsule, process settings precedence, legacy binding
+refresh, sanitized offline status/doctor and reuse after equivalent config-source
+changes. Bridge tests preserve transport-only readiness without requiring an
+installed model executable. These fixtures prove configured-routing behavior;
+they do not attest an external service or send research material to a provider.
+
 Run before delivery:
 
 ```bash

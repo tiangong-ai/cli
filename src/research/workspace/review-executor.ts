@@ -26,6 +26,9 @@ import {
 import {
   executeAgent,
   fingerprintAgentRoute,
+  inspectAgentProviderRouting,
+  isAgentProviderRouting,
+  sameRuntimeFingerprint,
   probeNativeCapsuleIsolation,
   type AgentExecutionRequest,
 } from "./executor.js";
@@ -48,6 +51,7 @@ import {
 } from "./storage.js";
 import type {
   AgentRoute,
+  AgentProviderRouting,
   AgentRuntimeFingerprint,
   ExecutionResult,
   ReviewExecutionAttestation,
@@ -178,6 +182,11 @@ export interface ReviewerBridgeStatus {
   keyFingerprint: string;
   supportedActions: ["execute", "fingerprint", "status"];
   negativeProbes: ReviewerBridgeNegativeProbes;
+  configuredReviewer?: {
+    cliFamily: AgentRoute["agent"];
+    configuredModelAlias: string | null;
+    providerRouting: AgentProviderRouting;
+  };
 }
 
 export interface ReviewerBridgeNegativeProbes {
@@ -257,7 +266,15 @@ export async function inspectReviewerStatus(
 ) {
   const config = await loadWorkspaceConfig(root);
   if (config.reviewerExecution.transport === "sandbox-bridge") {
-    return { ...(await inspectReviewerBridgeStatus(root)), transport: "sandbox-bridge" as const };
+    const status = await inspectReviewerBridgeStatus(root);
+    return {
+      ...status,
+      transport: "sandbox-bridge" as const,
+      readinessScope: "bridge-transport",
+      providerIdentity: "unverified",
+      minimumAction:
+        "Bridge readiness proves the local transport only. Review the configured routing before sending material; runtime fingerprints do not attest upstream provider identity.",
+    };
   }
   const marker = await loadWorkspaceMarker(root);
   await requireCurrentRuntimeLock(root, marker);
@@ -288,9 +305,7 @@ export async function inspectReviewerStatus(
     });
   }
   const expected = doctor.attestation?.runtimes[0];
-  const runtimeMatches = Boolean(
-    runtime && expected && canonicalJson(runtime) === canonicalJson(expected),
-  );
+  const runtimeMatches = Boolean(runtime && expected && sameRuntimeFingerprint(runtime, expected));
   if (doctor.status === "verified" && !runtimeMatches) {
     errors.push({
       code: "RESEARCH_EXECUTOR_DRIFT",
@@ -312,6 +327,7 @@ export async function inspectReviewerStatus(
       packageVersion: packageVersion(),
       platformCapsule: { provider: platform.nativeIsolationProvider },
       runtime,
+      providerIdentity: "unverified",
       doctorAttestation: {
         status: doctor.status,
         expiresAt: doctor.attestation?.expiresAt ?? null,
@@ -628,6 +644,11 @@ async function handleSidecarRequest(input: {
         keyFingerprint: input.connection.keyFingerprint,
         supportedActions: ["execute", "fingerprint", "status"],
         negativeProbes: input.negativeProbes,
+        configuredReviewer: {
+          cliFamily: config.reviewer.agent,
+          configuredModelAlias: config.reviewer.model,
+          providerRouting: await inspectAgentProviderRouting(config.reviewer, input.environment),
+        },
       };
       isolationProvider = requiredNativeIsolationProvider();
       policySha256 = sha256Text("status-only");
@@ -1364,6 +1385,7 @@ function isExecutionResult(value: unknown): value is ExecutionResult {
 function isAgentRuntimeFingerprint(value: unknown): value is AgentRuntimeFingerprint {
   return (
     isObject(value) &&
+    (value.providerRouting === undefined || isAgentProviderRouting(value.providerRouting)) &&
     (value.agent === "codex" || value.agent === "claude") &&
     (value.model === null || typeof value.model === "string") &&
     typeof value.binarySha256 === "string" &&

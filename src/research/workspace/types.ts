@@ -536,6 +536,18 @@ export interface AgentRuntimeFingerprint {
   binaryVersion: string;
   platform: NodeJS.Platform;
   architecture: string;
+  /** Absent on legacy records; configured routing is not upstream attestation. */
+  providerRouting?: AgentProviderRouting;
+}
+
+export interface AgentProviderRouting {
+  schemaVersion: 1;
+  configurationSha256: string;
+  endpointOrigin: string | null;
+  endpointSource: "process-environment" | "claude-settings-env" | "runtime-default";
+  modelMappingSources: Record<string, "process-environment" | "claude-settings-env">;
+  identityVerification: "unverified";
+  scope: "configured-routing-only";
 }
 
 export type FailureKind =
