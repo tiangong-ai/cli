@@ -44,6 +44,7 @@ import {
   nextReadyPackage,
   retryProjectPackage,
   saveProject,
+  setProjectBudget,
 } from "../src/research/workspace/projects.js";
 import {
   abortNativeResearchStage,
@@ -56,11 +57,13 @@ import {
   hashRegularTree,
   regularTreeFiles,
   workspacePaths,
+  writeJsonAtomic,
 } from "../src/research/workspace/storage.js";
 import type { ExecutionResult, ResearchPolicyBinding } from "../src/research/workspace/types.js";
 import {
   doctorResearchWorkspace,
   initializeResearchWorkspace,
+  loadWorkspaceConfig,
   verifyDoctorAttestation,
 } from "../src/research/workspace/workspace.js";
 import { scientificDesignInput } from "./helpers/scientific-design.js";
@@ -576,6 +579,190 @@ describe("production research evidence and broker", () => {
     }
   });
 
+  it("funds concurrent HTTP operations before network access and reuses both caches for free", async () => {
+    const root = await temporaryDirectory();
+    const skillParent = await temporaryDirectory();
+    const originalFetch = globalThis.fetch;
+    const brokers: Array<NonNullable<Awaited<ReturnType<typeof startCapabilityBroker>>>> = [];
+    let networkCalls = 0;
+    try {
+      await initializeResearchWorkspace(root, undefined);
+      await initializeProject(root, "priced-broker", "Exercise HTTP budget admission.");
+      await installNetworkCapability(root, skillParent, {
+        endpoint: "https://source.test/items",
+        accept: "application/json",
+        allowedContentTypes: ["application/json"],
+        maxResponseBytes: 64 * 1024,
+        maxItems: 2,
+      });
+      await setProjectBudget(root, "priced-broker", 9, true);
+      const capsule = join(workspacePaths(root).runtime, "priced-broker", "project");
+      await mkdir(capsule, { recursive: true });
+      const broker = await startCapabilityBroker(root, "priced-broker", capsule);
+      assert.ok(broker);
+      brokers.push(broker);
+      const call = (url: string, endpoint = broker.url) => callBroker(endpoint, url);
+      globalThis.fetch = async (input, init) => {
+        if (!String(input).startsWith("https://source.test/")) return originalFetch(input, init);
+        networkCalls++;
+        const state = await loadProject(root, "priced-broker");
+        assert.ok(
+          state.budget!.entries.some(
+            (entry) => entry.status === "reserved" && entry.maxCostUsd === 4,
+          ),
+        );
+        await new Promise((resolve) => setTimeout(resolve, 30));
+        if (String(input).includes("failure"))
+          return new Response("limited", {
+            status: 429,
+            headers: { "retry-after": "0", "content-type": "application/json" },
+          });
+        return new Response('{"records":[{"id":1}]}', {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        });
+      };
+      assert.match(
+        JSON.stringify(await call("https://source.test/items?unknown")),
+        /RESEARCH_PROJECT_BUDGET_PRICE_REQUIRED/,
+      );
+      assert.equal(networkCalls, 0);
+      await setProjectBudget(root, "priced-broker", 9, true, { "method.public-source": 4 });
+      const urls = [1, 2, 3].map((id) => `https://source.test/items?id=${id}`);
+      const results = await Promise.all(urls.map((url) => call(url)));
+      assert.equal(results.filter((result) => !JSON.parse(result).code).length, 2);
+      assert.equal(
+        results.filter((result) =>
+          JSON.stringify(result).includes("RESEARCH_BUDGET_RESERVATION_FAILED"),
+        ).length,
+        1,
+      );
+      assert.equal(networkCalls, 2);
+      const ledger = (await loadProject(root, "priced-broker")).budget!;
+      assert.equal(ledger.entries.length, 2);
+      assert.ok(
+        ledger.entries.every(
+          (entry) =>
+            entry.status === "settled" &&
+            entry.accountedCostUsd === 4 &&
+            entry.settlementBasis === "allocated-upper-bound",
+        ),
+      );
+      const reusedUrl = urls[results.findIndex((result) => !JSON.parse(result).code)]!;
+      const local = await call(reusedUrl);
+      assert.equal(JSON.parse(local).reuseScope, "project", local);
+      assert.doesNotMatch(JSON.stringify(local), /RESEARCH_BUDGET_RESERVATION_FAILED/);
+      await initializeProject(root, "cache-consumer", "Reuse already fetched public evidence.");
+      await setProjectBudget(root, "cache-consumer", 1, true);
+      const second = await startCapabilityBroker(root, "cache-consumer", capsule);
+      assert.ok(second);
+      brokers.push(second);
+      const shared = await call(reusedUrl, second.url);
+      assert.equal(JSON.parse(shared).reuseScope, "workspace", shared);
+      assert.doesNotMatch(JSON.stringify(shared), /PRICE_REQUIRED/);
+      assert.equal((await loadProject(root, "cache-consumer")).budget!.entries.length, 0);
+      assert.equal(networkCalls, 2);
+      await setProjectBudget(root, "priced-broker", 13, true);
+      const failed = await call("https://source.test/items?failure");
+      assert.match(JSON.stringify(failed), /RESEARCH_BROKER_HTTP_ERROR/);
+      assert.equal(networkCalls, 4, "one logical allocation includes the bounded retry");
+      const final = (await loadProject(root, "priced-broker")).budget!;
+      assert.equal(final.entries.length, 3);
+      assert.equal(
+        final.entries.reduce((sum, entry) => sum + (entry.accountedCostUsd ?? 0), 0),
+        12,
+      );
+    } finally {
+      globalThis.fetch = originalFetch;
+      await Promise.all(brokers.map((broker) => broker.stop()));
+      await Promise.all([
+        rm(root, { recursive: true, force: true }),
+        rm(skillParent, { recursive: true, force: true }),
+      ]);
+    }
+  });
+
+  it("drains provider accounting after the MCP caller disconnects", async () => {
+    const root = await temporaryDirectory();
+    const skillParent = await temporaryDirectory();
+    const originalFetch = globalThis.fetch;
+    let broker: Awaited<ReturnType<typeof startCapabilityBroker>>;
+    let release = () => {};
+    let entered = () => {};
+    const providerEntered = new Promise<void>((resolve) => {
+      entered = resolve;
+    });
+    const providerReleased = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    try {
+      await initializeResearchWorkspace(root, undefined);
+      await initializeProject(
+        root,
+        "disconnected-budget",
+        "Keep obligations after transport disconnect.",
+      );
+      await installNetworkCapability(root, skillParent);
+      await setProjectBudget(root, "disconnected-budget", 5, true, { "method.public-source": 4 });
+      const capsule = join(workspacePaths(root).runtime, "disconnected", "project");
+      await mkdir(capsule, { recursive: true });
+      broker = await startCapabilityBroker(root, "disconnected-budget", capsule);
+      assert.ok(broker);
+      globalThis.fetch = async (input, init) => {
+        if (!String(input).startsWith("https://source.test/")) return originalFetch(input, init);
+        entered();
+        await providerReleased;
+        return new Response('{"records":[{"id":1}]}', {
+          headers: { "content-type": "application/json" },
+        });
+      };
+      const controller = new AbortController();
+      const pending = originalFetch(broker.url, {
+        method: "POST",
+        signal: controller.signal,
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          jsonrpc: "2.0",
+          id: 1,
+          method: "tools/call",
+          params: {
+            name: "fetch_candidate_source",
+            arguments: { capability_id: "method.public-source", url: "https://source.test/items" },
+          },
+        }),
+      }).catch(() => undefined);
+      await providerEntered;
+      controller.abort();
+      await pending;
+      let stopped = false;
+      const stopping = broker.stop().then(() => {
+        stopped = true;
+      });
+      await new Promise((resolve) => setImmediate(resolve));
+      assert.equal(
+        stopped,
+        false,
+        "socket closure cannot complete shutdown before funded work settles",
+      );
+      release();
+      await stopping;
+      await broker.stop();
+      const entries = (await loadProject(root, "disconnected-budget")).budget!.entries;
+      assert.equal(entries.length, 1);
+      assert.equal(entries[0]!.status, "settled");
+      assert.equal(entries[0]!.accountedCostUsd, 4);
+      assert.equal((await loadProjectEvidenceReceipts(root, "disconnected-budget")).length, 1);
+    } finally {
+      release();
+      await broker?.stop();
+      globalThis.fetch = originalFetch;
+      await Promise.all([
+        rm(root, { recursive: true, force: true }),
+        rm(skillParent, { recursive: true, force: true }),
+      ]);
+    }
+  });
+
   it("persists exact broker evidence and includes verified objects in the review packet", async () => {
     const root = await temporaryDirectory();
     const skillParent = await temporaryDirectory();
@@ -708,14 +895,43 @@ describe("production research evidence and broker", () => {
         [{ id: 2 }],
       );
 
+      const fundedConfig = await loadWorkspaceConfig(root);
+      for (const route of [fundedConfig.producer, fundedConfig.reviewer])
+        route.pricing = {
+          inputUsdPerMillionTokens: 1,
+          cachedInputUsdPerMillionTokens: 0.1,
+          outputUsdPerMillionTokens: 2,
+        };
+      await writeJsonAtomic(workspacePaths(root).config, fundedConfig);
+      await setProjectBudget(root, "broker-evidence", 100, true, { "method.public-source": 4 });
       let reviewVerified = false;
+      const normal = brokerBackedExecutor(() => {
+        reviewVerified = true;
+      });
       const result = await runResearchWorkspace(
         root,
         { maxParallel: 1, maxCycles: 10, dryRun: false, environment: {} },
-        brokerBackedExecutor(() => {
-          reviewVerified = true;
-        }),
+        async (request) => {
+          if (stageFrom(request) === "discover") {
+            assert.ok(request.brokerUrl);
+            const fetched = JSON.parse(
+              await callBroker(request.brokerUrl, "https://source.test/items?page=2"),
+            );
+            assert.equal(fetched.networkAttempted, true, JSON.stringify(fetched));
+          }
+          return normal(request);
+        },
       );
+      const providerEntries = (await loadProject(root, "broker-evidence")).budget!.entries.filter(
+        (entry) => entry.kind === "provider-operation",
+      );
+      assert.equal(
+        providerEntries.length,
+        1,
+        "package completion preserves provider ledger writes made while the executor was running",
+      );
+      assert.equal(providerEntries[0]!.accountedCostUsd, 4);
+      assert.equal(sourceFetches, 2);
       assert.equal(
         result.status,
         "complete",

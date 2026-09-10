@@ -2299,6 +2299,15 @@ async function executeWorkPackage(
       await commitStageEvidenceBindings(root, project, workPackage);
     }
 
+    if (broker) {
+      await broker.stop();
+      broker = undefined;
+      // HTTP handlers persist provider allocations during the executor await.
+      // Keep the local package transition, but use their latest monetary state.
+      const latest = await loadProject(root, projectId);
+      if (latest.budget) project.budget = latest.budget;
+      else delete project.budget;
+    }
     const completedAt = new Date().toISOString();
     if (project.budget && workPackage.stage !== "close")
       settleProjectCost(project, budgetEntryId, accountedResult.costUsd, "reported-usage");
@@ -2371,6 +2380,10 @@ async function executeWorkPackage(
     ) {
       capsuleDisposition = "retained-auth-reconciliation";
       retainedCapsuleId = basename(capsuleRoot);
+    }
+    if (broker) {
+      await broker.stop();
+      broker = undefined;
     }
     const failedProject = await loadProject(root, projectId);
     const failedPackage = packageById(failedProject, packageId);

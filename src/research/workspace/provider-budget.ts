@@ -1,3 +1,4 @@
+import { serializeProviderStateWrite } from "./provider-state.js";
 import { CliError } from "../../errors.js";
 import type { ProjectState, WorkspaceConfig } from "./types.js";
 import { reserveProjectCost, settleProjectAllocation } from "./project-budget.js";
@@ -8,35 +9,39 @@ import { loadProject, saveProject } from "./projects.js";
 // owner accounting allocation, never a verified provider price or invoice.
 export async function reserveProviderOperation(
   root: string,
-  project: ProjectState,
+  snapshot: ProjectState,
   config: WorkspaceConfig,
   capabilityId: string,
   attemptId: string,
 ): Promise<string | null> {
-  if (!project.budget) return null;
-  const limits = project.budget.authorization.providerOperationMaxCostUsd;
-  if (!Object.hasOwn(limits, capabilityId))
-    throw new CliError(
-      "This provider operation has no declared cost maximum; unknown cost is not zero.",
-      {
-        code: "RESEARCH_PROJECT_BUDGET_PRICE_REQUIRED",
-        exitCode: 3,
-        details: {
-          capabilityId,
-          minimumAction:
-            "Review and explicitly confirm a provider-operation USD maximum with project budget set --provider-costs. Existing local evidence reads do not require a new provider allocation.",
+  if (!snapshot.budget) return null;
+  return serializeProviderStateWrite(root, snapshot.id, async () => {
+    const project = await loadProject(root, snapshot.id);
+    if (!project.budget) return null;
+    const limits = project.budget.authorization.providerOperationMaxCostUsd;
+    if (!Object.hasOwn(limits, capabilityId))
+      throw new CliError(
+        "This provider operation has no declared cost maximum; unknown cost is not zero.",
+        {
+          code: "RESEARCH_PROJECT_BUDGET_PRICE_REQUIRED",
+          exitCode: 3,
+          details: {
+            capabilityId,
+            minimumAction:
+              "Review and explicitly confirm a provider-operation USD maximum with project budget set --provider-costs. Existing local evidence reads do not require a new provider allocation.",
+          },
         },
-      },
-    );
-  const id = `provider:${attemptId}`;
-  reserveProjectCost(project, config, {
-    id,
-    kind: "provider-operation",
-    reference: capabilityId,
-    maxCostUsd: limits[capabilityId]!,
+      );
+    const id = `provider:${attemptId}`;
+    reserveProjectCost(project, config, {
+      id,
+      kind: "provider-operation",
+      reference: capabilityId,
+      maxCostUsd: limits[capabilityId]!,
+    });
+    await saveProject(root, project);
+    return id;
   });
-  await saveProject(root, project);
-  return id;
 }
 
 export async function settleProviderOperation(
@@ -45,7 +50,9 @@ export async function settleProviderOperation(
   id: string | null,
 ): Promise<void> {
   if (id === null) return;
-  const project = await loadProject(root, projectId);
-  settleProjectAllocation(project, id);
-  await saveProject(root, project);
+  await serializeProviderStateWrite(root, projectId, async () => {
+    const project = await loadProject(root, projectId);
+    settleProjectAllocation(project, id);
+    await saveProject(root, project);
+  });
 }

@@ -13,7 +13,7 @@ checkPaths:
   - src/**
   - bin/**
 lastReviewedAt: 2026-09-10
-lastReviewedCommit: 8ce5cd33c960a5176e3a9dd959f5ce6bf5a06343
+lastReviewedCommit: dce0a7416c0b9c764dc9239d1ee5ff0f0280059a
 ---
 
 # Repo Architecture
@@ -393,6 +393,17 @@ substitute for one another; arbitrary owner databases still require an explicit
 external definition. Project evidence requirements may bind exact capability
 IDs and discovery scopes, which preflight reports as structured, actionable
 coverage gaps when absent.
+
+An explicitly authorized numeric project budget requires an owner-declared
+per-operation USD maximum for each network capability, shared with the Research
+Data boundary. The broker reserves it durably after local cache and credential
+checks but before network access. Bounded redirects/retries belong to that one
+logical allocation; completion or failure conservatively accounts for its full
+maximum, without claiming a provider tariff or invoice. Verified project and
+workspace cache reads allocate no additional money. Concurrent handlers serialize
+only ledger reads/writes inside the existing workspace lease, leaving provider
+requests parallel. Broker call-count limits continue to count tool invocations,
+including cache reads, independently of monetary allocations.
 
 Document decomposition is an input-preprocessor and paper download is an
 acquisition adapter. Their explicit companion command verifies the installed
