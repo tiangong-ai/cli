@@ -13,7 +13,7 @@ checkPaths:
   - src/**
   - bin/**
 lastReviewedAt: 2026-09-10
-lastReviewedCommit: 70c723411b60e7838957f42391efc546e0380f2b
+lastReviewedCommit: d76eece
 ---
 
 # Repo Architecture
