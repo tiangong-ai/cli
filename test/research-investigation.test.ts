@@ -40,7 +40,7 @@ describe("bounded native investigations", () => {
         `import {readFile,writeFile} from 'node:fs/promises';
 const bytes=await readFile(process.argv[2]);const variant=Number(process.argv[4]);
 if(variant===0){console.error('synthetic harness initialization failed');process.exit(2);}
-await writeFile(process.argv[3],JSON.stringify({schemaVersion:1,solverReached:variant>1,feasible:variant===3,metrics:{inputBytes:bytes.length,residual:variant===3?0:1},conclusion:variant===1?'Synthetic solver was not reached':variant===2?'Synthetic numerical constraint failed':'Synthetic bounded candidate found'}));
+await writeFile(process.argv[3],JSON.stringify({schemaVersion:1,solverReached:variant>1,feasible:variant===3,metrics:{inputBytes:bytes.length,residual:variant===3?0:1,iterations:variant>1?1:0},statuses:variant===4?{}:{runStatus:'completed',modelStatus:variant===3?'feasible':'not-feasible'},conclusion:variant===1?'Synthetic solver was not reached':variant===2?'Synthetic numerical constraint failed':'Synthetic bounded candidate found'}));
 `,
       );
       await writeFile(
@@ -67,6 +67,10 @@ await writeFile(process.argv[3],JSON.stringify({schemaVersion:1,solverReached:va
               { id: "diagnostic", fileName: "diagnostic.json", mediaType: "application/json" },
             ],
             diagnosticOutputId: "diagnostic",
+            telemetry: {
+              requiredMetrics: ["iterations", "residual"],
+              requiredStatuses: ["runStatus", "modelStatus"],
+            },
           },
         ],
         options: [{ id: "variant", kind: "integer", minimum: 0, maximum: 3 }],
@@ -79,6 +83,11 @@ await writeFile(process.argv[3],JSON.stringify({schemaVersion:1,solverReached:va
         },
         deniedEffects: ["network", "dependency-install", "holdout", "external-write"],
       };
+      input.programs.push({
+        ...input.programs[0]!,
+        id: "solver-missing-diagnostics",
+        arguments: ["{input:source}", "{output:diagnostic}", "4"],
+      });
       const inputPath = join(fx.files, "investigation-input.json");
       await writeFile(inputPath, JSON.stringify(input));
       const command = (operation: string, extra: string[] = []) =>
@@ -259,6 +268,41 @@ await writeFile(process.argv[3],JSON.stringify({schemaVersion:1,solverReached:va
       assert.equal(exhausted.attempts.length, 5);
       // A real calculation finishes but durable result storage fails. Its known
       // start keeps the full uncertainty reservation and must never be rerun.
+      const diagnosticInput = { ...input, investigationId: "diagnostic-contract" };
+      await writeFile(inputPath, JSON.stringify(diagnosticInput));
+      const diagnosticPlan = JSON.parse((await command("plan", ["--input", inputPath])).stdout);
+      const diagnosticApproval = await command("approve", [
+        "--input",
+        inputPath,
+        "--confirm",
+        diagnosticPlan.planSha256,
+        "--authorization-source",
+        source,
+      ]);
+      assert.equal(diagnosticApproval.exitCode, 0, diagnosticApproval.stderr);
+      const diagnosticPath = join(fx.files, "missing-diagnostics.json");
+      await writeFile(
+        diagnosticPath,
+        JSON.stringify({
+          schemaVersion: 1,
+          investigationId: "diagnostic-contract",
+          attemptId: "missing-status",
+          programId: "solver-missing-diagnostics",
+          hypothesis: "Do not mistake missing required solver statuses for a numerical verdict",
+          configuration: { variant: 2 },
+          nativeSessionId: null,
+          workingDirectory: fx.files,
+        }),
+      );
+      const missingStatus = await command("attempt", ["--input", diagnosticPath]);
+      assert.equal(missingStatus.exitCode, 0, missingStatus.stderr);
+      const missingRecord = JSON.parse(missingStatus.stdout).record;
+      assert.equal(missingRecord.diagnostic.solverReached, true);
+      assert.equal(missingRecord.outcome, "diagnostic-incomplete");
+      assert.deepEqual(missingRecord.missingTelemetry, [
+        "statuses.modelStatus",
+        "statuses.runStatus",
+      ]);
       const interruptedInput = { ...input, investigationId: "interrupted-diagnosis" };
       await writeFile(inputPath, JSON.stringify(interruptedInput));
       const interruptedPlan = JSON.parse((await command("plan", ["--input", inputPath])).stdout);

@@ -114,6 +114,7 @@ type Diagnostic = {
   solverReached: boolean;
   feasible: boolean;
   metrics: Record<string, number>;
+  statuses: Record<string, string>;
   conclusion: string;
 };
 const outcomes = [
@@ -140,6 +141,7 @@ export interface InvestigationAttempt {
   outcome: (typeof outcomes)[number];
   diagnostic: Diagnostic | null;
   diagnosticTrust: "program-reported";
+  missingTelemetry: string[];
   actualCostUsd: null;
   accountedCostUpperBoundUsd: number;
   process: Omit<Observed, "stdout" | "stderr">;
@@ -325,7 +327,7 @@ function diagnosticValue(value: unknown): Diagnostic | null {
   if (
     !isObject(value) ||
     Object.keys(value).sort().join(",") !==
-      "conclusion,feasible,metrics,schemaVersion,solverReached" ||
+      "conclusion,feasible,metrics,schemaVersion,solverReached,statuses" ||
     value.schemaVersion !== 1 ||
     typeof value.solverReached !== "boolean" ||
     typeof value.feasible !== "boolean" ||
@@ -333,6 +335,11 @@ function diagnosticValue(value: unknown): Diagnostic | null {
     !isObject(value.metrics) ||
     Object.keys(value.metrics).length > 128 ||
     !Object.values(value.metrics).every((v) => typeof v === "number" && Number.isFinite(v)) ||
+    !isObject(value.statuses) ||
+    Object.keys(value.statuses).length > 128 ||
+    !Object.values(value.statuses).every(
+      (v) => typeof v === "string" && v.trim().length > 0 && v.length <= 512,
+    ) ||
     typeof value.conclusion !== "string" ||
     value.conclusion.trim().length < 8 ||
     value.conclusion.length > 4000 ||
@@ -675,6 +682,16 @@ async function observeInvestigationAttemptInternal(
         stable = false;
       }
     }
+    const missingTelemetry = diagnostic?.solverReached
+      ? [
+          ...program.telemetry.requiredMetrics
+            .filter((id) => !Object.hasOwn(diagnostic.metrics, id))
+            .map((id) => `metrics.${id}`),
+          ...program.telemetry.requiredStatuses
+            .filter((id) => !Object.hasOwn(diagnostic.statuses, id))
+            .map((id) => `statuses.${id}`),
+        ].sort()
+      : [];
     const outcome: InvestigationAttempt["outcome"] = stale
       ? "stale"
       : !stable
@@ -687,14 +704,16 @@ async function observeInvestigationAttemptInternal(
               : "harness-failure"
             : !diagnostic.solverReached
               ? "solver-not-reached"
-              : !diagnostic.feasible
-                ? "numerical-failure"
-                : observed.exitCode === 0 &&
-                    !observed.timedOut &&
-                    !observed.cancelled &&
-                    outputs.length === program.outputs.length
-                  ? "feasible-candidate"
-                  : "diagnostic-incomplete";
+              : missingTelemetry.length
+                ? "diagnostic-incomplete"
+                : !diagnostic.feasible
+                  ? "numerical-failure"
+                  : observed.exitCode === 0 &&
+                      !observed.timedOut &&
+                      !observed.cancelled &&
+                      outputs.length === program.outputs.length
+                    ? "feasible-candidate"
+                    : "diagnostic-incomplete";
     const logs = {} as InvestigationAttempt["logs"];
     // Parent-created log storage is outside the child-writable capsule. Never
     // follow a program-created output/symlink while persisting capture bytes.
@@ -730,6 +749,7 @@ async function observeInvestigationAttemptInternal(
       outcome,
       diagnostic,
       diagnosticTrust: "program-reported" as const,
+      missingTelemetry,
       actualCostUsd: null,
       accountedCostUpperBoundUsd: start.maxCostUsd,
       process: { ...processRecord, startedAt: probe.startedAt, wallSeconds },

@@ -49,6 +49,7 @@ interface ProgramInput {
   arguments: string[];
   outputs: Array<{ id: string; fileName: string; mediaType: string }>;
   diagnosticOutputId: string;
+  telemetry: { requiredMetrics: string[]; requiredStatuses: string[] };
 }
 interface InvestigationInput {
   schemaVersion: 1;
@@ -121,6 +122,7 @@ const inputSchema = {
           "arguments",
           "outputs",
           "diagnosticOutputId",
+          "telemetry",
         ],
         properties: {
           id: idSchema,
@@ -149,6 +151,20 @@ const inputSchema = {
             },
           },
           diagnosticOutputId: idSchema,
+          telemetry: {
+            type: "object",
+            additionalProperties: false,
+            required: ["requiredMetrics", "requiredStatuses"],
+            properties: {
+              requiredMetrics: { type: "array", maxItems: 128, uniqueItems: true, items: idSchema },
+              requiredStatuses: {
+                type: "array",
+                maxItems: 128,
+                uniqueItems: true,
+                items: idSchema,
+              },
+            },
+          },
         },
       },
     },
@@ -357,6 +373,7 @@ export async function planInvestigation(root: string, projectId: string, value: 
       arguments: program.arguments,
       outputs: program.outputs,
       diagnosticOutputId: program.diagnosticOutputId,
+      telemetry: program.telemetry,
     });
   }
   const config = await loadWorkspaceConfig(root);
@@ -506,6 +523,7 @@ export async function loadInvestigation(
       arguments: p.arguments,
       outputs: p.outputs,
       diagnosticOutputId: p.diagnosticOutputId,
+      telemetry: p.telemetry,
     })),
   });
   const { planSha256, ...planCore } = record.plan;
