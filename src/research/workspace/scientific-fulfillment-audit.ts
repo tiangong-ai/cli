@@ -5,6 +5,7 @@ import {
 } from "./scientific-amendment.js";
 import type { ScientificFulfillmentRecord } from "./scientific-fulfillment.js";
 import { readFile } from "node:fs/promises";
+import { parseAtomRecord } from "./content-evidence.js";
 import { CliError } from "../../errors.js";
 import { parseScientificDesign } from "./scientific-design.js";
 import {
@@ -135,8 +136,11 @@ export async function verifyScientificFulfillmentAudit(
               )
             )
               throw invalid();
-            const { atomSha256, ...atomCore } = atom;
-            if (atomSha256 !== sha256Text(canonicalJson(atomCore))) throw invalid();
+            try {
+              parseAtomRecord(atom);
+            } catch {
+              throw invalid();
+            }
           }
       }
     }

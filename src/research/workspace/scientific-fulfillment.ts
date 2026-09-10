@@ -300,13 +300,22 @@ export async function loadScientificFulfillmentView(
       exitCode: 3,
     });
   }
-  const journalEvents = knownEvents ?? (await readVerifiedJournal(workspacePaths(root).journal));
   const head = binding.fulfillmentSha256 ?? null;
+  const hasFulfillmentHistory =
+    Boolean(head) ||
+    (await pathExists(join(workspacePaths(root).projects, project.id, "scientific/fulfillments")));
+  const hasAmendmentHistory =
+    Boolean(binding.amendmentSha256) ||
+    (await pathExists(join(workspacePaths(root).projects, project.id, "scientific/amendments")));
+  // Legacy/unamended reads retain constant-cost absent-namespace checks. Reuse
+  // an operation's verified journal when supplied; active history is never cached.
+  const journalEvents =
+    knownEvents ??
+    (hasFulfillmentHistory || hasAmendmentHistory
+      ? await readVerifiedJournal(workspacePaths(root).journal)
+      : []);
   const records: ScientificFulfillmentRecord[] = [];
-  if (
-    head ||
-    (await pathExists(join(workspacePaths(root).projects, project.id, "scientific/fulfillments")))
-  ) {
+  if (hasFulfillmentHistory) {
     const events = journalEvents.filter(
       (event) => event.scope === project.id && event.type === "scientific.fulfillment.recorded",
     );

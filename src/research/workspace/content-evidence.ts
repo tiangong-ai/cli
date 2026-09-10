@@ -1356,7 +1356,7 @@ function parseDecompositionRecord(value: unknown): ArtifactDecompositionRecord {
   return record;
 }
 
-function parseAtomRecord(value: unknown): EvidenceAtomRecord {
+export function parseAtomRecord(value: unknown): EvidenceAtomRecord {
   if (
     !isObject(value) ||
     value.schemaVersion !== 1 ||
