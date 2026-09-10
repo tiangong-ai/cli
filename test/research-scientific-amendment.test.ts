@@ -1,9 +1,19 @@
 import assert from "node:assert/strict";
 import fs from "node:fs/promises";
 import { syncBuiltinESMExports } from "node:module";
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import {
+  chmod,
+  lstat,
+  mkdir,
+  mkdtemp,
+  readFile,
+  rm,
+  symlink,
+  unlink,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { describe, it } from "node:test";
 import { runCli } from "../src/cli.js";
 import type { CliIO } from "../src/io.js";
@@ -29,7 +39,11 @@ import {
 } from "../src/research/workspace/audit-bundle.js";
 import { prepareScientificReview } from "../src/research/workspace/scientific-review.js";
 import { loadScientificFulfillmentView } from "../src/research/workspace/scientific-fulfillment.js";
-import { scientificDesignInput, passResearchDesignGate } from "./helpers/scientific-design.js";
+import {
+  scientificDesignInput,
+  passResearchDesignGate,
+  submitPassingReview,
+} from "./helpers/scientific-design.js";
 
 describe("owner-authorized pre-analysis scientific amendments", () => {
   it("plans an exact pending-rule binding correction without changing the project or journal", async (t) => {
@@ -218,6 +232,63 @@ describe("owner-authorized pre-analysis scientific amendments", () => {
       const unconfirmed = await invoke(command);
       assert.notEqual(unconfirmed.exitCode, 0);
       assert.equal(await readFile(workspacePaths(root).journal, "utf8"), beforeJournal);
+      const policyPath = join(root, "research-policy", projectId, policy.documents[0]!.logicalPath);
+      const policyBytes = await readFile(policyPath);
+      await writeFile(
+        policyPath,
+        Buffer.concat([policyBytes, Buffer.from("\nChanged after exact approval.\n")]),
+      );
+      try {
+        const changedPolicy = await invoke([...command, "--confirm", plan.planSha256]);
+        assert.notEqual(
+          changedPolicy.exitCode,
+          0,
+          "a changed approved Policy must not admit the old plan",
+        );
+        assert.equal(await readFile(workspacePaths(root).journal, "utf8"), beforeJournal);
+      } finally {
+        await writeFile(policyPath, policyBytes);
+      }
+      const storedSource = join(
+        workspacePaths(root).projects,
+        projectId,
+        "scientific/authorization",
+        `${await sha256File(authorizationPath)}.txt`,
+      );
+      await mkdir(dirname(storedSource), { recursive: true });
+      await symlink(join(root, "missing-confirmation-target"), storedSource);
+      const linked = await invoke([...command, "--confirm", plan.planSha256]);
+      assert.notEqual(
+        linked.exitCode,
+        0,
+        "a dangling immutable-source link must not be overwritten",
+      );
+      assert.equal((await lstat(storedSource)).isSymbolicLink(), true);
+      assert.equal(await readFile(workspacePaths(root).journal, "utf8"), beforeJournal);
+      await unlink(storedSource);
+      const originalRename = fs.rename;
+      let projectionFailures = 0;
+      const renamer = t.mock.method(fs, "rename", (...args: Parameters<typeof fs.rename>) => {
+        if (
+          String(args[1]) === join(workspacePaths(root).projects, projectId, "project.json") &&
+          projectionFailures < 2
+        ) {
+          projectionFailures += 1;
+          return Promise.reject(
+            Object.assign(new Error("Synthetic post-commit projection failure"), { code: "EIO" }),
+          );
+        }
+        return originalRename(...args);
+      });
+      syncBuiltinESMExports();
+      try {
+        const interrupted = await invoke([...command, "--confirm", plan.planSha256]);
+        assert.notEqual(interrupted.exitCode, 0);
+        assert.equal(projectionFailures, 2);
+      } finally {
+        renamer.mock.restore();
+        syncBuiltinESMExports();
+      }
       const applied = await invoke([...command, "--confirm", plan.planSha256]);
       assert.equal(applied.exitCode, 0, applied.stderr);
       const record = JSON.parse(applied.stdout);
@@ -279,6 +350,50 @@ describe("owner-authorized pre-analysis scientific amendments", () => {
       const destination = join(root, "portable-amendment-audit");
       await exportProjectAuditBundle({ root, projectId, destination });
       assert.equal((await verifyProjectAuditBundle(destination)).status, "verified");
+      const second = await invoke([
+        "research",
+        "scientific",
+        "amendment",
+        "plan",
+        projectId,
+        "--input",
+        inputPath,
+        "--workspace",
+        root,
+        "--json",
+      ]);
+      assert.equal(second.exitCode, 0, second.stderr);
+      const secondPlan = JSON.parse(second.stdout);
+      assert.equal(secondPlan.parentAmendmentSha256, record.recordSha256);
+      await writeJsonAtomic(planPath, secondPlan);
+      const secondApplied = await invoke([...command, "--confirm", secondPlan.planSha256]);
+      assert.equal(secondApplied.exitCode, 0, secondApplied.stderr);
+      await assert.rejects(submitPassingReview(root, projectId, packet));
+      await passResearchDesignGate(root, projectId, "independent-second-amendment-review");
+      const secondView = await loadScientificFulfillmentView(
+        root,
+        await loadProject(root, projectId),
+      );
+      assert.equal(secondView.amendments.length, 2);
+      assert.equal(secondView.amendments[0]!.recordSha256, record.recordSha256);
+      assert.equal(await sha256File(originalPath), beforeDesign);
+      const secondDestination = join(root, "portable-amendment-history-audit");
+      await exportProjectAuditBundle({ root, projectId, destination: secondDestination });
+      assert.equal((await verifyProjectAuditBundle(secondDestination)).status, "verified");
+      const committed = (await readFile(workspacePaths(root).journal, "utf8"))
+        .trim()
+        .split("\n")
+        .map((line) => JSON.parse(line));
+      assert.equal(
+        committed.filter((event) => event.type === "scientific.amendment.recorded").length,
+        2,
+      );
+      const retainedSourceBytes = await readFile(storedSource);
+      await chmod(storedSource, 0o600);
+      await writeFile(storedSource, "Changed authorization source bytes.");
+      await assert.rejects(loadScientificFulfillmentView(root, await loadProject(root, projectId)));
+      await writeFile(storedSource, retainedSourceBytes);
+      await chmod(storedSource, 0o444);
       const postAnalysis = await loadProject(root, projectId);
       postAnalysis.packages.find((item) => item.stage === "analyze")!.attempts = 1;
       await saveProject(root, postAnalysis);

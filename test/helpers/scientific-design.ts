@@ -585,7 +585,7 @@ export async function passPilotMethodsGate(root: string, projectId: string): Pro
   await submitPassingReview(root, projectId, packet);
 }
 
-async function submitPassingReview(
+export async function submitPassingReview(
   root: string,
   projectId: string,
   packet: ScientificReviewPacket,
