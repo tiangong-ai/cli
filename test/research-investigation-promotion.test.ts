@@ -201,6 +201,50 @@ await writeFile(process.argv[3],JSON.stringify({schemaVersion:1,solverReached:tr
       beforeView.effectiveSha256,
       "Approval alone does not fabricate scientific fulfillment",
     );
+    const certificationInput = {
+      schemaVersion: 1,
+      runId: "certification-one",
+      requirementId: fx.rows[0]!.id,
+      requirementSha256: fx.rows[0]!.requirementSha256,
+      nativeSessionId: null,
+      workingDirectory: fx.files,
+      runtime: { kind: "node", path: process.execPath },
+      scriptPath,
+      environmentLockPath,
+      inputs: envelope.canonicalInputs,
+      outputs: envelope.programs[0]!.outputs,
+      arguments: envelope.programs[0]!.arguments,
+      timeoutSeconds: 30,
+      investigationPromotionSha256: approved.recordSha256,
+    };
+    const certificationPath = join(fx.files, "certification.json");
+    const observe = () =>
+      cli([
+        "research",
+        "project",
+        "task",
+        "run",
+        "observe",
+        projectId,
+        "--input",
+        certificationPath,
+        "--confirm-execution",
+        "--workspace",
+        fx.root,
+        "--json",
+      ]);
+    const { investigationPromotionSha256: _promotion, ...unpromotedInput } = certificationInput;
+    await writeFile(certificationPath, JSON.stringify(unpromotedInput));
+    const beforeUnpromoted = await readFile(workspacePaths(fx.root).journal, "utf8");
+    const unpromoted = await observe();
+    assert.notEqual(unpromoted.exitCode, 0);
+    assert.match(unpromoted.stderr, /RESEARCH_INVESTIGATION_CERTIFICATION_REQUIRED/);
+    assert.equal(await readFile(workspacePaths(fx.root).journal, "utf8"), beforeUnpromoted);
+    await writeFile(certificationPath, JSON.stringify(certificationInput));
+    const beforeFrozen = await observe();
+    assert.notEqual(beforeFrozen.exitCode, 0);
+    assert.match(beforeFrozen.stderr, /RESEARCH_INVESTIGATION_CERTIFICATION_NOT_FROZEN/);
+    assert.equal(await readFile(workspacePaths(fx.root).journal, "utf8"), beforeUnpromoted);
     const scientific = (parts: string[], args: string[]) =>
       cli(["research", "scientific", ...parts, ...args, "--workspace", fx.root, "--json"]);
     const implementation = await must(
@@ -254,6 +298,56 @@ await writeFile(process.argv[3],JSON.stringify({schemaVersion:1,solverReached:tr
       frozen.contract.identity.modelStructures[1]!.implementationStatus,
       "pending-source-acquisition",
     );
+    await writeFile(
+      certificationPath,
+      JSON.stringify({
+        ...certificationInput,
+        arguments: [...certificationInput.arguments, "unapproved-change"],
+      }),
+    );
+    const beforeChanged = await readFile(workspacePaths(fx.root).journal, "utf8");
+    const changed = await observe();
+    assert.notEqual(changed.exitCode, 0);
+    assert.equal(await readFile(workspacePaths(fx.root).journal, "utf8"), beforeChanged);
+    await writeFile(certificationPath, JSON.stringify(certificationInput));
+    const beforeUsage = (await loadProject(fx.root, projectId)).usage.wallSeconds;
+    const certified = await must(await observe());
+    assert.equal(certified.record.status, "succeeded");
+    assert.equal(
+      certified.record.investigationCertification.promotionSha256,
+      approved.recordSha256,
+    );
+    assert.equal(
+      certified.record.investigationCertification.candidateSha256,
+      candidate.recordSha256,
+    );
+    assert.equal(certified.record.investigationCertification.recipeSha256, candidate.recipeSha256);
+    assert.equal(certified.record.investigationCertification.status, "passed");
+    assert.equal(certified.record.investigationCertification.actualCostUsd, null);
+    assert.match(
+      certified.record.investigationCertification.isolation.policySha256,
+      /^[a-f0-9]{64}$/,
+    );
+    const afterProject = await loadProject(fx.root, projectId);
+    assert.ok(afterProject.usage.wallSeconds > beforeUsage);
+    const allocation = afterProject.budget!.entries.find(
+      (e) => e.id === `investigation-certification-${approved.recordSha256}`,
+    )!;
+    assert.equal(allocation.status, "settled");
+    assert.equal(allocation.settlementBasis, "allocated-upper-bound");
+    const certifiedJournal = await readFile(workspacePaths(fx.root).journal, "utf8");
+    const replay = await must(await observe());
+    assert.equal(replay.replayed, true);
+    assert.deepEqual(replay.record, certified.record);
+    assert.equal(await readFile(workspacePaths(fx.root).journal, "utf8"), certifiedJournal);
+    await writeFile(
+      certificationPath,
+      JSON.stringify({ ...certificationInput, runId: "duplicate-certification" }),
+    );
+    const duplicate = await observe();
+    assert.notEqual(duplicate.exitCode, 0);
+    assert.match(duplicate.stderr, /RESEARCH_INVESTIGATION_CERTIFICATION_EXHAUSTED/);
+    assert.equal(await readFile(workspacePaths(fx.root).journal, "utf8"), certifiedJournal);
     const taskStatus = JSON.parse((await fx.task(["status"])).stdout);
     assert.equal(taskStatus.currentScope.requirements[0].status, "unanswered");
   } finally {

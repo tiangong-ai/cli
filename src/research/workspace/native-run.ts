@@ -1,3 +1,18 @@
+import { createCalculationSandboxInvocation } from "./executor.js";
+import {
+  assertInvestigationCertificationRequired,
+  prepareInvestigationCertification,
+  frozenPromotionView,
+  certificationAssessment,
+  type InvestigationCertification,
+} from "./investigation-certification.js";
+import {
+  beginProjectMutation,
+  prepareProjectMutation,
+  projectMutationBinding,
+  settleProjectMutation,
+} from "./project-mutations.js";
+import { settleProjectCost } from "./project-budget.js";
 import { Ajv2020 } from "ajv/dist/2020.js";
 import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
@@ -113,10 +128,11 @@ const inputSchema = {
     },
     arguments: { type: "array", maxItems: 256, items: { type: "string", maxLength: 4000 } },
     timeoutSeconds: { type: "integer", minimum: 1, maximum: 172800 },
+    investigationPromotionSha256: { type: "string", pattern: HASH.source },
   },
 };
 const validateInput = new Ajv2020({ strict: false, allErrors: true }).compile(inputSchema);
-interface NativeRunInput {
+export interface NativeRunInput {
   schemaVersion: 1;
   runId: string;
   requirementId: string;
@@ -130,6 +146,7 @@ interface NativeRunInput {
   outputs: Array<{ id: string; fileName: string; mediaType: string }>;
   arguments: string[];
   timeoutSeconds: number;
+  investigationPromotionSha256?: string;
 }
 type RunObject = OutputRecord & { id: string };
 export interface NativeRunRecord {
@@ -172,6 +189,7 @@ export interface NativeRunRecord {
     stderrBytes: number;
     diagnostic: string;
   };
+  investigationCertification?: InvestigationCertification;
   recordSha256: string;
 }
 export function nativeRunInputSchema(): Record<string, unknown> {
@@ -266,6 +284,7 @@ export async function observeNativeRun(
           stagingDirectoryName: String(started.payload.stagingDirectoryName ?? ""),
         };
       }
+      await assertInvestigationCertificationRequired(root, projectId, input, events);
       await assertRunWindow(root, project, input);
       const config = await loadWorkspaceConfig(root);
       const timeoutSeconds = Math.min(
@@ -288,23 +307,33 @@ export async function observeNativeRun(
       if (!(await lstat(runtimePath)).isFile())
         throw error("The selected interpreter is not a regular executable file.");
       const binarySha256 = await sha256File(runtimePath);
-      const version = await captureProcess(
-        input.runtime.path,
-        ["--version"],
-        working,
-        { PATH: dirname(input.runtime.path) },
-        5,
+      const certification = await prepareInvestigationCertification(
+        root,
+        project,
+        input,
+        binarySha256,
+        events,
       );
-      const reportedVersion = version.stdout.trim() || version.stderr.trim();
-      if (
-        version.exitCode !== 0 ||
-        !(input.runtime.kind === "node" ? /^v\d+\.\d+\.\d+$/u : /^Python \d+\.\d+\.\d+$/u).test(
-          reportedVersion,
-        )
-      )
-        throw error(
-          "The selected executable is not the declared ordinary Node/Python runtime. Agent CLI launchers are not supported.",
+      let reportedVersion = "";
+      if (!certification) {
+        const version = await captureProcess(
+          input.runtime.path,
+          ["--version"],
+          working,
+          { PATH: dirname(input.runtime.path) },
+          5,
         );
+        reportedVersion = version.stdout.trim() || version.stderr.trim();
+        if (
+          version.exitCode !== 0 ||
+          !(input.runtime.kind === "node" ? /^v\d+\.\d+\.\d+$/u : /^Python \d+\.\d+\.\d+$/u).test(
+            reportedVersion,
+          )
+        )
+          throw error(
+            "The selected executable is not the declared ordinary Node/Python runtime. Agent CLI launchers are not supported.",
+          );
+      }
       const acquisition = await loadCurrentEvidenceSnapshot(root, projectId);
       const selected = input.inputs.map((item) => {
         const artifact = acquisition.artifacts.find(
@@ -331,7 +360,14 @@ export async function observeNativeRun(
       const staging = await mkdtemp(join(working, `.tiangong-run-${input.runId}-`));
       const privateHome = join(staging, "home");
       await mkdir(privateHome, { mode: 0o700 });
-      const scriptFile = join(staging, basename(input.scriptPath));
+      const scriptFile = join(
+        staging,
+        certification
+          ? input.runtime.kind === "node"
+            ? "program.mjs"
+            : "program.py"
+          : basename(input.scriptPath),
+      );
       await copyExact(
         resolveContained(workspacePaths(root).control, script.objectLocator),
         scriptFile,
@@ -376,6 +412,31 @@ export async function observeNativeRun(
         projectId,
         resolveContained(workspacePaths(root).control, environment.objectLocator),
       );
+      if (
+        certification &&
+        (sourceScript.sha256 !== certification.promotion.plan.recipe.script.sha256 ||
+          environmentLock.sha256 !== certification.promotion.plan.recipe.environmentLock.sha256)
+      )
+        throw error(
+          "The staged certification bytes changed after promotion scope validation.",
+          "RESEARCH_INVESTIGATION_CERTIFICATION_INVALID",
+        );
+      const invocation = certification
+        ? await createCalculationSandboxInvocation({
+            binary: runtimePath,
+            args: [scriptFile, ...args],
+            capsuleRoot: staging,
+            workspaceRoot: root,
+          })
+        : null;
+      const versionInvocation = certification
+        ? await createCalculationSandboxInvocation({
+            binary: runtimePath,
+            args: ["--version"],
+            capsuleRoot: staging,
+            workspaceRoot: root,
+          })
+        : null;
       await appendJournalEvent(
         workspacePaths(root).journal,
         "project.task.run.started",
@@ -390,10 +451,19 @@ export async function observeNativeRun(
           runtimeBinarySha256: binarySha256,
           nativePacketSha256,
           stagingDirectoryName: basename(staging),
+          ...(certification
+            ? {
+                investigationPromotionSha256: certification.promotion.recordSha256,
+                certificationReservedWallSeconds: timeoutSeconds,
+              }
+            : {}),
         },
       );
       return {
         project,
+        certification,
+        invocation,
+        versionInvocation,
         runtimePath,
         binarySha256,
         reportedVersion,
@@ -415,22 +485,46 @@ export async function observeNativeRun(
         replayed: true,
         stagingDirectoryName: prepared.stagingDirectoryName,
       };
-    // No workspace lease is held during the native calculation.
-    const observed = await captureProcess(
-      input.runtime.path,
-      [prepared.scriptFile, ...prepared.args],
-      prepared.staging,
-      {
-        PATH: dirname(input.runtime.path),
-        HOME: prepared.privateHome,
-        TMPDIR: prepared.staging,
-        LANG: "C.UTF-8",
-        TZ: "UTC",
-        PYTHONDONTWRITEBYTECODE: "1",
-        PYTHONNOUSERSITE: "1",
-      },
-      prepared.timeoutSeconds,
-    );
+    // No workspace lease is held during either the certification runtime probe
+    // or the calculation. Its one-use start is durable before either process.
+    const environment = {
+      PATH: dirname(input.runtime.path),
+      HOME: prepared.privateHome,
+      TMPDIR: prepared.staging,
+      LANG: "C.UTF-8",
+      TZ: "UTC",
+      PYTHONDONTWRITEBYTECODE: "1",
+      PYTHONNOUSERSITE: "1",
+    };
+    const probe = prepared.versionInvocation
+      ? await captureProcess(
+          prepared.versionInvocation.binary,
+          prepared.versionInvocation.args,
+          prepared.staging,
+          environment,
+          Math.min(5, prepared.timeoutSeconds),
+        )
+      : null;
+    const probeVersion = probe
+      ? probe.stdout.trim() || probe.stderr.trim()
+      : prepared.reportedVersion;
+    const runtimeValid =
+      !probe ||
+      (probe.exitCode === 0 &&
+        probeVersion === prepared.certification!.promotion.plan.recipe.runtime.version);
+    const availableSeconds = prepared.timeoutSeconds - (probe?.wallSeconds ?? 0);
+    const observed =
+      probe && (!runtimeValid || availableSeconds <= 0)
+        ? probe
+        : await captureProcess(
+            prepared.invocation?.binary ?? input.runtime.path,
+            prepared.invocation?.args ?? [prepared.scriptFile, ...prepared.args],
+            prepared.staging,
+            environment,
+            availableSeconds,
+          );
+    const wallSeconds =
+      observed.wallSeconds + (probe && observed !== probe ? probe.wallSeconds : 0);
     return await withWorkspaceLock(root, "research.task.run.commit", async () => {
       const project = await loadProject(root, projectId);
       let status: NativeRunRecord["status"] = observed.cancelled
@@ -440,8 +534,19 @@ export async function observeNativeRun(
           : observed.exitCode === 0
             ? "succeeded"
             : "failed";
+      if (!runtimeValid) status = "failed";
       try {
         await assertRunWindow(root, project, input);
+        if (
+          prepared.certification &&
+          (await frozenPromotionView(
+            root,
+            project,
+            prepared.certification.promotion,
+            await readVerifiedJournal(workspacePaths(root).journal),
+          )) !== prepared.certification.effectiveDesignSha256
+        )
+          status = "stale";
         if (
           (await nativePacketBinding(root, project, input.nativeSessionId)) !==
             prepared.nativePacketSha256 ||
@@ -489,6 +594,18 @@ export async function observeNativeRun(
           if (status === "succeeded") status = "invalid-output";
         }
       }
+      const investigationCertification = prepared.certification
+        ? await certificationAssessment(
+            root,
+            projectId,
+            prepared.certification,
+            status,
+            outputs,
+            probe!,
+            prepared.invocation!.isolation,
+            prepared.versionInvocation!.isolation,
+          )
+        : undefined;
       const core = {
         schemaVersion: 1 as const,
         kind: "tiangong-native-run" as const,
@@ -506,7 +623,7 @@ export async function observeNativeRun(
         environmentVerification: "declared-lock-not-attested" as const,
         runtime: {
           kind: input.runtime.kind,
-          version: prepared.reportedVersion,
+          version: runtimeValid ? probeVersion : "unverified",
           binarySha256: prepared.binarySha256,
           platform: platform(),
           architecture: arch(),
@@ -520,24 +637,62 @@ export async function observeNativeRun(
         process: {
           exitCode: observed.exitCode,
           signal: observed.signal,
-          startedAt: observed.startedAt,
+          startedAt: probe?.startedAt ?? observed.startedAt,
           finishedAt: observed.finishedAt,
-          wallSeconds: observed.wallSeconds,
+          wallSeconds,
           stdoutSha256: observed.stdoutSha256,
           stderrSha256: observed.stderrSha256,
           stdoutBytes: observed.stdoutBytes,
           stderrBytes: observed.stderrBytes,
           diagnostic: safeDiagnostic(observed.stderr, observed.truncated),
         },
+        ...(investigationCertification ? { investigationCertification } : {}),
       };
       const record: NativeRunRecord = { ...core, recordSha256: sha256Text(canonicalJson(core)) };
       await writeTaskObject(root, projectId, "runs", record.recordSha256, record);
-      await appendJournalEvent(
-        workspacePaths(root).journal,
-        "project.task.run.completed",
-        projectId,
-        { runId: input.runId, requestSha256, recordSha256: record.recordSha256, status },
-      );
+      if (prepared.certification) {
+        let mutation = await beginProjectMutation(
+          root,
+          "investigation-certification",
+          project,
+          record.recordSha256,
+        );
+        try {
+          settleProjectCost(
+            project,
+            `investigation-certification-${prepared.certification.promotion.recordSha256}`,
+            prepared.certification.promotion.plan.certification.maxCostUsd,
+            "allocated-upper-bound",
+          );
+          project.usage.wallSeconds += wallSeconds;
+          project.updatedAt = new Date().toISOString();
+          mutation = await prepareProjectMutation(root, mutation, project);
+          await appendJournalEvent(
+            workspacePaths(root).journal,
+            "project.task.run.completed",
+            projectId,
+            {
+              projectId,
+              runId: input.runId,
+              requestSha256,
+              recordSha256: record.recordSha256,
+              status,
+              mutation: projectMutationBinding(mutation),
+            },
+          );
+          await settleProjectMutation(root, mutation);
+        } catch (error) {
+          await settleProjectMutation(root, mutation);
+          throw error;
+        }
+      } else {
+        await appendJournalEvent(
+          workspacePaths(root).journal,
+          "project.task.run.completed",
+          projectId,
+          { runId: input.runId, requestSha256, recordSha256: record.recordSha256, status },
+        );
+      }
       return { record, replayed: false, stagingDirectoryName: basename(prepared.staging) };
     });
   } catch (caught) {
@@ -688,6 +843,8 @@ export async function readNativeRun(
     started.payload.runtimeBinarySha256 !== record.runtime.binarySha256 ||
     started.payload.environmentLockSha256 !== record.environmentLock.sha256 ||
     started.payload.nativePacketSha256 !== record.nativePacketSha256 ||
+    started.payload.investigationPromotionSha256 !==
+      record.investigationCertification?.promotionSha256 ||
     completed.payload.status !== record.status ||
     started.sequence >= completed.sequence
   )

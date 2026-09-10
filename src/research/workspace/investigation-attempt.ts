@@ -330,7 +330,7 @@ export async function assertInvestigationCurrent(
     throw invalid("The investigation budget reservation is no longer available.");
   return snapshot;
 }
-function diagnosticValue(value: unknown): Diagnostic | null {
+export function parseInvestigationDiagnostic(value: unknown): Diagnostic | null {
   if (
     !isObject(value) ||
     Object.keys(value).sort().join(",") !==
@@ -662,7 +662,7 @@ async function observeInvestigationAttemptInternal(
         const object = await storeRunObject(root, projectId, path);
         outputs.push({ ...object, id: output.id, mediaType: output.mediaType });
         if (output.id === program.diagnosticOutputId && info.size <= 65536)
-          diagnostic = diagnosticValue(
+          diagnostic = parseInvestigationDiagnostic(
             JSON.parse(
               await readFile(join(workspacePaths(root).projects, projectId, object.path), "utf8"),
             ),
