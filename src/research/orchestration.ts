@@ -156,6 +156,10 @@ import {
   scientificFulfillmentSchema,
 } from "./workspace/scientific-fulfillment.js";
 import {
+  planScientificAmendment,
+  scientificAmendmentSchema,
+} from "./workspace/scientific-amendment.js";
+import {
   inspectNativeRun,
   nativeRunInputSchema,
   observeNativeRun,
@@ -241,6 +245,7 @@ export function researchOrchestrationHelp(): string {
   tiangong-ai research scientific object inspect --kind model-implementation|environment-lock --locator <control-relative-locator> [--workspace <path>] [--json]
   tiangong-ai research scientific fulfillment record <project> --input <json-file> [--workspace <path>] [--json]
   tiangong-ai research scientific fulfillment status <project> [--workspace <path>] [--json]
+  tiangong-ai research scientific amendment plan <project> --input <json-file> [--workspace <path>] [--json]
   tiangong-ai research project task run observe <project> --input <json-file> --confirm-execution [--workspace <path>] [--json]
   tiangong-ai research project task run inspect <project> --run <run-id> [--workspace <path>] [--json]
   tiangong-ai research project budget resolve <project-id> --reservation <id> --accounted-cost-usd <estimate> --reason <text> --confirm-budget [--workspace <path>] [--json]
@@ -304,6 +309,33 @@ ${researchSetupHelp()}
 async function runScientific(argv: string[], io: CliIO): Promise<number> {
   const [action, ...rest] = argv;
   if (!action || action === "--help" || action === "-h") return writeHelp(io);
+  if (action === "amendment") {
+    const [operation, ...arguments_] = rest;
+    if (operation !== "plan") throw unknownAction("research scientific amendment", operation ?? "");
+    const args = parseStrictArgs(
+      arguments_,
+      { ...WORKSPACE_OPTIONS, input: "string" },
+      "research scientific amendment plan",
+    );
+    if (strictBoolean(args, "help")) return writeHelp(io);
+    const projectId = onePositional(args.positionals, "research scientific amendment plan");
+    const path = strictString(args, "input");
+    if (!path)
+      throw new CliError("Amendment plan requires --input.", {
+        code: "RESEARCH_SCIENTIFIC_AMENDMENT_INVALID",
+        exitCode: 2,
+      });
+    writeJson(
+      io,
+      await planScientificAmendment(
+        await workspaceFromArgs(args),
+        projectId,
+        await readBoundedJsonRecord(path, "--input", "RESEARCH_SCIENTIFIC_AMENDMENT_INVALID"),
+      ),
+      args,
+    );
+    return 0;
+  }
   if (action === "fulfillment") {
     const [operation, ...arguments_] = rest;
     if (operation !== "record" && operation !== "status")
@@ -798,6 +830,8 @@ async function runSchema(argv: string[], io: CliIO): Promise<number> {
     schema = scientificDesignSchema();
   } else if (stage === "scientific-fulfillment") {
     schema = scientificFulfillmentSchema();
+  } else if (stage === "scientific-amendment") {
+    schema = scientificAmendmentSchema();
   } else if (stage.startsWith("scientific-assessment-")) {
     const role = scientificReviewRole(stage.slice("scientific-assessment-".length));
     schema = scientificGateAssessmentSchema(role);
