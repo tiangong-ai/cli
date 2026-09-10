@@ -109,6 +109,7 @@ import {
   closePublication,
   freezePublicationManuscript,
   inspectPublicationStatus,
+  inspectPublicationLineage,
   preparePublicationReview,
   publicationAssessmentSchema,
   publicationReviewSchema,
@@ -117,6 +118,7 @@ import {
   type PublicationSubmissionRole,
   type PublicationStatus,
 } from "./workspace/publication-workflow.js";
+import { publicationResultLineageSchema } from "./workspace/publication-lineage.js";
 import {
   approveResearchPolicy,
   initializeResearchPolicy,
@@ -230,6 +232,7 @@ export function researchOrchestrationHelp(): string {
   tiangong-ai research policy approve <project-id> --confirm [--acknowledge-defaults] [--workspace <path>] [--json]
   tiangong-ai research policy resolve <project-id> [--workspace <path>] [--json]
   tiangong-ai research publication freeze <project-id> --manuscript <absolute-file> --assessment <absolute-json> --submission <absolute-json> --producer-agent codex|claude|workbuddy|codebuddy --producer-session <opaque-id> [--supplements <absolute-json-array>] [--workspace <path>] [--json]
+  tiangong-ai research publication lineage <project-id> [--workspace <path>] [--json]
   tiangong-ai research publication review prepare <project-id> --role evidence|methods-reproducibility|domain-novelty|journal-editor --reviewer-agent codex|claude --reviewer-session <opaque-id> [--workspace <path>] [--json]
   tiangong-ai research publication review submit <project-id> --role evidence|methods-reproducibility|domain-novelty|journal-editor --review <absolute-json> [--workspace <path>] [--json]
   tiangong-ai research publication status <project-id> [--workspace <path>] [--json]
@@ -520,6 +523,19 @@ async function waitForReviewerSidecarTermination(): Promise<void> {
 async function runPublication(argv: string[], io: CliIO): Promise<number> {
   const [action, ...rest] = argv;
   if (!action || action === "--help" || action === "-h") return writeHelp(io);
+  if (action === "lineage") {
+    const args = parseStrictArgs(rest, { ...WORKSPACE_OPTIONS }, "research publication lineage");
+    if (strictBoolean(args, "help")) return writeHelp(io);
+    writeJson(
+      io,
+      await inspectPublicationLineage(
+        await workspaceFromArgs(args),
+        onePositional(args.positionals, "research publication lineage"),
+      ),
+      args,
+    );
+    return 0;
+  }
   if (action === "freeze") {
     const args = parseStrictArgs(
       rest,
@@ -548,6 +564,7 @@ async function runPublication(argv: string[], io: CliIO): Promise<number> {
     }
     const root = await workspaceFromArgs(args);
     const supplementsPath = strictString(args, "supplements");
+    const submission = await readSubmissionFiles(submissionPath);
     writeJson(
       io,
       await freezePublicationManuscript({
@@ -556,7 +573,8 @@ async function runPublication(argv: string[], io: CliIO): Promise<number> {
         manuscriptPath,
         assessmentPath,
         supplementPaths: supplementsPath ? await readAbsolutePathArray(supplementsPath) : [],
-        submissionFiles: await readSubmissionFiles(submissionPath),
+        submissionFiles: submission.files,
+        resultLineage: submission.resultLineage,
         producerAgent: publicationAgent(strictString(args, "producer-agent"), "producer"),
         producerSessionId,
       }),
@@ -788,6 +806,8 @@ async function runSchema(argv: string[], io: CliIO): Promise<number> {
     schema = scientificReviewSchema(role);
   } else if (stage === "publication-assessment") {
     schema = publicationAssessmentSchema();
+  } else if (stage === "publication-result-lineage") {
+    schema = publicationResultLineageSchema();
   } else if (stage.startsWith("publication-review-")) {
     const role = publicationReviewRole(stage.slice("publication-review-".length));
     schema = publicationReviewSchema(role);
@@ -2703,13 +2723,14 @@ async function inspectSnapshotForStatus(
 async function inspectPublicationForStatus(
   root: string,
   projectId: string,
-): Promise<PublicationStatus | { generationStatus: "invalid"; code: string }> {
+): Promise<PublicationStatus | { generationStatus: "invalid"; code: string; details?: unknown }> {
   try {
     return await inspectPublicationStatus(root, projectId);
   } catch (error) {
     return {
       generationStatus: "invalid",
       code: error instanceof CliError ? error.code : "RESEARCH_PUBLICATION_STATE_INVALID",
+      ...(error instanceof CliError && error.details ? { details: error.details } : {}),
     };
   }
 }
@@ -3121,9 +3142,10 @@ async function readAbsolutePathArray(path: string, option = "supplements"): Prom
   return value;
 }
 
-async function readSubmissionFiles(
-  path: string,
-): Promise<Array<{ role: PublicationSubmissionRole; path: string }>> {
+async function readSubmissionFiles(path: string): Promise<{
+  files: Array<{ role: PublicationSubmissionRole; path: string }>;
+  resultLineage: unknown;
+}> {
   const value = await readBoundedJsonRecord(
     path,
     "--submission",
@@ -3131,10 +3153,12 @@ async function readSubmissionFiles(
   );
   if (
     value.schemaVersion !== 1 ||
+    Object.keys(value).some((key) => !["schemaVersion", "files", "resultLineage"].includes(key)) ||
     !Array.isArray(value.files) ||
     value.files.some(
       (file) =>
         !isObject(file) ||
+        Object.keys(file).some((key) => !["role", "path"].includes(key)) ||
         typeof file.role !== "string" ||
         typeof file.path !== "string" ||
         !isAbsolute(file.path) ||
@@ -3146,7 +3170,10 @@ async function readSubmissionFiles(
       { code: "RESEARCH_PUBLICATION_SUBMISSION_PACKAGE_INVALID", exitCode: 2 },
     );
   }
-  return value.files as Array<{ role: PublicationSubmissionRole; path: string }>;
+  return {
+    files: value.files as Array<{ role: PublicationSubmissionRole; path: string }>,
+    resultLineage: value.resultLineage,
+  };
 }
 
 function integerOption(value: string | undefined, fallback: number, label: string): number {

@@ -70,10 +70,38 @@ describe("top-journal publication workflow", () => {
           assessmentPath: fixture.assessment,
           supplementPaths: [],
           submissionFiles: fixture.submissionFiles,
+          resultLineage: await fixtureResultLineage(fixture),
           producerAgent: "codex",
           producerSessionId: "stale-report-producer",
         }),
         (error: unknown) => errorCode(error) === "RESEARCH_PUBLICATION_ANALYSIS_BINDING_STALE",
+      );
+      closure.artifacts = await Promise.all(
+        ["analysis.json", "report.md"].map((name) =>
+          fileRecord(join(outputs, name), `outputs/${name}`),
+        ),
+      );
+      await writeJsonAtomic(closurePath, closure);
+      await assert.rejects(
+        freezePublicationManuscript({
+          root: fixture.root,
+          projectId: fixture.projectId,
+          manuscriptPath: fixture.manuscript,
+          assessmentPath: fixture.assessment,
+          supplementPaths: [],
+          submissionFiles: fixture.submissionFiles,
+          resultLineage: await fixtureResultLineage(fixture),
+          producerAgent: "codex",
+          producerSessionId: "stale-reviewed-report",
+        }),
+        (error: unknown) => {
+          assert.equal(errorCode(error), "RESEARCH_PUBLICATION_ANALYSIS_BINDING_STALE");
+          assert.equal(
+            (error as { details: { binding: string } }).details.binding,
+            "review-packet",
+          );
+          return true;
+        },
       );
     } finally {
       await rm(fixture.root, { recursive: true, force: true });
@@ -84,7 +112,7 @@ describe("top-journal publication workflow", () => {
     const fixture = await publicationFixture("mixed-result-generations");
     try {
       const outputs = join(workspacePaths(fixture.root).projects, fixture.projectId, "outputs");
-      const names = ["analysis.json", "claim-evidence-graph.json", "report.md"];
+      const names = ["analysis.json", "claim-evidence-graph.json", "report.md", "closure.json"];
       const original = new Map(
         await Promise.all(
           names.map(async (name) => [name, await readFile(join(outputs, name), "utf8")] as const),
@@ -128,8 +156,10 @@ describe("top-journal publication workflow", () => {
       const assessment = JSON.parse(await readFile(fixture.assessment, "utf8"));
       assessment.results[0].statement = analysis.findings[0].statement;
       await writeJsonAtomic(fixture.assessment, assessment);
+      await recordFixtureClosureLineage(fixture.root, fixture.projectId);
       const resultLineage = {
         schemaVersion: 1,
+        projectId: fixture.projectId,
         analysisRunId: analysis.analysisRun.id,
         analysisSha256: graph.analysisSha256,
         claimEvidenceGraphSha256: sha256Text(
@@ -143,6 +173,7 @@ describe("top-journal publication workflow", () => {
             ...fixture.submissionFiles,
           ].map(async (file) => ({
             role: file.role,
+            analysisSha256: graph.analysisSha256,
             sha256: sha256Text(await readFile(file.path, "utf8")),
           })),
         ),
@@ -152,7 +183,7 @@ describe("top-journal publication workflow", () => {
         files: fixture.submissionFiles,
         resultLineage,
       });
-      const freeze = () =>
+      const freeze = async () =>
         invokeCli([
           "research",
           "publication",
@@ -185,6 +216,67 @@ describe("top-journal publication workflow", () => {
         JSON.parse(mixed.stderr).error.code,
         "RESEARCH_PUBLICATION_ANALYSIS_BINDING_STALE",
       );
+      await assert.rejects(
+        inspectPublicationStatus(fixture.root, fixture.projectId),
+        (error: unknown) => errorCode(error) === "RESEARCH_PUBLICATION_ANALYSIS_BINDING_STALE",
+      );
+      const status = await invokeCli([
+        "research",
+        "status",
+        "--project",
+        fixture.projectId,
+        "--workspace",
+        fixture.root,
+        "--json",
+      ]);
+      assert.equal(status.exitCode, 0, status.stderr);
+      const invalid = JSON.parse(status.stdout).projects[0].publication;
+      assert.equal(invalid.generationStatus, "invalid");
+      assert.equal(invalid.details.object, "analysisRunId");
+      await assert.rejects(
+        preparePublicationReview({
+          root: fixture.root,
+          projectId: fixture.projectId,
+          role: "evidence",
+          reviewerAgent: "claude",
+          reviewerSessionId: "stale-generation-reviewer",
+        }),
+        (error: unknown) => errorCode(error) === "RESEARCH_PUBLICATION_ANALYSIS_BINDING_STALE",
+      );
+    } finally {
+      await rm(fixture.root, { recursive: true, force: true });
+    }
+  });
+
+  it("requires prepared material lineage and rejects stale bytes or a per-file foreign generation", async () => {
+    const fixture = await publicationFixture("material-lineage-bytes");
+    try {
+      const request = {
+        root: fixture.root,
+        projectId: fixture.projectId,
+        manuscriptPath: fixture.manuscript,
+        assessmentPath: fixture.assessment,
+        supplementPaths: [],
+        submissionFiles: fixture.submissionFiles,
+        producerAgent: "codex" as const,
+        producerSessionId: "material-producer",
+      };
+      await assert.rejects(
+        freezePublicationManuscript(request),
+        (error: unknown) => errorCode(error) === "RESEARCH_PUBLICATION_RESULT_LINEAGE_REQUIRED",
+      );
+      const resultLineage = await fixtureResultLineage(fixture);
+      const foreign = structuredClone(resultLineage);
+      foreign.files.find((file) => file.role === "source-data")!.analysisSha256 = "b".repeat(64);
+      await assert.rejects(
+        freezePublicationManuscript({ ...request, resultLineage: foreign }),
+        (error: unknown) => errorCode(error) === "RESEARCH_PUBLICATION_RESULT_LINEAGE_MISMATCH",
+      );
+      await writeFile(fixture.supplement, "measure,value\noutcome,999\n");
+      await assert.rejects(
+        freezePublicationManuscript({ ...request, resultLineage }),
+        (error: unknown) => errorCode(error) === "RESEARCH_PUBLICATION_RESULT_LINEAGE_MISMATCH",
+      );
     } finally {
       await rm(fixture.root, { recursive: true, force: true });
     }
@@ -200,6 +292,7 @@ describe("top-journal publication workflow", () => {
         assessmentPath: fixture.assessment,
         supplementPaths: [],
         submissionFiles: fixture.submissionFiles,
+        resultLineage: await fixtureResultLineage(fixture),
         producerAgent: "codex",
         producerSessionId: "task-manuscript-producer",
       });
@@ -245,6 +338,7 @@ describe("top-journal publication workflow", () => {
         assessmentPath: fixture.assessment,
         supplementPaths: [],
         submissionFiles: fixture.submissionFiles,
+        resultLineage: await fixtureResultLineage(fixture),
         producerAgent: "codex",
         producerSessionId: "qualitative-producer",
       });
@@ -287,6 +381,7 @@ describe("top-journal publication workflow", () => {
             assessmentPath: fixture.assessment,
             supplementPaths: [],
             submissionFiles: fixture.submissionFiles,
+            resultLineage: await fixtureResultLineage(fixture),
             producerAgent: "codex",
             producerSessionId: "inconsistent-run-producer",
           }),
@@ -340,6 +435,19 @@ describe("top-journal publication workflow", () => {
   it("exposes publication freeze/status and authoritative assessment/review schemas", async () => {
     const fixture = await publicationFixture("publication-cli");
     try {
+      const lineage = await invokeCli([
+        "research",
+        "publication",
+        "lineage",
+        fixture.projectId,
+        "--workspace",
+        fixture.root,
+        "--json",
+      ]);
+      assert.equal(lineage.exitCode, 0, lineage.stderr);
+      const preparation = JSON.parse(lineage.stdout);
+      assert.match(preparation.analysisGenerationId, /^[a-f0-9]{64}$/);
+      assert.deepEqual(preparation.resultLineage.files, []);
       const frozen = await invokeCli([
         "research",
         "publication",
@@ -386,6 +494,8 @@ describe("top-journal publication workflow", () => {
       assert.match(publicationStatus.contentSnapshotSha256, /^[a-f0-9]{64}$/);
       assert.match(publicationStatus.inferenceSnapshotSha256, /^[a-f0-9]{64}$/);
       assert.match(publicationStatus.claimEvidenceGraphSha256, /^[a-f0-9]{64}$/);
+      assert.equal(publicationStatus.analysisGenerationId, preparation.analysisGenerationId);
+      assert.match(publicationStatus.materialResultsManifestSha256, /^[a-f0-9]{64}$/);
 
       const workspaceStatus = await invokeCli([
         "research",
@@ -403,6 +513,7 @@ describe("top-journal publication workflow", () => {
       );
 
       for (const schemaName of [
+        "publication-result-lineage",
         "publication-assessment",
         "publication-review-evidence",
         "publication-review-journal-editor",
@@ -426,6 +537,7 @@ describe("top-journal publication workflow", () => {
         assessmentPath: fixture.assessment,
         supplementPaths: [fixture.supplement],
         submissionFiles: fixture.submissionFiles,
+        resultLineage: await fixtureResultLineage(fixture, [fixture.supplement]),
         producerAgent: "codex",
         producerSessionId: "native-codex-session-1",
       });
@@ -492,6 +604,7 @@ describe("top-journal publication workflow", () => {
         assessmentPath: fixture.assessment,
         supplementPaths: [],
         submissionFiles: fixture.submissionFiles,
+        resultLineage: await fixtureResultLineage(fixture),
         producerAgent: "codex",
         producerSessionId,
       });
@@ -574,6 +687,7 @@ describe("top-journal publication workflow", () => {
           assessmentPath: fixture.assessment,
           supplementPaths: [],
           submissionFiles: fixture.submissionFiles,
+          resultLineage: await fixtureResultLineage(fixture),
           producerAgent: "codex",
           producerSessionId: "incomplete-manuscript-session",
         }),
@@ -596,6 +710,7 @@ describe("top-journal publication workflow", () => {
         assessmentPath: fixture.assessment,
         supplementPaths: [],
         submissionFiles: fixture.submissionFiles,
+        resultLineage: await fixtureResultLineage(fixture),
         producerAgent: "codex",
         producerSessionId: "numbered-sections-producer",
       });
@@ -608,7 +723,7 @@ describe("top-journal publication workflow", () => {
   it("still rejects missing, unrelated, unseparated, and body-text section matches", async () => {
     const fixture = await publicationFixture("section-rejections");
     try {
-      const freeze = () =>
+      const freeze = async () =>
         freezePublicationManuscript({
           root: fixture.root,
           projectId: fixture.projectId,
@@ -616,6 +731,7 @@ describe("top-journal publication workflow", () => {
           assessmentPath: fixture.assessment,
           supplementPaths: [],
           submissionFiles: fixture.submissionFiles,
+          resultLineage: await fixtureResultLineage(fixture),
           producerAgent: "codex",
           producerSessionId: "section-rejection-producer",
         });
@@ -697,6 +813,7 @@ describe("top-journal publication workflow", () => {
           assessmentPath: fixture.assessment,
           supplementPaths: [],
           submissionFiles: fixture.submissionFiles,
+          resultLineage: await fixtureResultLineage(fixture),
           producerAgent: "codex",
           producerSessionId: "disconnected-graph-session",
         }),
@@ -718,6 +835,7 @@ describe("top-journal publication workflow", () => {
         assessmentPath: fixture.assessment,
         supplementPaths: [],
         submissionFiles: fixture.submissionFiles,
+        resultLineage: await fixtureResultLineage(fixture),
         producerAgent: "codex",
         producerSessionId: "native-producer-session",
       });
@@ -783,6 +901,7 @@ describe("top-journal publication workflow", () => {
         assessmentPath: fixture.assessment,
         supplementPaths: [],
         submissionFiles: fixture.submissionFiles,
+        resultLineage: await fixtureResultLineage(fixture),
         producerAgent: "codex",
         producerSessionId: "native-policy-bound-producer",
       });
@@ -818,6 +937,7 @@ describe("top-journal publication workflow", () => {
         assessmentPath: fixture.assessment,
         supplementPaths: [],
         submissionFiles: fixture.submissionFiles,
+        resultLineage: await fixtureResultLineage(fixture),
         producerAgent: "codex",
         producerSessionId: "native-generation-one",
       });
@@ -851,6 +971,7 @@ describe("top-journal publication workflow", () => {
         assessmentPath: fixture.assessment,
         supplementPaths: [],
         submissionFiles: fixture.submissionFiles,
+        resultLineage: await fixtureResultLineage(fixture),
         producerAgent: "codex",
         producerSessionId: "native-generation-two",
       });
@@ -888,6 +1009,7 @@ describe("top-journal publication workflow", () => {
         assessmentPath: fixture.assessment,
         supplementPaths: [],
         submissionFiles: fixture.submissionFiles,
+        resultLineage: await fixtureResultLineage(fixture),
         producerAgent: "codex",
         producerSessionId: "native-blocked-assessment",
       });
@@ -1320,6 +1442,7 @@ async function publicationFixture(
     },
     evidenceSnapshot: { snapshotId: snapshot.snapshotId, snapshotSha256 },
   });
+  await recordFixtureClosureLineage(root, projectId);
   for (const workPackage of project.packages) {
     workPackage.status = "complete";
     workPackage.completedAt = "2026-08-12T00:00:00.000Z";
@@ -1369,8 +1492,18 @@ async function publicationFixture(
   for (const file of submissionFiles.filter((file) => file.path !== supplement)) {
     await writeFile(file.path, `# ${file.role}\n\nComplete submission material for review.\n`);
   }
-  await writeJsonAtomic(submissionManifest, { schemaVersion: 1, files: submissionFiles });
   await writeJsonAtomic(assessment, publicationAssessment(assessmentOverride));
+  await writeJsonAtomic(submissionManifest, {
+    schemaVersion: 1,
+    files: submissionFiles,
+    resultLineage: await fixtureResultLineage({
+      root,
+      projectId,
+      manuscript,
+      assessment,
+      submissionFiles,
+    }),
+  });
   return {
     root,
     projectId,
@@ -1381,6 +1514,85 @@ async function publicationFixture(
     submissionFiles,
     submissionManifest,
     snapshotSha256,
+  };
+}
+
+async function recordFixtureClosureLineage(root: string, projectId: string) {
+  const directory = join(workspacePaths(root).projects, projectId);
+  const outputs = join(directory, "outputs");
+  const closurePath = join(outputs, "closure.json");
+  const closure = JSON.parse(await readFile(closurePath, "utf8"));
+  const artifacts = await Promise.all(
+    [
+      "analysis.json",
+      "report.md",
+      "claim-evidence-graph.json",
+      "content-snapshot.json",
+      "inference-snapshot.json",
+      "evidence-snapshot.json",
+    ].map((name) => fileRecord(join(outputs, name), `outputs/${name}`)),
+  );
+  const context = "Synthetic closed review context.\n";
+  const contextSha = sha256Text(context);
+  const contextPath = `review/contexts/${contextSha}.txt`;
+  await mkdir(join(directory, "review", "contexts"), { recursive: true });
+  await writeFile(join(directory, contextPath), context);
+  const core = {
+    schemaVersion: 1,
+    projectId,
+    artifacts,
+    snapshotChain: [],
+    reviewEvidenceContext: {
+      path: contextPath,
+      sha256: contextSha,
+      bytes: Buffer.byteLength(context),
+    },
+  };
+  const packetSha256 = sha256Text(canonicalJson(core));
+  const path = `review/packets/${packetSha256}.json`;
+  await mkdir(join(directory, "review", "packets"), { recursive: true });
+  await writeJsonAtomic(join(directory, path), { ...core, packetSha256 });
+  closure.artifacts = artifacts.filter((file) =>
+    ["outputs/analysis.json", "outputs/report.md"].includes(file.path),
+  );
+  closure.reviewPacket = { ...(await fileRecord(join(directory, path), path)), packetSha256 };
+  await writeJsonAtomic(closurePath, closure);
+}
+
+async function fixtureResultLineage(
+  fixture: {
+    root: string;
+    projectId: string;
+    manuscript: string;
+    assessment: string;
+    submissionFiles: Array<{ role: PublicationSubmissionRole; path: string }>;
+  },
+  supplements: string[] = [],
+) {
+  const outputs = join(workspacePaths(fixture.root).projects, fixture.projectId, "outputs");
+  const analysisBytes = await readFile(join(outputs, "analysis.json"), "utf8");
+  const analysisSha256 = sha256Text(analysisBytes);
+  return {
+    schemaVersion: 1,
+    projectId: fixture.projectId,
+    analysisRunId: JSON.parse(analysisBytes).analysisRun.id,
+    analysisSha256,
+    claimEvidenceGraphSha256: sha256Text(
+      await readFile(join(outputs, "claim-evidence-graph.json"), "utf8"),
+    ),
+    reportSha256: sha256Text(await readFile(join(outputs, "report.md"), "utf8")),
+    files: await Promise.all(
+      [
+        { role: "manuscript", path: fixture.manuscript },
+        { role: "assessment", path: fixture.assessment },
+        ...fixture.submissionFiles,
+        ...supplements.map((path, i) => ({ role: `supplement-${i + 1}`, path })),
+      ].map(async (file) => ({
+        role: file.role,
+        sha256: sha256Text(await readFile(file.path, "utf8")),
+        analysisSha256,
+      })),
+    ),
   };
 }
 

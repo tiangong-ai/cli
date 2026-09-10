@@ -15,10 +15,19 @@ import { loadProject } from "./projects.js";
 import { assertResearchPolicyBinding } from "./research-policy.js";
 import { assertScientificGateForStage } from "./scientific-review.js";
 import { compileTaskAcceptanceContext, type TaskAcceptanceContext } from "./task-acceptance.js";
+import {
+  analysisGenerationId,
+  closedAnalysisLineage,
+  RESULT_CORE_FILES,
+  verifyMaterialResultLineage,
+  lineageError,
+  type AnalysisLineage,
+} from "./publication-lineage.js";
 import { validateTaskObject } from "./task-contract.js";
 import {
   canonicalJson,
   ensureDirectory,
+  fileRecord,
   isObject,
   pathExists,
   readJsonFile,
@@ -142,6 +151,8 @@ interface PublicationGeneration {
   assessmentResult: TopJournalAssessmentResult;
   requiredReviewRoles: PublicationReviewRole[];
   taskAcceptanceSha256?: string | null;
+  analysisGenerationId?: string;
+  materialResultsManifest?: FrozenFile;
 }
 
 interface PublicationCurrentPointer {
@@ -194,6 +205,8 @@ export interface PublicationReviewPacket {
   taskAcceptance: TaskAcceptanceContext | null;
   instructions: string[];
   packetSha256: string;
+  analysisGenerationId: string;
+  materialResultsManifest: FrozenFile;
 }
 
 interface PublicationReviewRecord {
@@ -231,6 +244,8 @@ export interface PublicationStatus {
   readinessVerdict: PublicationReadinessVerdict;
   boundedStatement: string;
   closureSha256: string | null;
+  analysisGenerationId?: string;
+  materialResultsManifestSha256?: string;
 }
 
 export interface PublicationClosure {
@@ -258,6 +273,8 @@ export interface PublicationClosure {
   readinessVerdict: PublicationReadinessVerdict;
   boundedStatement: string;
   closureSha256: string;
+  analysisGenerationId: string;
+  materialResultsManifest: FrozenFile;
 }
 
 export function publicationAssessmentSchema(): Record<string, unknown> {
@@ -462,6 +479,7 @@ export async function freezePublicationManuscript(input: {
   assessmentPath: string;
   supplementPaths: string[];
   submissionFiles?: Array<{ role: PublicationSubmissionRole; path: string }>;
+  resultLineage?: unknown;
   producerAgent: AgentKind;
   producerSessionId: string;
 }): Promise<PublicationGeneration & { status: "manuscript-frozen" }> {
@@ -488,29 +506,8 @@ export async function freezePublicationManuscript(input: {
         "A native producer session must not reuse any prior independent reviewer session.",
       );
     }
-    const assessmentValue = parsePublicationAssessment(
-      JSON.parse(await readRegularTextFile(input.assessmentPath, "publication assessment")),
-    );
-    await validateSubmissionManuscript(input.manuscriptPath);
     const projectRoot = projectDirectory(input.root, project.id);
     const outputRoot = join(projectRoot, "outputs");
-    const snapshotValue = await readJsonFile<Record<string, unknown>>(
-      join(outputRoot, "evidence-snapshot.json"),
-      "Frozen evidence snapshot",
-    );
-    const snapshotSha256 = verifiedSnapshotSha256(project, snapshotValue);
-    const closureValue = await readJsonFile<Record<string, unknown>>(
-      join(outputRoot, "closure.json"),
-      "Base research closure",
-    );
-    assertBaseClosure(project, closureValue, snapshotSha256);
-    const submissionBindings = await validateSubmissionBindings(
-      outputRoot,
-      project.id,
-      String(snapshotValue.snapshotId),
-      snapshotSha256,
-      project.publicationPolicy!.resolvedPolicySha256,
-    );
 
     const manuscript = await storePublicationObject(
       input.root,
@@ -524,6 +521,15 @@ export async function freezePublicationManuscript(input: {
       input.assessmentPath,
       "publication-assessment",
     );
+    const assessmentValue = parsePublicationAssessment(
+      JSON.parse(
+        await readRegularTextFile(
+          join(projectRoot, assessment.objectLocator),
+          "publication assessment",
+        ),
+      ),
+    );
+    await validateSubmissionManuscript(join(projectRoot, manuscript.objectLocator));
     const supplements: FrozenFile[] = [];
     for (const [index, path] of [...new Set(input.supplementPaths)].entries()) {
       supplements.push(
@@ -614,6 +620,65 @@ export async function freezePublicationManuscript(input: {
       "claim-evidence-graph",
       true,
     );
+    const coreObjects = {
+      "analysis.json": baseResearch.analysis,
+      "report.md": baseResearch.report,
+      "claim-evidence-graph.json": claimEvidenceGraph,
+      "content-snapshot.json": contentSnapshot,
+      "inference-snapshot.json": inferenceSnapshot,
+      "evidence-snapshot.json": evidenceSnapshot,
+    };
+    const frozenPaths = Object.fromEntries(
+      Object.entries(coreObjects).map(([name, file]) => [
+        name,
+        join(projectRoot, file.objectLocator),
+      ]),
+    );
+    const snapshotValue = await readJsonFile<Record<string, unknown>>(
+      frozenPaths["evidence-snapshot.json"]!,
+      "Frozen evidence snapshot",
+    );
+    const snapshotSha256 = verifiedSnapshotSha256(project, snapshotValue);
+    const closureValue = await readJsonFile<Record<string, unknown>>(
+      join(projectRoot, baseResearch.closure.objectLocator),
+      "Base research closure",
+    );
+    assertBaseClosure(project, closureValue, snapshotSha256);
+    const submissionBindings = await validateSubmissionBindings(
+      outputRoot,
+      project.id,
+      String(snapshotValue.snapshotId),
+      snapshotSha256,
+      project.publicationPolicy!.resolvedPolicySha256,
+      frozenPaths,
+    );
+    const baseLineage = await closedAnalysisLineage({
+      root: input.root,
+      projectId: project.id,
+      closure: closureValue,
+      analysis: submissionBindings.analysis,
+      records: Object.fromEntries(
+        Object.entries(coreObjects).map(([name, file]) => [
+          name,
+          { path: `outputs/${name}`, sha256: file.sha256, bytes: file.bytes },
+        ]),
+      ),
+    });
+    const materialLineage = verifyMaterialResultLineage(
+      input.resultLineage,
+      baseLineage,
+      materialFiles(manuscript, assessment, supplements, submissionFiles),
+    );
+    const materialResultsPath = join(outputRoot, "material-results-manifest.json");
+    await writeJsonAtomic(materialResultsPath, materialLineage);
+    const materialResultsManifest = await storePublicationObject(
+      input.root,
+      project.id,
+      materialResultsPath,
+      "material-results-manifest",
+      true,
+    );
+    const resultGenerationId = analysisGenerationId(baseLineage);
     const analysisValue = submissionBindings.analysis;
     const reproducibilityPath = join(outputRoot, "submission-reproducibility.json");
     await writeJsonAtomic(reproducibilityPath, {
@@ -622,6 +687,8 @@ export async function freezePublicationManuscript(input: {
       projectId: project.id,
       analysisRun: isObject(analysisValue.analysisRun) ? analysisValue.analysisRun : null,
       bindings: {
+        analysisGenerationId: resultGenerationId,
+        materialResultsManifestSha256: materialResultsManifest.sha256,
         evidenceSnapshotSha256: evidenceSnapshot.sha256,
         contentSnapshotSha256: contentSnapshot.sha256,
         inferenceSnapshotSha256: inferenceSnapshot.sha256,
@@ -673,6 +740,8 @@ export async function freezePublicationManuscript(input: {
       assessment,
       supplements,
       submissionPackage,
+      analysisGenerationId: resultGenerationId,
+      materialResultsManifest,
       assessmentResult,
       requiredReviewRoles: requiredReviewRoles(project.publicationPolicy!),
       taskAcceptanceSha256:
@@ -806,6 +875,8 @@ export async function preparePublicationReview(input: {
       assessment: generation.assessment,
       supplements: generation.supplements,
       submissionPackage: generation.submissionPackage,
+      analysisGenerationId: generation.analysisGenerationId!,
+      materialResultsManifest: generation.materialResultsManifest!,
       mechanicalAssessment: generation.assessmentResult,
       taskAcceptance: await compileTaskAcceptanceContext(input.root, project),
       instructions: reviewInstructions(input.role),
@@ -987,6 +1058,8 @@ export async function inspectPublicationStatus(
     readinessVerdict,
     boundedStatement: boundedStatement(readinessVerdict),
     closureSha256,
+    analysisGenerationId: generation.analysisGenerationId!,
+    materialResultsManifestSha256: generation.materialResultsManifest!.sha256,
   };
 }
 
@@ -1028,6 +1101,8 @@ export async function closePublication(
       assessment: generation.assessment,
       supplements: generation.supplements,
       submissionPackage: generation.submissionPackage,
+      analysisGenerationId: generation.analysisGenerationId!,
+      materialResultsManifest: generation.materialResultsManifest!,
       reviews: reviews.map((entry) => ({
         role: entry.role,
         packetSha256: entry.packet.packetSha256,
@@ -1183,21 +1258,23 @@ async function validateSubmissionBindings(
   evidenceSnapshotId: string,
   evidenceSnapshotSha256: string,
   policySha256: string,
+  frozenPaths?: Record<string, string>,
 ): Promise<{
   analysis: Record<string, unknown>;
 }> {
+  const inputPath = (name: string) => frozenPaths?.[name] ?? join(outputRoot, name);
   const [content, inference, analysis, graph] = await Promise.all([
     readJsonFile<Record<string, unknown>>(
-      join(outputRoot, "content-snapshot.json"),
+      inputPath("content-snapshot.json"),
       "Frozen content snapshot",
     ),
     readJsonFile<Record<string, unknown>>(
-      join(outputRoot, "inference-snapshot.json"),
+      inputPath("inference-snapshot.json"),
       "Frozen inference snapshot",
     ),
-    readJsonFile<Record<string, unknown>>(join(outputRoot, "analysis.json"), "Frozen analysis"),
+    readJsonFile<Record<string, unknown>>(inputPath("analysis.json"), "Frozen analysis"),
     readJsonFile<Record<string, unknown>>(
-      join(outputRoot, "claim-evidence-graph.json"),
+      inputPath("claim-evidence-graph.json"),
       "Frozen Claim-Evidence Graph",
     ),
   ]);
@@ -1255,7 +1332,7 @@ async function validateSubmissionBindings(
     graph.kind !== "tiangong-claim-evidence-graph" ||
     graph.projectId !== projectId ||
     graph.inferenceSnapshotSha256 !== inference.snapshotSha256 ||
-    graph.analysisSha256 !== (await sha256File(join(outputRoot, "analysis.json"))) ||
+    graph.analysisSha256 !== (await sha256File(inputPath("analysis.json"))) ||
     graph.analysisRunId !== analysisRun.id ||
     nodeById.size !== graphNodes.length ||
     new Set(graphEdges.flatMap((edge) => (typeof edge.id === "string" ? [edge.id] : []))).size !==
@@ -1541,7 +1618,14 @@ async function loadCurrentGeneration(
       "The publication submission package hash binding is invalid.",
     );
   }
+  if (!generation.materialResultsManifest || !generation.analysisGenerationId) {
+    throw lineageError(
+      "RESEARCH_PUBLICATION_RESULT_LINEAGE_REQUIRED",
+      "This legacy publication has no material result lineage. Preserve its history and refreeze with a prepared resultLineage before another review or readiness claim.",
+    );
+  }
   await verifyFrozenFiles(root, projectId, [
+    generation.materialResultsManifest,
     generation.manuscript,
     generation.assessment,
     generation.evidenceSnapshot.object,
@@ -1555,6 +1639,68 @@ async function loadCurrentGeneration(
     generation.submissionPackage.claimEvidenceGraph,
     generation.submissionPackage.reproducibilityManifest,
   ]);
+  const base = await currentClosedAnalysisLineage(root, projectId);
+  const manifest = await readJsonFile<unknown>(
+    join(projectDirectory(root, projectId), generation.materialResultsManifest.objectLocator),
+    "Frozen material results manifest",
+  );
+  verifyMaterialResultLineage(
+    manifest,
+    base,
+    materialFiles(
+      generation.manuscript,
+      generation.assessment,
+      generation.supplements,
+      generation.submissionPackage.files,
+    ),
+  );
+  if (
+    generation.analysisGenerationId !== analysisGenerationId(base) ||
+    generation.baseResearch.analysis.sha256 !== base.analysisSha256 ||
+    generation.baseResearch.report.sha256 !== base.reportSha256 ||
+    generation.submissionPackage.claimEvidenceGraph.sha256 !== base.claimEvidenceGraphSha256
+  ) {
+    throw lineageError(
+      "RESEARCH_PUBLICATION_ANALYSIS_BINDING_STALE",
+      "The publication no longer binds the current closed result generation.",
+      {
+        object: "analysisGenerationId",
+        expected: analysisGenerationId(base),
+        supplied: generation.analysisGenerationId,
+      },
+    );
+  }
+  const reproduction = await readJsonFile<Record<string, unknown>>(
+    join(
+      projectDirectory(root, projectId),
+      generation.submissionPackage.reproducibilityManifest.objectLocator,
+    ),
+    "Frozen reproducibility manifest",
+  );
+  const expectedReproduction = {
+    analysisGenerationId: generation.analysisGenerationId,
+    materialResultsManifestSha256: generation.materialResultsManifest.sha256,
+    evidenceSnapshotSha256: generation.evidenceSnapshot.object.sha256,
+    contentSnapshotSha256: generation.submissionPackage.contentSnapshot.sha256,
+    inferenceSnapshotSha256: generation.submissionPackage.inferenceSnapshot.sha256,
+    claimEvidenceGraphSha256: generation.submissionPackage.claimEvidenceGraph.sha256,
+    analysisSha256: generation.baseResearch.analysis.sha256,
+  };
+  const frozenAnalysis = await readJsonFile<Record<string, unknown>>(
+    join(projectDirectory(root, projectId), generation.baseResearch.analysis.objectLocator),
+    "Frozen analysis",
+  );
+  if (
+    reproduction.projectId !== projectId ||
+    canonicalJson(reproduction.bindings) !== canonicalJson(expectedReproduction) ||
+    canonicalJson(reproduction.analysisRun) !== canonicalJson(frozenAnalysis.analysisRun)
+  ) {
+    throw lineageError(
+      "RESEARCH_PUBLICATION_RESULT_LINEAGE_MISMATCH",
+      "The reproducibility record does not bind the frozen material results and analysis.",
+      { object: "submission-reproducibility" },
+    );
+  }
   const currentTask = await compileTaskAcceptanceContext(root, await loadProject(root, projectId));
   if ((generation.taskAcceptanceSha256 ?? null) !== (currentTask?.contextSha256 ?? null)) {
     throw publicationError(
@@ -1563,6 +1709,66 @@ async function loadCurrentGeneration(
     );
   }
   return generation;
+}
+
+function materialFiles(
+  manuscript: FrozenFile,
+  assessment: FrozenFile,
+  supplements: FrozenFile[],
+  submission: FrozenSubmissionFile[],
+) {
+  return [
+    { role: "manuscript", sha256: manuscript.sha256 },
+    { role: "assessment", sha256: assessment.sha256 },
+    ...supplements.map((file) => ({ role: file.logicalName, sha256: file.sha256 })),
+    ...submission.map((file) => ({ role: file.role, sha256: file.sha256 })),
+  ];
+}
+
+async function currentClosedAnalysisLineage(
+  root: string,
+  projectId: string,
+): Promise<AnalysisLineage> {
+  const project = await requireClosedTopJournalProject(root, projectId);
+  const outputRoot = join(projectDirectory(root, projectId), "outputs");
+  const snapshot = await readJsonFile<Record<string, unknown>>(
+    join(outputRoot, "evidence-snapshot.json"),
+    "Closed evidence snapshot",
+  );
+  const snapshotSha256 = verifiedSnapshotSha256(project, snapshot);
+  const closure = await readJsonFile<Record<string, unknown>>(
+    join(outputRoot, "closure.json"),
+    "Base closure",
+  );
+  assertBaseClosure(project, closure, snapshotSha256);
+  const { analysis } = await validateSubmissionBindings(
+    outputRoot,
+    projectId,
+    String(snapshot.snapshotId),
+    snapshotSha256,
+    project.publicationPolicy!.resolvedPolicySha256,
+  );
+  const records = Object.fromEntries(
+    await Promise.all(
+      RESULT_CORE_FILES.map(
+        async (name) =>
+          [name, await fileRecord(join(outputRoot, name), `outputs/${name}`)] as const,
+      ),
+    ),
+  );
+  return closedAnalysisLineage({ root, projectId, closure, analysis, records });
+}
+
+/** Read the current authority before authoring material; never label existing files automatically. */
+export async function inspectPublicationLineage(root: string, projectId: string) {
+  const base = await currentClosedAnalysisLineage(root, projectId);
+  return {
+    analysisGenerationId: analysisGenerationId(base),
+    resultLineage: { schemaVersion: 1, ...base, files: [] },
+    bindingScope: "producer-declared-derivation-with-verified-bytes-and-closed-analysis",
+    nextAction:
+      "Record each material file's role, SHA-256 and source analysisSha256 when producing it. Fill every manuscript, assessment, submission and supplement-N entry; do not relabel stale artifacts. Freeze verifies this prepared manifest. Scientific fidelity still requires independent review.",
+  };
 }
 
 async function verifyFrozenFiles(
