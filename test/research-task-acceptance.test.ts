@@ -17,7 +17,7 @@ import { runResearchCrashWorker } from "./helpers/research-crash-worker.js";
 import { runCli } from "../src/cli.js";
 import { openArtifactViews } from "../src/research/workspace/artifact-views.js";
 import { lockCapabilities } from "../src/research/workspace/capabilities.js";
-import { readVerifiedJournal } from "../src/research/workspace/journal.js";
+import { appendJournalEvent, readVerifiedJournal } from "../src/research/workspace/journal.js";
 import {
   addProjectInput,
   initializeProject,
@@ -51,6 +51,54 @@ import type { ResearchPolicyBinding } from "../src/research/workspace/types.js";
 import { inspectScientificReviewStatus } from "../src/research/workspace/scientific-review.js";
 
 describe("lightweight original task and authorized scope", () => {
+  it("ignores unrelated investigation IDs that merely equal the exported project name", async () => {
+    const fx = await acquiredFixture("computation");
+    try {
+      await initializeProject(
+        fx.root,
+        "unrelated-project",
+        "An unrelated corrupted investigation must not govern another project audit.",
+      );
+      await appendJournalEvent(
+        workspacePaths(fx.root).journal,
+        "investigation.approved",
+        "unrelated-project",
+        {
+          investigationId: "task-project",
+          recordSha256: "a".repeat(64),
+          planSha256: "b".repeat(64),
+        },
+      );
+      const bundle = join(fx.files, "scoped-audit");
+      const exported = await cli([
+        "research",
+        "project",
+        "audit",
+        "export",
+        "task-project",
+        "--output",
+        bundle,
+        "--workspace",
+        fx.root,
+        "--json",
+      ]);
+      assert.equal(exported.exitCode, 0, exported.stderr);
+      const verified = await cli([
+        "research",
+        "project",
+        "audit",
+        "verify",
+        "--bundle",
+        bundle,
+        "--json",
+      ]);
+      assert.equal(verified.exitCode, 0, verified.stderr);
+      assert.equal(JSON.parse(verified.stdout).task.investigations, undefined);
+    } finally {
+      await fx.cleanup();
+    }
+  });
+
   for (const example of [
     { label: "a promotion hash", value: { promotionSha256: "a".repeat(64) } },
     { label: "no promotion hash", value: { status: "passed" } },

@@ -1,3 +1,4 @@
+import { appendJournalEvent } from "../src/research/workspace/journal.js";
 import assert from "node:assert/strict";
 import { chmod, readFile, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
@@ -557,6 +558,12 @@ await writeFile(process.argv[3],JSON.stringify({schemaVersion:1,solverReached:tr
     const pendingReview = JSON.parse((await fx.task(["status"])).stdout);
     assert.equal(pendingReview.currentScope.status, "incomplete");
     assert.equal(pendingReview.currentScope.requirements[0].status, "recorded");
+    await appendJournalEvent(
+      workspacePaths(fx.root).journal,
+      "investigation.approved",
+      "unrelated-project",
+      { investigationId: projectId, recordSha256: "a".repeat(64), planSha256: "b".repeat(64) },
+    );
     const bundle = join(fx.files, "investigation-audit");
     await must(
       await cli([

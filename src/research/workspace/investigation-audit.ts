@@ -1,3 +1,4 @@
+import { relevantInvestigationEvents } from "./investigation-lineage.js";
 import { readFile } from "node:fs/promises";
 import { CliError } from "../../errors.js";
 import { loadInvestigation, type InvestigationDefinition } from "./investigation.js";
@@ -43,14 +44,12 @@ export async function loadInvestigationAudit(
   if (
     !proofs.some(
       (e) =>
-        e.type.startsWith("investigation.") ||
-        (e.type === "project.task.run.started" && e.payload.investigationPromotionSha256),
+        e.scope === projectId &&
+        (e.type.startsWith("investigation.") ||
+          (e.type === "project.task.run.started" && e.payload.investigationPromotionSha256)),
     )
   )
     return null;
-  const relevant = proofs.filter(
-    (e) => e.type.startsWith("investigation.") || e.type.startsWith("project.task.run."),
-  );
   const indexed = new Map(files.map((f) => [f.path, f]));
   const decoded = new Map<string, unknown>();
   const prefix = (id: string) => {
@@ -92,6 +91,36 @@ export async function loadInvestigationAudit(
       return readFile(resolveContained(bundle, `${prefix(id)}/${object.path}`));
     },
   };
+  const allEvents: JournalEvent[] = proofs.map((p) => ({
+    schemaVersion: 1,
+    sequence: p.sequence,
+    timestamp: p.timestamp,
+    type: p.type,
+    scope: p.scope,
+    payload: p.payload,
+    previousHash: p.sourcePreviousHash,
+    hash: p.sourceEventHash,
+  }));
+  const preloadedPromotions = new Map<string, InvestigationPromotion>();
+  for (const event of allEvents) {
+    if (event.scope !== projectId || event.type !== "investigation.promotion.approved") continue;
+    const promotion = await loadInvestigationPromotion(
+      bundle,
+      projectId,
+      String(event.payload.recordSha256),
+      allEvents,
+      store,
+    );
+    preloadedPromotions.set(promotion.recordSha256, promotion);
+  }
+  const sources = [...preloadedPromotions.values()].map((p) => ({
+    projectId: p.plan.sourceProjectId,
+    investigationId: p.plan.investigationId,
+  }));
+  const selectedProofs = relevantInvestigationEvents(projectId, proofs, sources);
+  const relevant = selectedProofs.filter(
+    (e) => e.type.startsWith("investigation.") || e.type.startsWith("project.task.run."),
+  );
   for (const proof of relevant) {
     if (
       !Number.isSafeInteger(proof.sequence) ||
@@ -113,7 +142,7 @@ export async function loadInvestigationAudit(
     if (sha256Text(canonicalJson(unsigned)) !== proof.sourceEventHash)
       throw invalid("Investigation journal proof no longer matches its source event.");
   }
-  const events: JournalEvent[] = proofs.map((p) => ({
+  const events: JournalEvent[] = selectedProofs.map((p) => ({
     schemaVersion: 1,
     sequence: p.sequence,
     timestamp: p.timestamp,
@@ -161,13 +190,8 @@ export async function loadInvestigationAudit(
   const promotions = new Map<string, InvestigationPromotion>();
   for (const event of events) {
     if (event.type !== "investigation.promotion.approved") continue;
-    const promotion = await loadInvestigationPromotion(
-      bundle,
-      event.scope,
-      String(event.payload.recordSha256),
-      events,
-      store,
-    );
+    const promotion = preloadedPromotions.get(String(event.payload.recordSha256));
+    if (!promotion) throw invalid("Investigation promotion has no selected project authority.");
     const plan = promotion.plan,
       definition = definitions.get(plan.definitionSha256),
       candidate = candidates.get(plan.candidateSha256);
