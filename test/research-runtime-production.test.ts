@@ -1798,6 +1798,102 @@ describe("production research control plane", () => {
     }
   });
 
+  it("does not count returned usage twice when the run record fails after project save", async () => {
+    const root = await temporaryDirectory();
+    try {
+      await initializeResearchWorkspace(root, undefined);
+      await initializeProject(
+        root,
+        "post-save-usage",
+        "Preserve one accounting result across persistence failure.",
+      );
+      const config = await loadWorkspaceConfig(root);
+      config.producer.pricing = {
+        inputUsdPerMillionTokens: 1,
+        cachedInputUsdPerMillionTokens: 0.1,
+        outputUsdPerMillionTokens: 2,
+      };
+      await writeJsonAtomic(workspacePaths(root).config, config);
+      await setProjectBudget(root, "post-save-usage", 50, true);
+      const input = join(root, "input.txt");
+      await writeFile(input, "Synthetic admitted input.");
+      await addProjectInput(root, "post-save-usage", input, "primary");
+      let calls = 0;
+      const result = await runResearchWorkspace(
+        root,
+        { maxParallel: 1, maxCycles: 1, dryRun: false, environment: {} },
+        async (request) => {
+          calls++;
+          const runs = join(workspacePaths(root).projects, "post-save-usage", "runs");
+          await rm(runs, { recursive: true, force: true });
+          await writeFile(runs, "A file deliberately prevents run-record directory creation.");
+          return {
+            ...execution(JSON.stringify(await inputEvidenceValue(request)), 10),
+            costUsd: 0.02,
+          };
+        },
+      ).catch((error: unknown) => error);
+      assert.ok(result);
+      assert.equal(calls, 1);
+      const state = await loadProject(root, "post-save-usage");
+      assert.equal(state.budget!.entries.length, 1);
+      assert.equal(state.budget!.entries[0]!.accountedCostUsd, 0.02);
+      assert.equal(
+        state.usage.tokens,
+        10,
+        "the post-save catch must not apply the same result again",
+      );
+      assert.equal(state.usage.costUsd, 0.02);
+      assert.match(state.packages[0]!.lastError!, /EEXIST|ENOTDIR|already exists|not a directory/i);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("keeps the package reservation when formatting repair throws with unknown usage", async () => {
+    const root = await temporaryDirectory();
+    try {
+      await initializeResearchWorkspace(root, undefined);
+      await initializeProject(root, "uncertain-repair", "Preserve the unknown repair obligation.");
+      const config = await loadWorkspaceConfig(root);
+      config.producer.pricing = {
+        inputUsdPerMillionTokens: 1,
+        cachedInputUsdPerMillionTokens: 0.1,
+        outputUsdPerMillionTokens: 2,
+      };
+      await writeJsonAtomic(workspacePaths(root).config, config);
+      await setProjectBudget(root, "uncertain-repair", 50, true);
+      const input = join(root, "input.txt");
+      await writeFile(input, "Synthetic admitted input.");
+      await addProjectInput(root, "uncertain-repair", input, "primary");
+      let calls = 0;
+      let envelope = 0;
+      const result = await runResearchWorkspace(
+        root,
+        { maxParallel: 1, maxCycles: 1, dryRun: false, environment: {} },
+        async (request) => {
+          calls++;
+          if (request.purpose === "primary") {
+            envelope = request.maxCostUsd;
+            return { ...execution('{"schemaVersion":1,', 5), costUsd: 0.02 };
+          }
+          assert.equal(request.maxTurns, 1);
+          assert.ok(Math.abs(request.maxCostUsd + 0.02 - envelope) < 1e-9);
+          throw new Error("Synthetic transport failure after repair admission; usage unknown.");
+        },
+      );
+      assert.equal(result.status, "blocked");
+      assert.equal(calls, 2);
+      const state = await loadProject(root, "uncertain-repair");
+      assert.equal(state.budget!.entries.length, 1);
+      assert.equal(state.budget!.entries[0]!.status, "reserved");
+      assert.equal(state.budget!.entries[0]!.maxCostUsd, envelope);
+      assert.equal(state.usage.costUsd, 0.02, "only known primary telemetry may be recorded");
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
   it("repairs malformed structured output once without retrying the whole package", async () => {
     const root = await temporaryDirectory();
     try {

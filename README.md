@@ -1372,6 +1372,13 @@ no new monetary allocation. The existing broker call-count budget still counts
 cache/tool invocations. Concurrent provider calls share one durable ledger;
 local ledger writes are serialized while network operations remain parallel.
 
+The project ledger covers project stage/reviewer admissions and the project
+HTTP/Data evidence entrypoints. Workspace setup/Doctor probes, setup companion
+commands, standalone `data run`, and unrelated host-app actions have no project
+budget binding; their charges are unobserved here and must not be counted as
+zero. Native host work is represented by its declared allocation, not trusted
+provider metering.
+
 The project budget response separates accounted estimates, pending reservations,
 remaining authorization, and overruns. It never reports a provider invoice.
 Model actions require declared route prices; native/provider operations use
@@ -1385,6 +1392,9 @@ without counting them twice. An uncertain operation remains pending until it
 ends or the owner explicitly resolves it with `project budget resolve`, a
 reservation ID, an accounted estimate, a reason, and `--confirm-budget`.
 A native reservation requires its original session to have ended first.
+Settled accounting evidence is immutable, including conservative allocated
+maxima; this interface does not revise historical costs or reconcile provider
+invoices. Choose reviewed per-operation maxima accordingly.
 An owner estimate above the ceiling records an overrun and blocks further
 positive-cost work; it does not silently increase the authorization.
 If a command fails after saving the decision but before writing its journal

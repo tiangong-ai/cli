@@ -1,3 +1,8 @@
+import {
+  reserveProjectCost,
+  settleProjectCost,
+  projectBudgetView,
+} from "../src/research/workspace/project-budget.js";
 import assert from "node:assert/strict";
 import { chmod, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -49,6 +54,7 @@ import {
   initializeProject,
   loadProject,
   saveProject,
+  setProjectBudget,
 } from "../src/research/workspace/projects.js";
 import { recordNativeResearchActivity } from "../src/research/workspace/native-activity.js";
 import {
@@ -56,8 +62,17 @@ import {
   prepareNativeResearchStage,
   submitNativeResearchStage,
 } from "../src/research/workspace/runtime.js";
-import { resolveContained, sha256File, workspacePaths } from "../src/research/workspace/storage.js";
-import { initializeResearchWorkspace } from "../src/research/workspace/workspace.js";
+import {
+  resolveContained,
+  sha256File,
+  workspacePaths,
+  writeJsonAtomic,
+} from "../src/research/workspace/storage.js";
+import {
+  initializeResearchWorkspace,
+  loadWorkspaceConfig,
+  withWorkspaceLock,
+} from "../src/research/workspace/workspace.js";
 import type { ResearchPolicyBinding } from "../src/research/workspace/types.js";
 import { scientificDesignInput } from "./helpers/scientific-design.js";
 
@@ -1820,7 +1835,37 @@ describe("research acquisition and evidence snapshots", () => {
       );
       const closureSha256 = await sha256File(closurePath);
 
+      const budgetConfig = await loadWorkspaceConfig(root);
+      budgetConfig.producer.pricing = {
+        inputUsdPerMillionTokens: 1,
+        cachedInputUsdPerMillionTokens: 0.1,
+        outputUsdPerMillionTokens: 2,
+      };
+      await writeJsonAtomic(workspacePaths(root).config, budgetConfig);
+      await setProjectBudget(root, "closed-source", 50, true);
+      await withWorkspaceLock(root, "test.closed-obligations", async () => {
+        const funded = await loadProject(root, "closed-source");
+        reserveProjectCost(funded, budgetConfig, {
+          id: "spent",
+          kind: "review",
+          reference: "synthetic",
+          maxCostUsd: 30,
+        });
+        settleProjectCost(funded, "spent", 30, "reported-usage");
+        reserveProjectCost(funded, budgetConfig, {
+          id: "pending",
+          kind: "provider-operation",
+          reference: "synthetic",
+          maxCostUsd: 15,
+        });
+        await saveProject(root, funded);
+      });
       const addendum = await createProjectAddendum(root, "closed-source", "source-addendum");
+      assert.equal(addendum.budget!.authorization.maxCostUsd, 50);
+      assert.equal(addendum.budget!.openingEstimateUsd, 30);
+      assert.equal(addendum.budget!.entries[0]!.id, "pending");
+      assert.equal(addendum.budget!.entries[0]!.sourceProjectId, "closed-source");
+      assert.equal(projectBudgetView(addendum, budgetConfig).outstandingReservationsUsd, 15);
       assert.equal(addendum.lineage.kind, "addendum");
       assert.equal(addendum.lineage.supersedes, "closed-source");
       assert.equal(addendum.lineage.baseSnapshotId, sourceSnapshot.snapshotId);

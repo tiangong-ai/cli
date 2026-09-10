@@ -2013,6 +2013,7 @@ async function executeWorkPackage(
   const startedAt = new Date().toISOString();
   const budgetEntryId = `package:${runId}`;
   let executionUncertain = false;
+  let usageSaved = false;
   let capsuleRoot: string | undefined;
   let capsuleDisposition: NativeCapsuleDisposition | null = null;
   let retainedCapsuleId: string | null = null;
@@ -2319,6 +2320,7 @@ async function executeWorkPackage(
     workPackage.retryNotBefore = null;
     refreshProject(project);
     await saveProject(root, project);
+    usageSaved = true;
     await writeRunRecord(root, {
       schemaVersion: 1,
       runId,
@@ -2399,7 +2401,7 @@ async function executeWorkPackage(
       ),
       2000,
     );
-    if (accountedResult) {
+    if (accountedResult && !usageSaved) {
       if (
         !executionUncertain &&
         failedProject.budget?.entries.some((entry) => entry.id === budgetEntryId)
