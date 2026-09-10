@@ -350,7 +350,11 @@ function safeLog(value: string, truncated: boolean) {
     "[host-path]",
   );
 }
-export async function observeInvestigationAttempt(root: string, projectId: string, value: unknown) {
+async function observeInvestigationAttemptInternal(
+  root: string,
+  projectId: string,
+  value: unknown,
+) {
   if (
     !validateInput(value) ||
     canonicalJson(sanitizeResearchValue(value, configuredResearchSecrets(process.env))) !==
@@ -766,4 +770,17 @@ export async function observeInvestigationAttempt(root: string, projectId: strin
     }
     return { record, replayed: false, stagingDirectoryName: basename(prepared.staging) };
   });
+}
+
+/** Preserve an unresolved start on unexpected storage/runtime failure. */
+export async function observeInvestigationAttempt(root: string, projectId: string, value: unknown) {
+  try {
+    return await observeInvestigationAttemptInternal(root, projectId, value);
+  } catch (error) {
+    if (error instanceof CliError) throw error;
+    throw invalid(
+      "The investigation attempt could not commit its observation. Preserve its files and inspect the investigation status before any further execution; unresolved attempts are never retried automatically.",
+      "RESEARCH_INVESTIGATION_OBSERVATION_FAILED",
+    );
+  }
 }

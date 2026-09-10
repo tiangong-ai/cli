@@ -1,3 +1,5 @@
+import fs from "node:fs/promises";
+import { syncBuiltinESMExports } from "node:module";
 import assert from "node:assert/strict";
 import { readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
@@ -255,6 +257,71 @@ await writeFile(process.argv[3],JSON.stringify({schemaVersion:1,solverReached:va
       assert.equal(exhausted.status, "exhausted");
       assert.equal(exhausted.remaining.runs, 0);
       assert.equal(exhausted.attempts.length, 5);
+      // A real calculation finishes but durable result storage fails. Its known
+      // start keeps the full uncertainty reservation and must never be rerun.
+      const interruptedInput = { ...input, investigationId: "interrupted-diagnosis" };
+      await writeFile(inputPath, JSON.stringify(interruptedInput));
+      const interruptedPlan = JSON.parse((await command("plan", ["--input", inputPath])).stdout);
+      const interruptedApproval = await command("approve", [
+        "--input",
+        inputPath,
+        "--confirm",
+        interruptedPlan.planSha256,
+        "--authorization-source",
+        source,
+      ]);
+      assert.equal(interruptedApproval.exitCode, 0, interruptedApproval.stderr);
+      const interruptedPath = join(fx.files, "interrupted-attempt.json");
+      const interruptedAttempt = {
+        schemaVersion: 1,
+        investigationId: "interrupted-diagnosis",
+        attemptId: "lost-result",
+        programId: "solver-a",
+        hypothesis: "Retain the reservation after observed execution loses durable result storage",
+        configuration: { variant: 3 },
+        nativeSessionId: null,
+        workingDirectory: fx.files,
+      };
+      await writeFile(interruptedPath, JSON.stringify(interruptedAttempt));
+      const originalRename = fs.rename;
+      let interruptedWrites = 0;
+      fs.rename = async (from, to) => {
+        if (String(to).includes("/task/investigation-attempts/")) {
+          interruptedWrites++;
+          throw Object.assign(new Error("Synthetic interrupted durable attempt commit"), {
+            code: "EIO",
+          });
+        }
+        return originalRename(from, to);
+      };
+      syncBuiltinESMExports();
+      try {
+        const failed = await command("attempt", ["--input", interruptedPath]);
+        assert.notEqual(failed.exitCode, 0);
+      } finally {
+        fs.rename = originalRename;
+        syncBuiltinESMExports();
+      }
+      assert.equal(interruptedWrites, 1);
+      const interruptedStatus = JSON.parse(
+        (await command("status", ["--investigation", "interrupted-diagnosis"])).stdout,
+      );
+      assert.equal(interruptedStatus.status, "incomplete");
+      assert.equal(interruptedStatus.remaining.runs, 4);
+      assert.equal(interruptedStatus.remaining.wallSeconds, 7170);
+      assert.equal(interruptedStatus.attempts[0].recordSha256, null);
+      const interruptedJournal = await readFile(workspacePaths(fx.root).journal, "utf8");
+      const noReplay = await command("attempt", ["--input", interruptedPath]);
+      assert.notEqual(noReplay.exitCode, 0);
+      assert.match(noReplay.stderr, /RESEARCH_INVESTIGATION_INCOMPLETE/);
+      await writeFile(
+        interruptedPath,
+        JSON.stringify({ ...interruptedAttempt, attemptId: "blind-retry" }),
+      );
+      const noNewRun = await command("attempt", ["--input", interruptedPath]);
+      assert.notEqual(noNewRun.exitCode, 0);
+      assert.match(noNewRun.stderr, /RESEARCH_INVESTIGATION_INCOMPLETE/);
+      assert.equal(await readFile(workspacePaths(fx.root).journal, "utf8"), interruptedJournal);
     } finally {
       await fx.cleanup();
     }

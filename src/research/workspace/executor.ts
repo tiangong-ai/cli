@@ -693,10 +693,9 @@ async function sandboxInvocation(
       "(allow process*)",
       ...(mode === "review" ? ["(allow network*)"] : []),
       "(allow file-read-metadata)",
-      ...(mode === "calculation"
-        ? [`(deny file-read* (subpath ${sandboxString(workspaceReal)}))`]
-        : []),
-      `(allow file-read* ${readClauses} (literal "/") (literal "/var") (literal "/dev/dtracehelper") (literal "/dev/null") (literal "/dev/urandom"))`,
+      mode === "calculation"
+        ? `(allow file-read* (require-all (require-any ${readClauses} (literal "/") (literal "/var") (literal "/dev/dtracehelper") (literal "/dev/null") (literal "/dev/urandom")) (require-not (subpath ${sandboxString(workspaceReal)})) (require-not (literal ${sandboxString(workspaceCredentialPath)}))))`
+        : `(allow file-read* ${readClauses} (literal "/") (literal "/var") (literal "/dev/dtracehelper") (literal "/dev/null") (literal "/dev/urandom"))`,
       `(deny file-read* (literal ${sandboxString(workspaceCredentialPath)}))`,
       '(allow file-ioctl (literal "/dev/dtracehelper"))',
       "(allow sysctl-read)",
