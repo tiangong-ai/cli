@@ -164,7 +164,7 @@ it(
           'if [ "$1" = "--version" ]; then echo "fake-claude 1.0"; exit 0; fi',
           "printf invoked > invoked.txt",
           "printf '%s' \"$ANTHROPIC_DEFAULT_SONNET_MODEL\" > model.txt",
-          'printf \'%s\\n\' \'{"result":"{\\"ok\\":true}","usage":{"input_tokens":2,"output_tokens":1}}\'',
+          'printf \'%s\\n\' \'{"result":"{\\"ok\\":true}","model":"synthetic-glm-mapped","usage":{"input_tokens":2,"output_tokens":1}}\'',
           "",
         ].join("\n"),
       );
@@ -237,6 +237,9 @@ it(
       const result = await executeAgent({ ...request, expectedRuntime: currentRuntime });
       assert.equal(result.exitCode, 0, result.stderr);
       assert.equal(result.stdout, '{"ok":true}');
+      assert.equal(result.model, "sonnet");
+      assert.equal(result.runtime?.model, "sonnet");
+      assert.equal(sameRuntimeFingerprint(result.runtime!, currentRuntime), true);
       assert.equal(await readFile(join(projectRoot, "model.txt"), "utf8"), "approved-custom-model");
       assert.equal(result.runtime?.providerRouting?.endpointOrigin, "https://first.example.test");
       assert.equal(result.runtime?.providerRouting?.identityVerification, "unverified");
