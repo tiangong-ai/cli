@@ -1975,8 +1975,11 @@ and stops further attempts under that envelope. Unknown cost remains unknown;
 software accounting retains the approved upper-bound allocation.
 
 An identical committed attempt returns its original result. An unresolved start
-keeps its reservation and cannot be blindly replayed or replaced. Status exposes
-current authority, reservations and the permitted next action. `select` records a
+keeps its reservation and cannot be blindly replayed or replaced. A one-shot
+process guard retains the deadline independently of the observer and terminates
+the calculation if that observer disconnects; missing durable results remain
+unresolved rather than being reconstructed as success. Status exposes current
+authority, reservations and the permitted next action. `select` records a
 candidate; `close` records why investigation stopped and releases unused cost
 allocation while preserving history. It refuses closure with unresolved work.
 

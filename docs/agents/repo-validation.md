@@ -813,6 +813,10 @@ and a real reviewed recovery fork with its own certification. Source and
 successor audit bundles verify after deleting the workspace; recomputed manifests
 cannot erase the selected candidate or graft certification purpose onto ordinary
 runs. Output cases exercise stream/file/combined overflow, cumulative exhaustion,
-failed certification and inherited-worker cleanup. These fixtures do not prove
-scientific correctness, provider invoices, arbitrary daemon containment or
-observer-death recovery; qualify those claims separately before making them.
+failed certification and inherited-worker cleanup. One-shot supervisor tests
+kill the actual observer after the calculation starts, using both source and
+compiled entrypoints, and verify that it cannot outlive the bound. They also
+exercise stop-before-start ordering and prevent program output or inherited IPC
+from fabricating supervisor success. These fixtures do not prove scientific
+correctness, provider invoices, arbitrary daemon containment or reconstruction of
+uncommitted results; qualify those claims separately before making them.

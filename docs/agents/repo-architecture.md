@@ -630,7 +630,13 @@ read stores reuse investigation validators, while source closure follows explici
 incoming promotion references rather than coincidental project-name strings.
 Output guards count streams and observed declared-file peaks, stop over-budget
 calculations, retain observed overshoot and reject their result artifacts. They
-are not a scratch-disk quota or dependency attestation.
+are not a scratch-disk quota or dependency attestation. Bounded process capture
+uses `native-process-supervisor.ts`, a private one-shot Node helper with its own
+monotonic deadline and IPC-disconnect cleanup. Only the already admitted binary,
+arguments and filtered environment are forwarded. Program streams cannot forge
+its separate status channel, and stop is terminal before or after spawn. The
+helper has no project mutation or retry protocol; an observer lost before commit
+leaves a conservative unresolved reservation.
 
 `artifact-read-audit.ts` validates persisted read directories, intrinsic receipt
 identity, packet/delivery authority and exact byte selectors. It groups pages by
