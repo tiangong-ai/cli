@@ -78,5 +78,5 @@ with mock.patch.object(socket.socket, "connect", side_effect=AssertionError("No 
             "manifest": portable(manifest),
         }
 destination = repo / "test/fixtures/paper-companion-v3.json"
-destination.write_text(json.dumps(fixture, ensure_ascii=False, indent=2) + "\n")
+destination.write_text(json.dumps(fixture, ensure_ascii=False, indent=2) + "\n", encoding="utf8")
 print(destination)
