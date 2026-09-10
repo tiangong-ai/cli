@@ -1744,7 +1744,8 @@ tiangong-ai research scientific amendment plan PROJECT \
 ```
 
 The closed input contains `schemaVersion: 1`, a reason and `changes`; use the
-schema for their exact fields. Save the returned plan JSON unchanged externally.
+schema for their exact fields. Amendment status exposes the current editable
+fields under `plannedRules`, so unchanged links can be preserved explicitly. Save the returned plan JSON unchanged externally.
 It shows before/after declarations, current parent bindings, preserved acquisition,
 invalidated scientific gates and `affectedTaskRequirementIds`. Planning does not
 mutate the project or request a provider. After explicit approval of that exact

@@ -574,6 +574,26 @@ Model registration and frozen typed-content atoms remain the source authorities.
 registration hashes and committed head using portable indexed files. It does not
 turn an object-filing obligation into independent scientific approval.
 
+`scientific-amendment.ts` derives a read-only plan for existing planned Policy
+rule lifecycle declarations and model/parameter links. Apply binds exact plan
+confirmation and supplied UTF-8 source bytes to an immutable declaration version
+and parent record through the existing project mutation journal. Original base
+and fulfillment records remain immutable; the effective-design loader verifies
+and projects their history. Current review packets stage amendment records,
+confirmation source, version bytes and effective view. The amendment resets the
+three early scientific gates but changes no evidence or numerical values.
+
+An operation-local impact index uses existing rule claim/evidence-role links and
+task requirement claim/coverage bindings. Each affected acceptance record binds
+only its latest relevant amendment, so unrelated checks retain their exact
+identity and replay behavior. Plans/status expose affected requirement IDs;
+current task context and portable audit compute the same required binding.
+The ordinary unamended view keeps constant-cost absent-history checks and reuses
+supplied journal views. No persistent dependency graph or provider work is added.
+Confirmation provenance and hash integrity do not authenticate authorship or
+prove scientific correctness. Inference-frozen/post-analysis or substantive
+changes remain successor work.
+
 `analysis-run.ts` centralizes mode consistency for both stage submission and
 publication freeze. Qualitative records retain `not-applicable` computational
 status rather than inventing a run; computational/mixed records retain exact
@@ -777,23 +797,3 @@ the shared workspace reporting contract; the CLI bug form adds only optional
 CLI diagnostics. The installed Auto Research Skill owns agent report drafting,
 while the CLI catalog pins its reviewed commit and complete tree hash. Feedback
 discovery through help requires no provider, credential, or research workspace.
-
-`scientific-amendment.ts` derives a read-only plan for existing planned Policy
-rule lifecycle declarations and model/parameter links. Apply binds exact plan
-confirmation and supplied UTF-8 source bytes to an immutable declaration version
-and parent record through the existing project mutation journal. Original base
-and fulfillment records remain immutable; the effective-design loader verifies
-and projects their history. Current review packets stage amendment records,
-confirmation source, version bytes and effective view. The amendment resets the
-three early scientific gates but changes no evidence or numerical values.
-
-An operation-local impact index uses existing rule claim/evidence-role links and
-task requirement claim/coverage bindings. Each affected acceptance record binds
-only its latest relevant amendment, so unrelated checks retain their exact
-identity and replay behavior. Plans/status expose affected requirement IDs;
-current task context and portable audit compute the same required binding.
-The ordinary unamended view keeps constant-cost absent-history checks and reuses
-supplied journal views. No persistent dependency graph or provider work is added.
-Confirmation provenance and hash integrity do not authenticate authorship or
-prove scientific correctness. Inference-frozen/post-analysis or substantive
-changes remain successor work.

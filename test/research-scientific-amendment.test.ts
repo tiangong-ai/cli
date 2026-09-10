@@ -329,6 +329,12 @@ describe("owner-authorized pre-analysis scientific amendments", () => {
       ]);
       assert.equal(status.exitCode, 0, status.stderr);
       assert.equal(JSON.parse(status.stdout).amendmentSha256, record.recordSha256);
+      assert.deepEqual(
+        JSON.parse(status.stdout).plannedRules.find(
+          (item: { ruleId: string }) => item.ruleId === rule.ruleId,
+        ).uncertaintyParameterIds,
+        [parameterId],
+      );
       const packet = await prepareScientificReview({
         root,
         projectId,

@@ -699,6 +699,15 @@ export async function inspectScientificAmendment(root: string, projectId: string
     amendmentSha256: project.scientificDesign?.amendmentSha256 ?? null,
     originalDesignSha256: project.scientificDesign?.designSha256,
     effectiveDesignSha256: view.effectiveSha256,
+    plannedRules: view.contract.policyRuleDispositions
+      .filter((rule) => rule.status === "planned")
+      .map(({ ruleId, dueGate, rationale, modelStructureIds, uncertaintyParameterIds }) => ({
+        ruleId,
+        dueGate,
+        rationale,
+        modelStructureIds,
+        uncertaintyParameterIds,
+      })),
     records: view.amendments.map((record) => ({
       recordSha256: record.recordSha256,
       planSha256: record.plan.planSha256,
