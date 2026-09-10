@@ -786,3 +786,15 @@ real cmd.exe/npm.cmd chain and owned-tree cleanup without registry access.
 A process-spawn mock verifies exact taskkill arguments and rejects signaling an
 unspawned helper before its error event has been delivered.
 Clean-container RED/GREEN remains authoritative; host results are supplemental.
+
+Design-amendment regressions exercise public plan/apply/status with exact source
+confirmation, forbidden edits, changed Policy/parents, dangling immutable paths,
+BOM-bearing UTF-8, interrupted postcommit projection recovery, multiple versions,
+stale review rejection and portable history. The retained-evidence fixture uses
+actual registered synthetic source/atom records and two fulfillment records,
+checks unchanged source/acquisition/content bytes and one atom-store read, then
+verifies selective task-check invalidation and idempotent unrelated-check reuse.
+The portable verifier shares the producer's atom parser, including its deliberate
+exclusion of registration time from the atom content hash. Unamended design
+reads are checked to avoid full-journal rereads. Fresh container RED/GREEN is
+authoritative; these protocol cases do not claim live scientific qualification.
