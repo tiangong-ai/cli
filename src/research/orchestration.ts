@@ -1,4 +1,9 @@
 import {
+  planInvestigationPromotion,
+  approveInvestigationPromotion,
+  investigationPromotionInputSchema,
+} from "./workspace/investigation-promotion.js";
+import {
   selectInvestigationCandidate,
   investigationCandidateInputSchema,
 } from "./workspace/investigation-candidate.js";
@@ -267,6 +272,8 @@ export function researchOrchestrationHelp(): string {
   tiangong-ai research project investigation approve <project> --input <json-file> --confirm <plan-sha256> --authorization-source <text-file> [--workspace <path>] [--json]
   tiangong-ai research project investigation attempt <project> --input <json-file> [--workspace <path>] [--json]
   tiangong-ai research project investigation select <project> --input <json-file> [--workspace <path>] [--json]
+  tiangong-ai research project investigation promotion plan <project> --input <json-file> [--workspace <path>] [--json]
+  tiangong-ai research project investigation promotion approve <project> --input <json-file> --confirm <plan-sha256> --authorization-source <text-file> [--workspace <path>] [--json]
   tiangong-ai research project investigation status <project> --investigation <id> [--workspace <path>] [--json]
   tiangong-ai research scientific amendment status <project> [--workspace <path>] [--json]
   tiangong-ai research project task run observe <project> --input <json-file> --confirm-execution [--workspace <path>] [--json]
@@ -879,6 +886,8 @@ async function runSchema(argv: string[], io: CliIO): Promise<number> {
     schema = scientificDesignSchema();
   } else if (stage === "scientific-fulfillment") {
     schema = scientificFulfillmentSchema();
+  } else if (stage === "investigation-promotion") {
+    schema = investigationPromotionInputSchema();
   } else if (stage === "investigation-candidate") {
     schema = investigationCandidateInputSchema();
   } else if (stage === "investigation-attempt") {
@@ -1178,8 +1187,21 @@ async function runProject(argv: string[], io: CliIO): Promise<number> {
   const [action, ...rest] = argv;
   if (!action || action === "--help" || action === "-h") return writeHelp(io);
   if (action === "investigation") {
-    const [operation, ...arguments_] = rest;
-    if (!["plan", "approve", "status", "attempt", "select"].includes(operation ?? ""))
+    const [firstOperation, ...firstArguments] = rest;
+    const operation =
+      firstOperation === "promotion" ? `promotion-${firstArguments[0] ?? ""}` : firstOperation;
+    const arguments_ = firstOperation === "promotion" ? firstArguments.slice(1) : firstArguments;
+    if (
+      ![
+        "plan",
+        "approve",
+        "status",
+        "attempt",
+        "select",
+        "promotion-plan",
+        "promotion-approve",
+      ].includes(operation ?? "")
+    )
       throw unknownAction("research project investigation", operation ?? "");
     const args = parseStrictArgs(
       arguments_,
@@ -1188,7 +1210,7 @@ async function runProject(argv: string[], io: CliIO): Promise<number> {
         ...(operation === "status"
           ? { investigation: "string" as const }
           : { input: "string" as const }),
-        ...(operation === "approve"
+        ...(["approve", "promotion-approve"].includes(operation!)
           ? { confirm: "string" as const, "authorization-source": "string" as const }
           : {}),
       },
@@ -1224,13 +1246,23 @@ async function runProject(argv: string[], io: CliIO): Promise<number> {
             ? await observeInvestigationAttempt(root, projectId, value)
             : operation === "select"
               ? await selectInvestigationCandidate(root, projectId, value)
-              : await approveInvestigation(
-                  root,
-                  projectId,
-                  value,
-                  strictString(args, "confirm"),
-                  strictString(args, "authorization-source"),
-                ),
+              : operation === "promotion-plan"
+                ? await planInvestigationPromotion(root, projectId, value)
+                : operation === "promotion-approve"
+                  ? await approveInvestigationPromotion(
+                      root,
+                      projectId,
+                      value,
+                      strictString(args, "confirm"),
+                      strictString(args, "authorization-source"),
+                    )
+                  : await approveInvestigation(
+                      root,
+                      projectId,
+                      value,
+                      strictString(args, "confirm"),
+                      strictString(args, "authorization-source"),
+                    ),
         args,
       );
     }

@@ -1,3 +1,4 @@
+import { syntheticScientificPolicy as parameterPolicy } from "./helpers/scientific-policy.js";
 import assert from "node:assert/strict";
 import {
   defineProjectTask,
@@ -42,22 +43,11 @@ import {
 import { readAndVerifyScientificDesign } from "../src/research/workspace/scientific-design.js";
 import { prepareScientificReview } from "../src/research/workspace/scientific-review.js";
 import {
-  initializeResearchPolicy,
-  approveResearchPolicy,
-  loadApprovedResearchPolicy,
-} from "../src/research/workspace/research-policy.js";
-import {
   prepareNativeResearchStage,
   submitNativeResearchStage,
 } from "../src/research/workspace/runtime.js";
-import {
-  workspacePaths,
-  sha256File,
-  writeJsonAtomic,
-  writeTextAtomic,
-} from "../src/research/workspace/storage.js";
+import { workspacePaths, sha256File, writeJsonAtomic } from "../src/research/workspace/storage.js";
 import { initializeResearchWorkspace } from "../src/research/workspace/workspace.js";
-import type { ResearchPolicyBinding } from "../src/research/workspace/types.js";
 import { passResearchDesignGate, scientificDesignInput } from "./helpers/scientific-design.js";
 
 describe("predeclared scientific parameter fulfillment", () => {
@@ -573,63 +563,4 @@ describe("predeclared scientific parameter fulfillment", () => {
 
 function isAtomRecordRead(path: unknown, atomId: string): boolean {
   return String(path).replaceAll("\\", "/").endsWith(`/evidence/atoms/${atomId}.json`);
-}
-
-async function parameterPolicy(root: string, projectId: string): Promise<ResearchPolicyBinding> {
-  const sourceRoot = join(root, "synthetic-policy");
-  const reviewerRoles = ["evidence", "methods-reproducibility", "domain-novelty", "journal-editor"];
-  const documents = [
-    ["baseline/top-journal.md", "baseline", "bundled-default"],
-    ["article-types/computational-modeling.md", "article-type", "bundled-default"],
-    ["fields/pavement-engineering.md", "field", "bundled-default"],
-    ["journal-classes/discipline-flagship.md", "journal-class", "bundled-default"],
-    ...reviewerRoles.map((role) => [
-      `reviewer-rubrics/${role}.md`,
-      "reviewer-rubric",
-      "bundled-default",
-    ]),
-    ["project/publication-brief.md", "publication-brief", "project-template"],
-    ["journals/exact-journal-template.md", "exact-journal", "exact-journal-template"],
-  ];
-  for (const [path, kind, templateClass] of documents) {
-    const metadata = {
-      schemaVersion: 1,
-      id: `fixture.${path!.replaceAll("/", ".").replace(/\.md$/, "")}`,
-      kind,
-      templateClass,
-      policyVersion: 1,
-      targetTier: "top",
-      articleType: "computational-modeling",
-      field: "pavement-engineering",
-      journalClass: "discipline-flagship",
-      targetJournal: "none",
-      centralQuestion:
-        "Can a frozen source parameter be filled without changing its scientific identity?",
-      centralClaim: "Protocol behavior is validated using explicitly synthetic sources.",
-      centralOutcome: "Correct hash and parameter bindings, not a scientific estimate.",
-      contributionType: "protocol-fixture",
-      rules: ["uncertainty-propagated", "robustness-and-uncertainty-reviewed"],
-      constraints: {
-        requireScientificDesignContract: true,
-        requireEarlyScientificReviews: true,
-        requireRealRecordConstructCanary: true,
-      },
-      requiredReviewers: reviewerRoles,
-      reviewAfterDays: 365,
-    };
-    await writeTextAtomic(
-      join(sourceRoot, "assets/research-policy/defaults", path!),
-      `---\n${JSON.stringify(metadata)}\n---\n\n# Synthetic policy\n\nZero-cost deterministic protocol fixture, not journal approval.\n`,
-    );
-  }
-  await initializeResearchPolicy({
-    root,
-    projectId,
-    sourceRoot,
-    articleType: "computational-modeling",
-    field: "pavement-engineering",
-    journalClass: "discipline-flagship",
-  });
-  await approveResearchPolicy(root, projectId, { confirm: true, acknowledgeDefaults: true });
-  return loadApprovedResearchPolicy(root, projectId);
 }

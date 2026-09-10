@@ -1,3 +1,5 @@
+import { syntheticScientificPolicy } from "./scientific-policy.js";
+import { scientificDesignInput, passResearchDesignGate } from "./scientific-design.js";
 import assert from "node:assert/strict";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -63,15 +65,30 @@ export function contractInput() {
   };
 }
 
-export async function fixture() {
+export async function fixture(pendingModels = false) {
   const root = await mkdtemp(join(tmpdir(), "tiangong-task-contract-"));
   const files = await mkdtemp(join(tmpdir(), "tiangong-task-contract-files-"));
   await initializeResearchWorkspace(root, undefined);
   await lockCapabilities(root);
+  const policy = pendingModels
+    ? await syntheticScientificPolicy(root, "task-project", ["model-calibrated-or-justified"])
+    : undefined;
+  const design = policy
+    ? await scientificDesignInput(root, "task-project", {
+        pendingModels: true,
+        policyRules: policy.resolvedRules,
+        approvalStatus: "candidate-only",
+      })
+    : undefined;
   await initializeProject(
     root,
     "task-project",
     "Compare electricity and water evidence without presupposing a result.",
+    undefined,
+    false,
+    undefined,
+    policy,
+    design,
   );
   const task = async (args: string[], projectId = "task-project") =>
     cli([
@@ -103,8 +120,9 @@ export async function fixture() {
 export async function acquiredFixture(
   checkKind: "evidence" | "computation" = "evidence",
   inputPaddingBytes = 0,
+  pendingModels = false,
 ) {
-  const fx = await fixture();
+  const fx = await fixture(pendingModels);
   const declaration = contractInput();
   declaration.requirements[0]!.checkKind = checkKind;
   await writeFile(fx.inputPath, JSON.stringify(declaration));
@@ -117,6 +135,7 @@ export async function acquiredFixture(
       "non-embedded-input-padding\n".repeat(Math.ceil(inputPaddingBytes / 27)),
   );
   await addProjectInput(fx.root, "task-project", inputPath, "primary");
+  if (pendingModels) await passResearchDesignGate(fx.root, "task-project");
   const discover = await prepareNativeResearchStage({
     root: fx.root,
     projectId: "task-project",
@@ -185,7 +204,7 @@ export async function acquiredFixture(
       artifactId: artifact.artifactId,
       locator: { kind: "line-range", startLine: 1, endLine: 1 },
       statement: "The fixture records a null comparison.",
-      evidenceRoleIds: [],
+      evidenceRoleIds: pendingModels ? ["role-central-model"] : [],
       coverageDimensionIds: ["research-question"],
       evidenceFunction: "support",
       scope: "Deterministic protocol fixture only.",
