@@ -1,3 +1,12 @@
+import {
+  assertProjectRoutePriced,
+  projectCostLimit,
+  projectCostExposure,
+  remainingProjectCostUsd,
+  reserveProjectCost,
+  settleProjectCost,
+  settleProjectAllocation,
+} from "./project-budget.js";
 import { randomUUID } from "node:crypto";
 import { cp, lstat, readFile, realpath, rm } from "node:fs/promises";
 import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
@@ -577,6 +586,24 @@ export interface NativeStageStatus {
   preparedAt: string | null;
   reasonCode: string | null;
   recommendedAction: string | null;
+}
+
+export async function nativeStageBudgetReservation(root: string, projectId: string) {
+  if (!(await pathExists(nativeStageSessionPath(root, projectId)))) return null;
+  const session = await readNativeStageSession(root, projectId);
+  const maxCostUsd = session.packet.limits.reservedMaxCostUsd;
+  if (!Number.isFinite(maxCostUsd) || maxCostUsd < 0)
+    throw new CliError("Native reservation cost is invalid.", {
+      code: "RESEARCH_NATIVE_STAGE_SESSION_INVALID",
+      exitCode: 3,
+    });
+  return {
+    id: `native:${session.packet.sessionId}`,
+    kind: "native-stage" as const,
+    reference: session.packet.packageId,
+    maxCostUsd,
+    createdAt: session.packet.preparedAt,
+  };
 }
 
 export async function inspectNativeResearchStage(
@@ -1281,6 +1308,12 @@ export async function prepareNativeResearchStage(input: {
         ...sessionCore,
         sessionSha256: sha256Text(canonicalJson(sessionCore)),
       };
+      reserveProjectCost(project, config, {
+        id: `native:${sessionId}`,
+        kind: "native-stage",
+        reference: workPackage.id,
+        maxCostUsd: reservation.costUsd,
+      });
       const now = new Date().toISOString();
       workPackage.status = "running";
       workPackage.attempts += 1;
@@ -1417,6 +1450,7 @@ export async function submitNativeResearchStage(input: {
     }
     await assertNativeStageBinding(input.root, project, session.packet);
     try {
+      settleProjectAllocation(project, `native:${session.packet.sessionId}`);
       await materializeAndValidateStageOutput(
         input.root,
         project,
@@ -1450,7 +1484,7 @@ export async function submitNativeResearchStage(input: {
         result,
         session.packet.limits.maxOutputTokens,
       );
-      assertProjectedBudget(project, config, result);
+      assertProjectedBudget(project, config, result, `native:${session.packet.sessionId}`);
       if (workPackage.stage === "discover") {
         await assertDiscoveryCoverage(
           input.root,
@@ -1637,6 +1671,7 @@ export async function abortNativeResearchStage(input: {
         exitCode: 3,
       });
     }
+    settleProjectAllocation(project, `native:${session.packet.sessionId}`);
     workPackage.status = workPackage.attempts < workPackage.maxAttempts ? "retry" : "failed";
     workPackage.completedAt = new Date().toISOString();
     workPackage.lastError = "Native stage was explicitly aborted before submission.";
@@ -4645,6 +4680,7 @@ function reservePackageBudget(
 ): { tokens: number; costUsd: number } {
   if (workPackage.stage === "close") return { tokens: 0, costUsd: 0 };
   const route = workPackage.executor === "reviewer" ? config.reviewer : config.producer;
+  assertProjectRoutePriced(project, route);
   const packageMaximum = config.budget.packageMaxTokens[workPackage.stage];
   const tokens = Math.min(packageMaximum, requestedTokens ?? packageMaximum);
   const costUsd = roundMoney(reservedAgentPackageCost(route, tokens, config));
@@ -4746,15 +4782,22 @@ function assertProjectedBudget(
   project: ProjectState,
   config: WorkspaceConfig,
   result: ExecutionResult,
+  budgetEntryId?: string,
 ): void {
+  const entry = project.budget?.entries.find((item) => item.id === budgetEntryId);
+  const alreadyReserved = entry
+    ? entry.status === "reserved"
+      ? entry.maxCostUsd
+      : entry.accountedCostUsd!
+    : 0;
   const projected = {
     tokens: project.usage.tokens + result.tokens,
-    costUsd: project.usage.costUsd + result.costUsd,
+    costUsd: projectCostExposure(project) - alreadyReserved + result.costUsd,
     wallSeconds: project.usage.wallSeconds + result.wallSeconds,
   };
   if (
     projected.tokens > config.budget.maxTokens ||
-    projected.costUsd > config.budget.maxCostUsd ||
+    projected.costUsd > projectCostLimit(config, project) ||
     projected.wallSeconds > config.budget.maxWallSeconds
   ) {
     throw new CliError(`Research execution exceeded a hard budget for project ${project.id}.`, {
@@ -4771,7 +4814,7 @@ function remainingBudget(
 ): NonNullable<ResearchProgressEvent["remainingBudget"]> {
   return {
     tokens: Math.max(0, config.budget.maxTokens - project.usage.tokens),
-    costUsd: Math.max(0, roundMoney(config.budget.maxCostUsd - project.usage.costUsd)),
+    costUsd: Math.max(0, roundMoney(remainingProjectCostUsd(project, config))),
     wallSeconds: Math.max(0, config.budget.maxWallSeconds - project.usage.wallSeconds),
   };
 }

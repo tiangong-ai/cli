@@ -1,3 +1,12 @@
+import {
+  createProjectBudget,
+  projectBudgetAmount,
+  projectBudgetView,
+  projectCostExposure,
+  isProjectBudgetState,
+  inheritedProjectBudget,
+  finalizeSupersededBudget,
+} from "./project-budget.js";
 import { randomUUID } from "node:crypto";
 import { cp, lstat, readFile } from "node:fs/promises";
 import { basename, dirname, join, resolve, sep } from "node:path";
@@ -91,8 +100,10 @@ export async function initializeProject(
     producerAgent: AgentKind;
     producerSessionId: string;
   },
+  budgetInput?: { maxCostUsd: number },
 ): Promise<ProjectState> {
   validateProjectId(projectId);
+  const requestedProjectCost = projectBudgetAmount(budgetInput?.maxCostUsd);
   const normalizedQuestion = question.trim();
   if (normalizedQuestion.length < 8 || normalizedQuestion.length > 4000) {
     throw new CliError("Research question must contain 8-4000 characters.", {
@@ -120,7 +131,8 @@ export async function initializeProject(
     }
     if (
       config.mode === "production-research" &&
-      config.budget.maxCostUsd > config.budget.confirmationCostUsd &&
+      Math.min(config.budget.maxCostUsd, requestedProjectCost ?? config.budget.maxCostUsd) >
+        config.budget.confirmationCostUsd &&
       !budgetConfirmed
     ) {
       throw new CliError(
@@ -166,6 +178,9 @@ export async function initializeProject(
         {
           publicationPolicy: publicationPolicy ?? null,
           scientificDesign: scientificDesignInput?.design ?? null,
+          ...(requestedProjectCost === undefined
+            ? {}
+            : { projectMaxCostUsd: requestedProjectCost }),
         },
       );
       if (!preflight.readyToInitialize) {
@@ -184,7 +199,10 @@ export async function initializeProject(
       status: "ready",
       createdAt: now,
       updatedAt: now,
-      budgetConfirmedAt: budgetConfirmed ? now : null,
+      budgetConfirmedAt: budgetConfirmed || requestedProjectCost !== undefined ? now : null,
+      ...(requestedProjectCost === undefined
+        ? {}
+        : { budget: createProjectBudget(projectId, requestedProjectCost) }),
       inputs: admittedInputPlan ? projectInputsFromPlan(admittedInputPlan, now) : [],
       evidenceRequirements: requirements,
       publicationPolicy: publicationPolicy ?? null,
@@ -658,6 +676,7 @@ export async function forkProject(
       createdAt: now,
       updatedAt: now,
       budgetConfirmedAt: source.budgetConfirmedAt,
+      ...(source.budget ? { budget: inheritedProjectBudget(source)! } : {}),
       inputs: source.inputs.map((input) => ({ ...input })),
       evidenceRequirements: {
         ...source.evidenceRequirements,
@@ -850,6 +869,7 @@ export async function forkProject(
           ),
         );
       }
+      finalizeSupersededBudget(source);
       source.lineage.supersededBy = targetProjectId;
       source.evidenceState.staleReason = `Superseded by recovery fork ${targetProjectId}.`;
       refreshProject(source);
@@ -1076,6 +1096,7 @@ export async function createProjectAddendum(
       createdAt: now,
       updatedAt: now,
       budgetConfirmedAt: source.budgetConfirmedAt,
+      ...(source.budget ? { budget: inheritedProjectBudget(source)! } : {}),
       inputs: source.inputs.map((input) => ({ ...input })),
       evidenceRequirements: {
         ...source.evidenceRequirements,
@@ -1185,6 +1206,7 @@ export async function createProjectAddendum(
     await writeJsonAtomic(join(targetRoot, "project.json"), target);
 
     const taskContract = await inheritProjectTask(root, source, target);
+    finalizeSupersededBudget(source);
     source.lineage.supersededBy = targetProjectId;
     source.evidenceState.staleReason = `Superseded by evidence addendum ${targetProjectId}.`;
     refreshProject(source);
@@ -1411,6 +1433,7 @@ function validateProjectShape(project: ProjectState, expectedId: string): void {
     !isProjectStatus(project.status) ||
     typeof project.question !== "string" ||
     (project.budgetConfirmedAt !== null && typeof project.budgetConfirmedAt !== "string") ||
+    (project.budget !== undefined && !isProjectBudgetState(project.budget)) ||
     !Array.isArray(project.inputs) ||
     !isEvidenceRequirements(project.evidenceRequirements) ||
     !isScientificDesignBinding(project.scientificDesign, expectedId) ||
@@ -1874,4 +1897,93 @@ function slug(value: string): string {
 async function hashQuestion(question: string): Promise<string> {
   const { createHash } = await import("node:crypto");
   return createHash("sha256").update(question, "utf8").digest("hex");
+}
+
+export async function setProjectBudget(
+  root: string,
+  projectId: string,
+  maxCostUsd: number,
+  confirm: boolean,
+) {
+  projectBudgetAmount(maxCostUsd);
+  return withWorkspaceLock(root, "project.budget.set", async () => {
+    const authority = await readProjectAuthorityIndex(root);
+    const project = await loadProject(root, projectId);
+    assertProjectAuthority(project, authority);
+    const config = await loadWorkspaceConfig(root);
+    const existing = project.budget;
+    if (existing?.authorization.maxCostUsd === maxCostUsd)
+      return { projectId, budget: projectBudgetView(project, config), replayed: true };
+    if (existing && maxCostUsd > existing.authorization.maxCostUsd && !confirm)
+      throw new CliError("Increasing the project budget requires --confirm-budget.", {
+        code: "RESEARCH_BUDGET_CONFIRMATION_REQUIRED",
+        exitCode: 2,
+      });
+    if (
+      !existing &&
+      Math.min(config.budget.maxCostUsd, maxCostUsd) > config.budget.confirmationCostUsd &&
+      !confirm
+    )
+      throw new CliError(
+        "The project budget requires --confirm-budget above the configured threshold.",
+        { code: "RESEARCH_BUDGET_CONFIRMATION_REQUIRED", exitCode: 2 },
+      );
+    const proposed = existing
+      ? structuredClone(existing)
+      : createProjectBudget(projectId, maxCostUsd, project.usage.costUsd);
+    proposed.authorization.maxCostUsd = maxCostUsd;
+    if (!existing) {
+      proposed.openingBasis = "legacy-accounting";
+      // Reuse the validated native packet instead of inventing a zero pending cost.
+      const { nativeStageBudgetReservation } = await import("./runtime.js");
+      const native = await nativeStageBudgetReservation(root, projectId);
+      if (native && !config.producer.pricing)
+        throw new CliError(
+          "The existing native operation has no declared pricing; its cost cannot be adopted as zero.",
+          { code: "RESEARCH_PROJECT_BUDGET_PRICE_REQUIRED", exitCode: 3 },
+        );
+      if (native) {
+        proposed.entries.push({
+          ...native,
+          authorizationRevision: 1,
+          status: "reserved",
+          accountedCostUsd: null,
+          settlementBasis: null,
+          settledAt: null,
+        });
+      }
+    }
+    const candidate = { ...project, budget: proposed };
+    const limit = Math.min(config.budget.maxCostUsd, maxCostUsd);
+    if (projectCostExposure(candidate) > limit + 1e-9)
+      throw new CliError(
+        "The new budget cannot cover existing accounted cost and outstanding reservations.",
+        {
+          code: "RESEARCH_BUDGET_RESERVATION_FAILED",
+          exitCode: 3,
+          details: {
+            proposedMaxCostUsd: maxCostUsd,
+            existingExposureUsd: projectCostExposure(candidate),
+          },
+        },
+      );
+    proposed.authorization.revision = existing ? existing.authorization.revision + 1 : 1;
+    proposed.authorization.authorizedAt = new Date().toISOString();
+    project.budget = proposed;
+    project.budgetConfirmedAt = proposed.authorization.authorizedAt;
+    await saveProject(root, project);
+    await appendJournalEvent(
+      workspacePaths(root).journal,
+      "project.budget.authorized",
+      project.id,
+      {
+        authorization: proposed.authorization,
+        openingEstimateUsd: proposed.openingEstimateUsd,
+        outstandingReservationIds: proposed.entries
+          .filter((e) => e.status === "reserved")
+          .map((e) => e.id),
+      },
+    );
+    return { projectId, budget: projectBudgetView(project, config), replayed: false };
+  });
 }

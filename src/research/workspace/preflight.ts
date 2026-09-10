@@ -1,3 +1,4 @@
+import { projectBudgetAmount } from "./project-budget.js";
 import { loadCapabilityDeclarations, verifyCapabilities } from "./capabilities.js";
 import { projectResearchDataCapabilities } from "./data-evidence-adapter.js";
 import { hasPublicInternetCapability } from "./external-skills.js";
@@ -57,9 +58,15 @@ export async function evaluateProjectPreflight(
   options: {
     publicationPolicy?: ResearchPolicyBinding | null;
     scientificDesign?: VerifiedScientificDesign | null;
+    projectMaxCostUsd?: number;
   } = {},
 ) {
   const config = await loadWorkspaceConfig(root);
+  const requestedProjectCost = projectBudgetAmount(options.projectMaxCostUsd);
+  const effectiveMaxCostUsd = Math.min(
+    config.budget.maxCostUsd,
+    requestedProjectCost ?? config.budget.maxCostUsd,
+  );
   const capabilities = await loadCapabilityDeclarations(root);
   const capabilityVerification = await verifyCapabilities(root);
   const doctorAttestation =
@@ -276,9 +283,9 @@ export async function evaluateProjectPreflight(
       `package-wall-reservations-exceed-total:${wallReservation}/${config.budget.maxWallSeconds}`,
     );
   }
-  if (estimatedMaxCostUsd !== null && estimatedMaxCostUsd > config.budget.maxCostUsd) {
+  if (estimatedMaxCostUsd !== null && estimatedMaxCostUsd > effectiveMaxCostUsd) {
     gaps.push(
-      `package-cost-reservations-exceed-total:${estimatedMaxCostUsd}/${config.budget.maxCostUsd}`,
+      `package-cost-reservations-exceed-total:${estimatedMaxCostUsd}/${effectiveMaxCostUsd}`,
     );
   }
   if (lifecycleEnabled && lifecycleTokenReservation > config.budget.maxTokens) {
@@ -294,10 +301,10 @@ export async function evaluateProjectPreflight(
   if (
     lifecycleEnabled &&
     lifecycleEstimatedMaxCostUsd !== null &&
-    lifecycleEstimatedMaxCostUsd > config.budget.maxCostUsd
+    lifecycleEstimatedMaxCostUsd > effectiveMaxCostUsd
   ) {
     gaps.push(
-      `full-lifecycle-cost-reservation-exceeds-total:${lifecycleEstimatedMaxCostUsd}/${config.budget.maxCostUsd}`,
+      `full-lifecycle-cost-reservation-exceeds-total:${lifecycleEstimatedMaxCostUsd}/${effectiveMaxCostUsd}`,
     );
   }
   const discoverOutputTokens =
@@ -481,11 +488,13 @@ export async function evaluateProjectPreflight(
       tokenReservation,
       wallReservation,
       maxTokens: config.budget.maxTokens,
-      maxCostUsd: config.budget.maxCostUsd,
+      maxCostUsd: effectiveMaxCostUsd,
+      workspaceMaxCostUsd: config.budget.maxCostUsd,
+      projectMaxCostUsd: requestedProjectCost ?? null,
       maxWallSeconds: config.budget.maxWallSeconds,
       packageMaxTokens: config.budget.packageMaxTokens,
       confirmationCostUsd: config.budget.confirmationCostUsd,
-      confirmationRequired: config.budget.maxCostUsd > config.budget.confirmationCostUsd,
+      confirmationRequired: effectiveMaxCostUsd > config.budget.confirmationCostUsd,
       estimatedMaxCostUsd,
       maxBrokerContextTokens: config.budget.maxBrokerContextTokens,
       maxBrokerCalls: config.budget.maxBrokerCalls,

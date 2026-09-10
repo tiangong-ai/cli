@@ -1,3 +1,11 @@
+import {
+  assertProjectRoutePriced,
+  remainingProjectCostUsd,
+  projectCostLimit,
+  projectCostExposure,
+  reserveProjectCost,
+  settleProjectCost,
+} from "./project-budget.js";
 import { createHash, randomUUID } from "node:crypto";
 import { constants } from "node:fs";
 import { copyFile, lstat, mkdir, mkdtemp, open, readFile, rm } from "node:fs/promises";
@@ -210,26 +218,48 @@ export async function executeScientificReview(
         artifactViews,
       );
       const schema = scientificReviewSchema(input.role);
-      const maxTurns = RESEARCH_PACKET_READ_MAX_TURNS;
-      const reservation = calculateAgentCallTokenReservation({
-        route: config.reviewer,
-        primaryPayloadTokens: Math.ceil(
-          Buffer.byteLength(prompt + JSON.stringify(schema)) / RESEARCH_ESTIMATED_BYTES_PER_TOKEN,
-        ),
-        repairPayloadTokens: 0,
-        maxTurns: researchStructuredOutputMaxTurns(config.reviewer),
-        maxOutputTokens: config.budget.maxOutputTokens,
-        maxToolContextTokens: RESEARCH_EXPECTED_ARTIFACT_READ_TOKENS,
-        maxRepairTokens: 0,
-        reserveRepair: false,
-      }).totalTokens;
-      const reservedCostUsd = reservedAgentPackageCost(config.reviewer, reservation, config);
-      const availableCostUsd = Math.max(0, config.budget.maxCostUsd - project.usage.costUsd);
+      assertProjectRoutePriced(project, config.reviewer);
+      const availableCostUsd = remainingProjectCostUsd(project, config);
+      const availableTokens = Math.min(
+        config.budget.earlyScientificReviewMaxTokens,
+        config.budget.maxTokens - project.usage.tokens,
+      );
+      const primaryPayloadTokens = Math.ceil(
+        Buffer.byteLength(prompt + JSON.stringify(schema)) / RESEARCH_ESTIMATED_BYTES_PER_TOKEN,
+      );
+      let maxTurns = 0,
+        reservation = 0,
+        reservedCostUsd = 0;
+      for (let turns = RESEARCH_PACKET_READ_MAX_TURNS; turns >= 1; turns--) {
+        const estimate = calculateAgentCallTokenReservation({
+          route: config.reviewer,
+          primaryPayloadTokens,
+          repairPayloadTokens: 0,
+          maxTurns: turns,
+          maxOutputTokens: config.budget.maxOutputTokens,
+          maxToolContextTokens: RESEARCH_EXPECTED_ARTIFACT_READ_TOKENS,
+          maxRepairTokens: 0,
+          reserveRepair: false,
+        }).totalTokens;
+        const cost = reservedAgentPackageCost(config.reviewer, estimate, config);
+        if (estimate <= availableTokens && cost <= availableCostUsd) {
+          maxTurns = turns;
+          reservation = estimate;
+          reservedCostUsd = cost;
+          break;
+        }
+      }
+      // Read-context cost remains an estimate. Reserve the same owner-approved
+      // finite envelope sent to the client, rather than imposing that estimate
+      // as an exact invoice ceiling. Actual returned usage replaces it.
+      const estimatedCostUsd = reservedCostUsd;
+      reservedCostUsd = availableCostUsd;
       const timeoutSeconds = Math.min(
         config.budget.earlyScientificReviewMaxWallSeconds,
         config.budget.maxWallSeconds - project.usage.wallSeconds,
       );
       if (
+        maxTurns === 0 ||
         reservation > config.budget.earlyScientificReviewMaxTokens ||
         reservation > config.budget.maxTokens - project.usage.tokens ||
         reservedCostUsd > availableCostUsd ||
@@ -243,6 +273,12 @@ export async function executeScientificReview(
       // Reserve before spawning. An interrupted call remains conservatively charged;
       // a returned result replaces that reservation with measured usage.
       const priorUsage = { ...project.usage };
+      reserveProjectCost(project, config, {
+        id: `scientific:${runId}`,
+        kind: "review",
+        reference: packet.packetSha256,
+        maxCostUsd: reservedCostUsd,
+      });
       project.usage.tokens += reservation;
       project.usage.inputTokens += reservation;
       project.usage.costUsd += reservedCostUsd;
@@ -256,7 +292,9 @@ export async function executeScientificReview(
         runId,
         attempt: attempts + 1,
         reservedTokens: reservation,
+        admittedMaxTurns: maxTurns,
         reservedCostUsd,
+        estimatedCostUsd,
         reservedWallSeconds: timeoutSeconds,
         transport: config.reviewerExecution.transport,
       });
@@ -278,7 +316,7 @@ export async function executeScientificReview(
         maxTurns,
         maxOutputTokens: config.budget.maxOutputTokens,
         maxToolContextTokens: RESEARCH_EXPECTED_ARTIFACT_READ_TOKENS,
-        maxCostUsd: availableCostUsd,
+        maxCostUsd: reservedCostUsd,
         expectedRuntime,
         toolPolicy: "packet-read",
         artifactViews: { index: artifactViews, packetSha256: packet.packetSha256 },
@@ -325,6 +363,12 @@ export async function executeScientificReview(
       project.usage.outputTokens = priorUsage.outputTokens + usage.outputTokens;
       project.usage.costUsd = priorUsage.costUsd + usage.costUsd;
       project.usage.wallSeconds = priorUsage.wallSeconds + usage.wallSeconds;
+      settleProjectCost(
+        project,
+        `scientific:${runId}`,
+        usage.costUsd,
+        usageKnown ? "reported-usage" : "allocated-upper-bound",
+      );
       await saveProject(input.root, project);
       usageSettled = true;
       if (result.exitCode !== 0) {
