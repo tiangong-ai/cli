@@ -596,8 +596,10 @@ await writeFile(process.argv[3],JSON.stringify({schemaVersion:1,solverReached:tr
       );
       if (
         view.promotions.some(
-          (p: { runId: string; observer?: { state: string } }) =>
-            p.runId === "certification-one" && p.observer?.state === "observing",
+          (p: { runId: string; observer?: { state: string; phase: string } }) =>
+            p.runId === "certification-one" &&
+            p.observer?.state === "observing" &&
+            p.observer.phase === "calculation",
         )
       ) {
         observedSupervisor = true;
