@@ -13,7 +13,7 @@ checkPaths:
   - src/**
   - bin/**
 lastReviewedAt: 2026-09-10
-lastReviewedCommit: 70c723411b60e7838957f42391efc546e0380f2b
+lastReviewedCommit: 75fb1e0779cdf42ba95647ed6c5e4ed2ee495dfc
 ---
 
 # Repo Architecture
@@ -614,6 +614,23 @@ and retains declared error subtypes/messages as sanitized telemetry. An error
 envelope cannot become successful merely because its process exits zero.
 
 Reviewer transport is separate from producer host and reviewer model identity.
+The executor snapshots the admitted process environment and Claude settings env
+once, then uses that snapshot for both runtime admission and capsule execution.
+`providerRouting` binds configured endpoint/model routing and inherited proxy
+values without persisting URL paths, queries, credentials or mapped model IDs.
+Explicit process values override the imported settings allowlist, including
+Claude model aliases. The shared fingerprint comparison detects effective-value
+drift but does not force another smoke merely for unchanged values moving
+between supported config sources. Legacy fingerprints remain readable and lack
+provider evidence; they cannot authorize a new bound runtime. Native status,
+bridge fingerprint responses, doctor checks and execution results expose the
+configured routing with upstream identity explicitly unverified. Default routes,
+opaque wrappers, credentials and actual network hops are not provider identity
+attestations. No provider registry, live identity probe or new lifecycle is added.
+Execution `model` and the runtime fingerprint retain the configured model alias;
+the separate nullable `telemetry.reportedModel` is a sanitized CLI self-report.
+A mapped response name cannot invalidate the unchanged configured route or
+make the bridge/scientific gate mistake provider telemetry for the route binding.
 `artifact-views.ts` owns immutable packet directories, opaque object selection,
 UTF-8/base64 byte views, exact delivery receipts and once-per-selected-object
 verification for adjacent pages. `artifact-view-mcp.ts` exposes only directory

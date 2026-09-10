@@ -40,6 +40,7 @@ import type {
   AgentReasoningEffort,
   AgentExecutionTelemetry,
   AgentRoute,
+  AgentProviderRouting,
   AgentRuntimeFingerprint,
   AgentVerbosity,
   ExecutionResult,
@@ -87,6 +88,13 @@ const CLAUDE_SETTINGS_ENVIRONMENT = [
   "ANTHROPIC_AUTH_TOKEN",
   "CLAUDE_CODE_OAUTH_TOKEN",
   "ANTHROPIC_BASE_URL",
+  "ANTHROPIC_MODEL",
+  "ANTHROPIC_DEFAULT_FABLE_MODEL",
+  "ANTHROPIC_DEFAULT_OPUS_MODEL",
+  "ANTHROPIC_DEFAULT_SONNET_MODEL",
+  "ANTHROPIC_DEFAULT_HAIKU_MODEL",
+  "ANTHROPIC_SMALL_FAST_MODEL",
+  "CLAUDE_CODE_SUBAGENT_MODEL",
 ] as const;
 
 const DEFAULT_AGENT_EFFORT: AgentReasoningEffort = "low";
@@ -130,6 +138,8 @@ interface PreparedCapsuleAuthentication {
 }
 
 export async function executeAgent(request: AgentExecutionRequest): Promise<ExecutionResult> {
+  // Use the same configuration snapshot for admission and child execution.
+  request = { ...request, environment: { ...request.environment } };
   requireHeadlessAgentRoute(request.route);
   if (
     (request.toolPolicy === "packet-read" &&
@@ -169,11 +179,18 @@ export async function executeAgent(request: AgentExecutionRequest): Promise<Exec
   const temporaryDirectory = join(request.capsuleRoot, "tmp");
   await mkdir(temporaryDirectory, { recursive: true, mode: 0o700 });
   const executables = await resolveAgentExecutables(request.route, request.environment.PATH);
+  const settingsEnvironment = await routeSettingsEnvironment(request.route, request.environment);
+  const providerRouting = configuredProviderRouting(
+    request.route,
+    request.environment,
+    settingsEnvironment,
+  );
   const runtime = await fingerprintResolvedBinary(
     request.route,
     executables.launcher,
     executables.target,
     request.environment.PATH,
+    providerRouting,
   );
   if (request.expectedRuntime && !sameRuntimeFingerprint(runtime, request.expectedRuntime)) {
     throw new CliError(
@@ -189,12 +206,19 @@ export async function executeAgent(request: AgentExecutionRequest): Promise<Exec
           actualWrapperSha256: runtime.wrapperSha256,
           expectedAdapterSha256: request.expectedRuntime.adapterSha256,
           actualAdapterSha256: runtime.adapterSha256,
+          expectedProviderRouting: request.expectedRuntime.providerRouting ?? null,
+          actualProviderRouting: runtime.providerRouting,
         },
       },
     );
   }
   const capsuleHome = join(request.capsuleRoot, "home");
-  const capsuleAuth = await prepareCapsuleHome(request.route, capsuleHome, request.environment);
+  const capsuleAuth = await prepareCapsuleHome(
+    request.route,
+    capsuleHome,
+    request.environment,
+    settingsEnvironment,
+  );
   const secrets = [...configuredResearchSecrets(request.environment), ...capsuleAuth.secrets];
   artifactSecrets.push(...capsuleAuth.secrets);
   if (request.route.agent === "codex") {
@@ -317,8 +341,8 @@ export async function executeAgent(request: AgentExecutionRequest): Promise<Exec
     outputTokens,
     costUsd,
     wallSeconds,
-    model: parsed.model ?? request.route.model,
-    runtime: { ...runtime, model: parsed.model ?? request.route.model },
+    model: request.route.model,
+    runtime,
     ...((request.toolPolicy === "none" || request.toolPolicy === "packet-read") &&
     request.brokerUrl === null
       ? {
@@ -335,7 +359,10 @@ export async function executeAgent(request: AgentExecutionRequest): Promise<Exec
           },
         }
       : {}),
-    telemetry: sanitizeExecutionTelemetry(parsed.telemetry, secrets),
+    telemetry: sanitizeExecutionTelemetry(
+      { ...parsed.telemetry, reportedModel: parsed.model },
+      secrets,
+    ),
     ...(artifactViews ? { artifactReads: artifactViews.receipts() } : {}),
   };
 }
@@ -354,13 +381,16 @@ export async function fingerprintAgentRoute(
   environment: NodeJS.ProcessEnv,
 ): Promise<AgentRuntimeFingerprint> {
   requireHeadlessAgentRoute(route);
+  environment = { ...environment };
   validateAgentBinary(route);
   const executables = await resolveAgentExecutables(route, environment.PATH);
+  const settingsEnvironment = await routeSettingsEnvironment(route, environment);
   return fingerprintResolvedBinary(
     route,
     executables.launcher,
     executables.target,
     environment.PATH,
+    configuredProviderRouting(route, environment, settingsEnvironment),
   );
 }
 
@@ -754,6 +784,7 @@ async function prepareCapsuleHome(
   route: AgentRoute,
   capsuleHome: string,
   environment: NodeJS.ProcessEnv,
+  settingsEnvironment: NodeJS.ProcessEnv,
 ): Promise<PreparedCapsuleAuthentication> {
   await mkdir(capsuleHome, { recursive: true, mode: 0o700 });
   const sourceHome =
@@ -812,10 +843,6 @@ async function prepareCapsuleHome(
     });
     secrets.push(...authSecretValues(await readFile(candidate.destination, "utf8")));
   }
-  const settingsEnvironment =
-    route.agent === "claude"
-      ? await readClaudeSettingsEnvironment(join(claudeConfigRoot, "settings.json"))
-      : {};
   for (const name of ROUTE_AUTH_ENVIRONMENT[route.agent]) {
     const value = settingsEnvironment[name];
     if (value && value.length >= 8) secrets.push(value);
@@ -972,6 +999,111 @@ function authenticationReconciliationError(reason: string): CliError {
   );
 }
 
+async function routeSettingsEnvironment(
+  route: AgentRoute,
+  environment: NodeJS.ProcessEnv,
+): Promise<NodeJS.ProcessEnv> {
+  if (route.agent !== "claude") return {};
+  const sourceHome =
+    environment.HOME && isAbsolute(environment.HOME) ? environment.HOME : homedir();
+  const configRoot =
+    environment.CLAUDE_CONFIG_DIR && isAbsolute(environment.CLAUDE_CONFIG_DIR)
+      ? environment.CLAUDE_CONFIG_DIR
+      : join(sourceHome, ".claude");
+  return readClaudeSettingsEnvironment(join(configRoot, "settings.json"));
+}
+
+function configuredProviderRouting(
+  route: AgentRoute,
+  environment: NodeJS.ProcessEnv,
+  settings: NodeJS.ProcessEnv,
+): AgentProviderRouting {
+  // This is a binding of admitted configuration, never a wire-level identity claim.
+  // Keep URL paths/queries, proxy credentials and mapped provider IDs out of receipts.
+  const selected = new Map<string, string>();
+  const modelMappingSources: AgentProviderRouting["modelMappingSources"] = {};
+  const names = new Set([...Object.keys(environment), ...Object.keys(settings)]);
+  for (const name of [...names].sort()) {
+    if (isSensitiveEnvironmentName(name)) continue;
+    const isModel =
+      route.agent === "claude" &&
+      (/^ANTHROPIC_(?:DEFAULT_[A-Z_]+_MODEL|MODEL|SMALL_FAST_MODEL)$/.test(name) ||
+        name === "CLAUDE_CODE_SUBAGENT_MODEL");
+    const isRouting =
+      /^(?:https?_proxy|all_proxy|no_proxy)$/i.test(name) ||
+      (route.agent === "claude" &&
+        (/^ANTHROPIC_[A-Z_]*BASE_URL$/.test(name) || /^CLAUDE_CODE_USE_[A-Z_]+$/.test(name))) ||
+      (route.agent === "codex" && name === "OPENAI_BASE_URL");
+    if (!isModel && !isRouting) continue;
+    const value = environment[name] || settings[name];
+    if (!value) continue;
+    selected.set(name, value);
+    if (isModel)
+      modelMappingSources[name] = environment[name] ? "process-environment" : "claude-settings-env";
+  }
+  const endpoint = route.agent === "claude" ? selected.get("ANTHROPIC_BASE_URL") : undefined;
+  if (endpoint) assertSafeClaudeBaseUrl(endpoint);
+  return {
+    schemaVersion: 1,
+    configurationSha256: sha256Text(JSON.stringify([...selected])),
+    endpointOrigin: endpoint ? new URL(endpoint).origin : null,
+    endpointSource: endpoint
+      ? environment.ANTHROPIC_BASE_URL
+        ? "process-environment"
+        : "claude-settings-env"
+      : "runtime-default",
+    modelMappingSources,
+    identityVerification: "unverified",
+    scope: "configured-routing-only",
+  };
+}
+
+/** Offline configuration inspection; never invokes an agent or sends material. */
+export async function inspectAgentProviderRouting(
+  route: AgentRoute,
+  environment: NodeJS.ProcessEnv,
+) {
+  environment = { ...environment };
+  return configuredProviderRouting(
+    route,
+    environment,
+    await routeSettingsEnvironment(route, environment),
+  );
+}
+
+export function isAgentProviderRouting(value: unknown): value is AgentProviderRouting {
+  if (
+    !isObject(value) ||
+    value.schemaVersion !== 1 ||
+    typeof value.configurationSha256 !== "string" ||
+    !/^[0-9a-f]{64}$/.test(value.configurationSha256) ||
+    typeof value.endpointSource !== "string" ||
+    !["process-environment", "claude-settings-env", "runtime-default"].includes(
+      value.endpointSource,
+    ) ||
+    value.identityVerification !== "unverified" ||
+    value.scope !== "configured-routing-only" ||
+    !isObject(value.modelMappingSources)
+  )
+    return false;
+  if (value.endpointOrigin !== null) {
+    if (typeof value.endpointOrigin !== "string") return false;
+    try {
+      const url = new URL(value.endpointOrigin);
+      if (url.protocol !== "https:" || url.origin !== value.endpointOrigin) return false;
+    } catch {
+      return false;
+    }
+  }
+  return Object.entries(value.modelMappingSources).every(
+    ([name, source]) =>
+      /^(?:ANTHROPIC_(?:DEFAULT_[A-Z_]+_MODEL|MODEL|SMALL_FAST_MODEL)|CLAUDE_CODE_SUBAGENT_MODEL)$/.test(
+        name,
+      ) &&
+      (source === "process-environment" || source === "claude-settings-env"),
+  );
+}
+
 async function readClaudeSettingsEnvironment(path: string): Promise<NodeJS.ProcessEnv> {
   const info = await lstat(path).catch(() => undefined);
   if (!info) return {};
@@ -1048,6 +1180,7 @@ async function fingerprintResolvedBinary(
   launcher: string,
   target: string,
   pathValue: string | undefined,
+  providerRouting: AgentProviderRouting,
 ): Promise<AgentRuntimeFingerprint> {
   const versionEnvironment: NodeJS.ProcessEnv = {
     PATH: pathValue ?? process.env.PATH,
@@ -1088,6 +1221,7 @@ async function fingerprintResolvedBinary(
     binaryVersion: sanitizeResearchText(binaryVersion).slice(0, 300),
     platform: platform(),
     architecture: arch(),
+    providerRouting,
   };
 }
 
@@ -1237,7 +1371,7 @@ function parseAgentResult(
     let inputTokens = 0;
     let cachedInputTokens = 0;
     let outputTokens = 0;
-    let model: string | null = route.model;
+    let model: string | null = null;
     const messages: string[] = [];
     let parsedEvents = 0;
     const eventCounts: Record<string, number> = {};
@@ -1328,7 +1462,7 @@ function parseAgentResult(
         numeric(usage.cache_creation_input_tokens) + numeric(usage.cache_read_input_tokens),
       outputTokens: numeric(usage.output_tokens),
       costUsd: numeric(value.total_cost_usd),
-      model: typeof value.model === "string" ? value.model : route.model,
+      model: typeof value.model === "string" ? value.model : null,
       parseFailed: providerFailed || (!structured && typeof value.result !== "string"),
       telemetry: {
         eventCounts: { result: 1 },
@@ -1347,7 +1481,7 @@ function parseAgentResult(
       cachedInputTokens: 0,
       outputTokens: 0,
       costUsd: 0,
-      model: route.model,
+      model: null,
       parseFailed: true,
       telemetry: {
         eventCounts: {},
@@ -1625,6 +1759,14 @@ function sanitizeExecutionTelemetry(
 ): AgentExecutionTelemetry {
   return {
     ...telemetry,
+    ...(telemetry.reportedModel === undefined
+      ? {}
+      : {
+          reportedModel:
+            telemetry.reportedModel === null
+              ? null
+              : sanitizeResearchText(telemetry.reportedModel, secrets).slice(0, 300),
+        }),
     providerErrors: telemetry.providerErrors.map((error) =>
       sanitizeResearchText(error, secrets).slice(0, 1_000),
     ),
@@ -1642,7 +1784,7 @@ function isToolItemType(value: string): boolean {
   );
 }
 
-function sameRuntimeFingerprint(
+export function sameRuntimeFingerprint(
   actual: AgentRuntimeFingerprint,
   expected: AgentRuntimeFingerprint,
 ): boolean {
@@ -1656,6 +1798,7 @@ function sameRuntimeFingerprint(
     actual.adapterSha256 === expected.adapterSha256 &&
     actual.binaryVersion === expected.binaryVersion &&
     actual.platform === expected.platform &&
-    actual.architecture === expected.architecture
+    actual.architecture === expected.architecture &&
+    actual.providerRouting?.configurationSha256 === expected.providerRouting?.configurationSha256
   );
 }

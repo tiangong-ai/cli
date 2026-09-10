@@ -19,7 +19,7 @@ checkPaths:
   - test/**
   - .github/workflows/**
 lastReviewedAt: 2026-09-10
-lastReviewedCommit: 70c723411b60e7838957f42391efc546e0380f2b
+lastReviewedCommit: 75fb1e0779cdf42ba95647ed6c5e4ed2ee495dfc
 ---
 
 # Repo Validation
@@ -195,6 +195,16 @@ Both PR workflows cancel obsolete runs for the same pull request. Pushes to
 `0.1.9` release.
 
 ## Local Gates
+
+`test/research-provider-routing.test.ts` uses synthetic gateways and executables
+to verify unchanged-binary routing drift blocks material-bearing execution,
+model mappings reach the capsule, process settings precedence, legacy binding
+refresh, sanitized offline status/doctor and reuse after equivalent config-source
+changes. Bridge tests preserve transport-only readiness without requiring an
+installed model executable. These fixtures prove configured-routing behavior;
+they do not attest an external service or send research material to a provider.
+The synthetic reviewer also reports a different mapped model name; its response
+must retain the configured alias binding and keep the reported name in telemetry.
 
 Run before delivery:
 

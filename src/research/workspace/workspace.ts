@@ -16,9 +16,16 @@ import { appendJournalEvent, verifyJournal } from "./journal.js";
 import { readProjectAuthorityIndex, visibleProjectIds } from "./project-authority.js";
 import { recoverProjectMutations } from "./project-mutations.js";
 import { loadProjectEvidenceReceipts } from "./evidence.js";
-import { executeAgent, fingerprintAgentRoute, type AgentExecutionRequest } from "./executor.js";
+import {
+  executeAgent,
+  fingerprintAgentRoute,
+  inspectAgentProviderRouting,
+  isAgentProviderRouting,
+  sameRuntimeFingerprint,
+  type AgentExecutionRequest,
+} from "./executor.js";
 import { doctorExternalCapabilities, hasPublicInternetCapability } from "./external-skills.js";
-import { createReviewExecutor } from "./review-executor.js";
+import { createReviewExecutor, inspectReviewerBridgeStatus } from "./review-executor.js";
 import { parseStructuredStageOutput, schemaForStage } from "./schemas.js";
 import { sanitizeResearchText } from "./sanitization.js";
 import {
@@ -419,6 +426,24 @@ export async function doctorResearchWorkspace(
   const configuredReviewExecutor = config
     ? createReviewExecutor({ root: workspace, execution: config.reviewerExecution })
     : null;
+  if (config) {
+    await checked(checks, "reviewer-configured-routing", async () => {
+      const routing =
+        config.reviewerExecution.transport === "sandbox-bridge"
+          ? ((await inspectReviewerBridgeStatus(workspace)).configuredReviewer?.providerRouting ??
+            null)
+          : await inspectAgentProviderRouting(config.reviewer, options.environment ?? process.env);
+      return {
+        value: routing,
+        detail: JSON.stringify({
+          cliFamily: config.reviewer.agent,
+          configuredModelAlias: config.reviewer.model,
+          providerRouting: routing,
+          identityVerification: "unverified",
+        }),
+      };
+    });
+  }
   await checked(checks, "runtime-lock", async () => {
     const lock = await requireCurrentRuntimeLock(workspace, marker);
     return { value: lock, detail: `${lock.packageName}@${lock.packageVersion}` };
@@ -741,7 +766,7 @@ async function inspectReusableDoctorAttestation(
     }
     try {
       const actual = await fingerprinter(route, environment);
-      if (canonicalJson(actual) !== canonicalJson(expected)) {
+      if (!sameRuntimeFingerprint(actual, expected)) {
         errors.push(`${route.agent} runtime fingerprint drifted`);
       }
     } catch (error) {
@@ -1028,6 +1053,7 @@ function isDoctorAttestation(value: unknown): value is WorkspaceDoctorAttestatio
   return value.runtimes.every(
     (runtime) =>
       isObject(runtime) &&
+      (runtime.providerRouting === undefined || isAgentProviderRouting(runtime.providerRouting)) &&
       (runtime.agent === "codex" || runtime.agent === "claude") &&
       (runtime.model === null || typeof runtime.model === "string") &&
       typeof runtime.binarySha256 === "string" &&

@@ -516,6 +516,8 @@ export interface ReviewExecutionAttestation {
 }
 
 export interface AgentExecutionTelemetry {
+  /** Sanitized CLI self-report, not an independently verified upstream identity. */
+  reportedModel?: string | null;
   eventCounts: Record<string, number>;
   itemCounts: Record<string, number>;
   toolCalls: number;
@@ -536,6 +538,18 @@ export interface AgentRuntimeFingerprint {
   binaryVersion: string;
   platform: NodeJS.Platform;
   architecture: string;
+  /** Absent on legacy records; configured routing is not upstream attestation. */
+  providerRouting?: AgentProviderRouting;
+}
+
+export interface AgentProviderRouting {
+  schemaVersion: 1;
+  configurationSha256: string;
+  endpointOrigin: string | null;
+  endpointSource: "process-environment" | "claude-settings-env" | "runtime-default";
+  modelMappingSources: Record<string, "process-environment" | "claude-settings-env">;
+  identityVerification: "unverified";
+  scope: "configured-routing-only";
 }
 
 export type FailureKind =

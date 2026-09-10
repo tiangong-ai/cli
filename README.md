@@ -13,7 +13,7 @@ checkPaths:
   - bin/**
   - src/**
 lastReviewedAt: 2026-09-10
-lastReviewedCommit: 70c723411b60e7838957f42391efc546e0380f2b
+lastReviewedCommit: 75fb1e0779cdf42ba95647ed6c5e4ed2ee495dfc
 ---
 
 # Tiangong AI CLI
@@ -1087,6 +1087,29 @@ Sidecar readiness includes real filesystem negative probes and a fixed
 reviewer shell, browser, web, undeclared MCP, and Skill tools remain disabled.
 Do not use Full Access, sandbox-disable flags, unsandboxed-command exceptions,
 or silent transport fallback.
+
+Before sending reviewer material, inspect `research reviewer status --json`.
+The runtime reports the CLI family and configured model alias separately from
+`providerRouting`: the configured Claude endpoint origin/source, model-mapping
+sources and a digest of admitted routing values. Explicit process environment
+overrides the imported Claude `settings.json` env allowlist. Approved custom
+HTTPS gateways remain supported. Doctor's `reviewer-configured-routing` check
+is configuration inspection; it does not make a paid model request.
+
+Routing changes invalidate the prior runtime binding before reviewer execution.
+Unchanged effective routing reuses the existing attestation; missing legacy
+bindings require an explicit smoke refresh. Status never starts paid checks.
+Paths, query strings, proxy credentials and mapped provider IDs are omitted
+from routing receipts. `identityVerification=unverified` is intentional: a CLI
+family, model alias, endpoint configuration or successful smoke cannot attest
+the actual upstream provider/model or historical HTTP destinations. A null
+endpoint means no supported explicit endpoint was resolved, not an official
+provider guarantee. Wrappers, proxies and runtime defaults remain outside that
+identity guarantee. Bridge status identifies transport readiness separately.
+Execution `model` and `runtime.model` retain the configured alias; optional
+`telemetry.reportedModel` records the sanitized CLI self-report, with null when
+absent. A mapped response name does not change the configured runtime identity
+or require another smoke. It is not independently verified provider identity.
 
 WorkBuddy/CodeBuddy capsule teardown never requests recursive bulk deletion
 inside the outer IDE. Native stages remove only the single active-session
