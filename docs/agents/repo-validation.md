@@ -817,6 +817,10 @@ failed certification and inherited-worker cleanup. One-shot supervisor tests
 kill the actual observer after the calculation starts, using both source and
 compiled entrypoints, and verify that it cannot outlive the bound. They also
 exercise stop-before-start ordering and prevent program output or inherited IPC
-from fabricating supervisor success. These fixtures do not prove scientific
+from fabricating supervisor success. Live status and direct run inspection are
+checked during the calculation phase, separately from its short runtime probe;
+reused PIDs and local routing exclusion are exercised. Rehashed audit mutations
+of the effective scientific view or moving fulfillment after certification start
+must fail temporal validation. These fixtures do not prove scientific
 correctness, provider invoices, arbitrary daemon containment or reconstruction of
 uncommitted results; qualify those claims separately before making them.

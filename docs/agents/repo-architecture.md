@@ -636,7 +636,13 @@ monotonic deadline and IPC-disconnect cleanup. Only the already admitted binary,
 arguments and filtered environment are forwarded. Program streams cannot forge
 its separate status channel, and stop is terminal before or after spawn. The
 helper has no project mutation or retry protocol; an observer lost before commit
-leaves a conservative unresolved reservation.
+leaves a conservative unresolved reservation. Private local observer routing is
+written before execution starts; read-only inspection checks the actual process
+title and phase. A missing or mismatched process cannot release that reservation,
+prove completion or authorize another run. These routes are excluded from export.
+Scientific audit reuses the validated amendment/fulfillment projection at the
+promotion and certification-start event, so later freezes cannot certify earlier
+runs.
 
 `artifact-read-audit.ts` validates persisted read directories, intrinsic receipt
 identity, packet/delivery authority and exact byte selectors. It groups pages by
