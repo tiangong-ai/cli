@@ -1,4 +1,4 @@
-import { tmpdir } from "node:os";
+import { arch, platform, tmpdir } from "node:os";
 import { Ajv2020 } from "ajv/dist/2020.js";
 import { lstat, mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { basename, dirname, isAbsolute, join, relative } from "node:path";
@@ -7,7 +7,13 @@ import { loadCurrentEvidenceSnapshot } from "./acquisition.js";
 import { createCalculationSandboxInvocation } from "./executor.js";
 import { loadInvestigation, type InvestigationDefinition } from "./investigation.js";
 import { appendJournalEvent, readVerifiedJournal } from "./journal.js";
-import { captureProcess, copyExact, nativePacketBinding, storeRunObject } from "./native-run.js";
+import {
+  type NativeRunRecord,
+  captureProcess,
+  copyExact,
+  nativePacketBinding,
+  storeRunObject,
+} from "./native-run.js";
 import { assertProjectAuthority, projectAuthorityIndex } from "./project-authority.js";
 import { loadProject } from "./projects.js";
 import {
@@ -146,6 +152,7 @@ export interface InvestigationAttempt {
   accountedCostUpperBoundUsd: number;
   process: Omit<Observed, "stdout" | "stderr">;
   runtimeProbe: Omit<Observed, "stdout" | "stderr">;
+  runtime: NativeRunRecord["runtime"];
   isolation: { provider: string; policySha256: string };
   logs: { stdout: OutputRecord; stderr: OutputRecord };
   outputs: Array<OutputRecord & { id: string; mediaType: string }>;
@@ -275,7 +282,7 @@ export function investigationRemaining(
     ),
   };
 }
-async function assertCurrent(
+export async function assertInvestigationCurrent(
   root: string,
   project: ProjectState,
   definition: InvestigationDefinition,
@@ -392,7 +399,7 @@ async function observeInvestigationAttemptInternal(
           );
         return { replay: known.record };
       }
-      const snapshot = await assertCurrent(root, project, definition, events);
+      const snapshot = await assertInvestigationCurrent(root, project, definition, events);
       if (history.some((a) => !a.record))
         throw invalid(
           "Resolve the unfinished attempt before another investigation calculation.",
@@ -636,7 +643,7 @@ async function observeInvestigationAttemptInternal(
     const events = await readVerifiedJournal(workspacePaths(root).journal);
     let stale = false;
     try {
-      await assertCurrent(root, project, prepared.definition, events);
+      await assertInvestigationCurrent(root, project, prepared.definition, events);
       if (
         (await nativePacketBinding(root, project, input.nativeSessionId)) !==
         start.nativePacketSha256
@@ -754,6 +761,13 @@ async function observeInvestigationAttemptInternal(
       accountedCostUpperBoundUsd: start.maxCostUsd,
       process: { ...processRecord, startedAt: probe.startedAt, wallSeconds },
       runtimeProbe,
+      runtime: {
+        kind: program.runtime.kind,
+        version,
+        binarySha256: program.runtime.binarySha256,
+        platform: platform(),
+        architecture: arch(),
+      },
       isolation: prepared.invocation.isolation,
       logs,
       outputs,

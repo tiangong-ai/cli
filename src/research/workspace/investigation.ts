@@ -682,20 +682,39 @@ export async function inspectInvestigation(root: string, projectId: string, id: 
     await import("./investigation-attempt.js");
   const history = await investigationAttemptHistory(root, projectId, definition, events);
   const remaining = investigationRemaining(definition, history);
+  const { loadInvestigationCandidates } = await import("./investigation-candidate.js");
+  const candidates = await loadInvestigationCandidates(
+    root,
+    projectId,
+    definition,
+    events,
+    history,
+  );
+  const candidate = candidates.at(-1);
   return {
     projectId,
     investigationId: id,
     definitionSha256: definition.recordSha256,
     status: history.some((a) => !a.record)
       ? "incomplete"
-      : remaining.runs === 0 ||
-          remaining.wallSeconds < 1 ||
-          remaining.costUpperBoundUsd + 1e-9 < definition.plan.limits.maxRunCostUsd
-        ? "exhausted"
-        : history.length
-          ? "investigating"
-          : "authorized",
+      : candidate
+        ? "candidate-ready"
+        : remaining.runs === 0 ||
+            remaining.wallSeconds < 1 ||
+            remaining.costUpperBoundUsd + 1e-9 < definition.plan.limits.maxRunCostUsd
+          ? "exhausted"
+          : history.length
+            ? "investigating"
+            : "authorized",
     remaining,
+    candidate: candidate
+      ? {
+          recordSha256: candidate.recordSha256,
+          attemptSha256: candidate.attemptSha256,
+          recipeSha256: candidate.recipeSha256,
+          certification: "not-certified",
+        }
+      : null,
     actualCostUsd: null,
     attempts: history.map((a) => ({
       attemptId: a.start.attemptId,

@@ -198,6 +198,7 @@ await writeFile(process.argv[3],JSON.stringify({schemaVersion:1,solverReached:va
         assert.equal(result.record.outcome, outcome);
         assert.equal(result.record.purpose, "diagnostic-candidate-only");
         assert.equal(result.record.actualCostUsd, null);
+        assert.equal(result.record.runtime.version, process.version);
         assert.ok(result.record.process.wallSeconds >= 0);
         observedWall += result.record.process.wallSeconds;
         if (variant === 0) {
@@ -266,6 +267,44 @@ await writeFile(process.argv[3],JSON.stringify({schemaVersion:1,solverReached:va
       assert.equal(exhausted.status, "exhausted");
       assert.equal(exhausted.remaining.runs, 0);
       assert.equal(exhausted.attempts.length, 5);
+      const selectionPath = join(fx.files, "selected-candidate.json");
+      await writeFile(
+        selectionPath,
+        JSON.stringify({
+          schemaVersion: 1,
+          selectionId: "candidate-main",
+          investigationId: "solver-diagnosis",
+          attemptId: "attempt-3",
+          reason:
+            "Choose the observed feasible synthetic configuration for explicit later promotion",
+        }),
+      );
+      const selected = await command("select", ["--input", selectionPath]);
+      assert.equal(selected.exitCode, 0, selected.stderr);
+      const candidate = JSON.parse(selected.stdout);
+      assert.equal(candidate.kind, "tiangong-investigation-candidate");
+      assert.equal(candidate.purpose, "diagnostic-candidate-only");
+      assert.equal(candidate.recipe.runtime.version, process.version);
+      assert.equal(candidate.recipe.script.sha256, await sha256File(scriptPath));
+      assert.equal(candidate.recipe.inputs[0].sha256, fx.artifact.sha256);
+      assert.deepEqual(candidate.recipe.configuration, { variant: 3 });
+      assert.deepEqual(candidate.recipe.telemetry.requiredStatuses, ["runStatus", "modelStatus"]);
+      const selectedJournal = await readFile(workspacePaths(fx.root).journal, "utf8");
+      assert.deepEqual(
+        JSON.parse((await command("select", ["--input", selectionPath])).stdout),
+        candidate,
+      );
+      assert.equal(await readFile(workspacePaths(fx.root).journal, "utf8"), selectedJournal);
+      const candidateStatus = JSON.parse(
+        (await command("status", ["--investigation", "solver-diagnosis"])).stdout,
+      );
+      assert.equal(candidateStatus.status, "candidate-ready");
+      assert.equal(candidateStatus.candidate.recordSha256, candidate.recordSha256);
+      assert.equal(candidateStatus.candidate.certification, "not-certified");
+      const taskStatus = JSON.parse((await fx.task(["status"])).stdout);
+      assert.equal(taskStatus.currentScope.requirements[0].status, "unanswered");
+      assert.equal(taskStatus.executionCertified, false);
+
       // A real calculation finishes but durable result storage fails. Its known
       // start keeps the full uncertainty reservation and must never be rerun.
       const diagnosticInput = { ...input, investigationId: "diagnostic-contract" };

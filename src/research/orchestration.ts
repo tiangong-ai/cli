@@ -1,4 +1,8 @@
 import {
+  selectInvestigationCandidate,
+  investigationCandidateInputSchema,
+} from "./workspace/investigation-candidate.js";
+import {
   observeInvestigationAttempt,
   investigationAttemptInputSchema,
 } from "./workspace/investigation-attempt.js";
@@ -262,6 +266,7 @@ export function researchOrchestrationHelp(): string {
   tiangong-ai research project investigation plan <project> --input <json-file> [--workspace <path>] [--json]
   tiangong-ai research project investigation approve <project> --input <json-file> --confirm <plan-sha256> --authorization-source <text-file> [--workspace <path>] [--json]
   tiangong-ai research project investigation attempt <project> --input <json-file> [--workspace <path>] [--json]
+  tiangong-ai research project investigation select <project> --input <json-file> [--workspace <path>] [--json]
   tiangong-ai research project investigation status <project> --investigation <id> [--workspace <path>] [--json]
   tiangong-ai research scientific amendment status <project> [--workspace <path>] [--json]
   tiangong-ai research project task run observe <project> --input <json-file> --confirm-execution [--workspace <path>] [--json]
@@ -874,6 +879,8 @@ async function runSchema(argv: string[], io: CliIO): Promise<number> {
     schema = scientificDesignSchema();
   } else if (stage === "scientific-fulfillment") {
     schema = scientificFulfillmentSchema();
+  } else if (stage === "investigation-candidate") {
+    schema = investigationCandidateInputSchema();
   } else if (stage === "investigation-attempt") {
     schema = investigationAttemptInputSchema();
   } else if (stage === "investigation") {
@@ -1172,7 +1179,7 @@ async function runProject(argv: string[], io: CliIO): Promise<number> {
   if (!action || action === "--help" || action === "-h") return writeHelp(io);
   if (action === "investigation") {
     const [operation, ...arguments_] = rest;
-    if (!["plan", "approve", "status", "attempt"].includes(operation ?? ""))
+    if (!["plan", "approve", "status", "attempt", "select"].includes(operation ?? ""))
       throw unknownAction("research project investigation", operation ?? "");
     const args = parseStrictArgs(
       arguments_,
@@ -1215,13 +1222,15 @@ async function runProject(argv: string[], io: CliIO): Promise<number> {
           ? await planInvestigation(root, projectId, value)
           : operation === "attempt"
             ? await observeInvestigationAttempt(root, projectId, value)
-            : await approveInvestigation(
-                root,
-                projectId,
-                value,
-                strictString(args, "confirm"),
-                strictString(args, "authorization-source"),
-              ),
+            : operation === "select"
+              ? await selectInvestigationCandidate(root, projectId, value)
+              : await approveInvestigation(
+                  root,
+                  projectId,
+                  value,
+                  strictString(args, "confirm"),
+                  strictString(args, "authorization-source"),
+                ),
         args,
       );
     }
