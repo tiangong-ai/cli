@@ -203,6 +203,8 @@ refresh, sanitized offline status/doctor and reuse after equivalent config-sourc
 changes. Bridge tests preserve transport-only readiness without requiring an
 installed model executable. These fixtures prove configured-routing behavior;
 they do not attest an external service or send research material to a provider.
+The synthetic reviewer also reports a different mapped model name; its response
+must retain the configured alias binding and keep the reported name in telemetry.
 
 Run before delivery:
 

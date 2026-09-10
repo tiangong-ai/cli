@@ -341,8 +341,8 @@ export async function executeAgent(request: AgentExecutionRequest): Promise<Exec
     outputTokens,
     costUsd,
     wallSeconds,
-    model: parsed.model ?? request.route.model,
-    runtime: { ...runtime, model: parsed.model ?? request.route.model },
+    model: request.route.model,
+    runtime,
     ...((request.toolPolicy === "none" || request.toolPolicy === "packet-read") &&
     request.brokerUrl === null
       ? {
@@ -359,7 +359,10 @@ export async function executeAgent(request: AgentExecutionRequest): Promise<Exec
           },
         }
       : {}),
-    telemetry: sanitizeExecutionTelemetry(parsed.telemetry, secrets),
+    telemetry: sanitizeExecutionTelemetry(
+      { ...parsed.telemetry, reportedModel: parsed.model },
+      secrets,
+    ),
     ...(artifactViews ? { artifactReads: artifactViews.receipts() } : {}),
   };
 }
@@ -1368,7 +1371,7 @@ function parseAgentResult(
     let inputTokens = 0;
     let cachedInputTokens = 0;
     let outputTokens = 0;
-    let model: string | null = route.model;
+    let model: string | null = null;
     const messages: string[] = [];
     let parsedEvents = 0;
     const eventCounts: Record<string, number> = {};
@@ -1459,7 +1462,7 @@ function parseAgentResult(
         numeric(usage.cache_creation_input_tokens) + numeric(usage.cache_read_input_tokens),
       outputTokens: numeric(usage.output_tokens),
       costUsd: numeric(value.total_cost_usd),
-      model: typeof value.model === "string" ? value.model : route.model,
+      model: typeof value.model === "string" ? value.model : null,
       parseFailed: providerFailed || (!structured && typeof value.result !== "string"),
       telemetry: {
         eventCounts: { result: 1 },
@@ -1478,7 +1481,7 @@ function parseAgentResult(
       cachedInputTokens: 0,
       outputTokens: 0,
       costUsd: 0,
-      model: route.model,
+      model: null,
       parseFailed: true,
       telemetry: {
         eventCounts: {},
@@ -1756,6 +1759,14 @@ function sanitizeExecutionTelemetry(
 ): AgentExecutionTelemetry {
   return {
     ...telemetry,
+    ...(telemetry.reportedModel === undefined
+      ? {}
+      : {
+          reportedModel:
+            telemetry.reportedModel === null
+              ? null
+              : sanitizeResearchText(telemetry.reportedModel, secrets).slice(0, 300),
+        }),
     providerErrors: telemetry.providerErrors.map((error) =>
       sanitizeResearchText(error, secrets).slice(0, 1_000),
     ),

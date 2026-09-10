@@ -516,6 +516,8 @@ export interface ReviewExecutionAttestation {
 }
 
 export interface AgentExecutionTelemetry {
+  /** Sanitized CLI self-report, not an independently verified upstream identity. */
+  reportedModel?: string | null;
   eventCounts: Record<string, number>;
   itemCounts: Record<string, number>;
   toolCalls: number;

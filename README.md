@@ -1106,6 +1106,10 @@ the actual upstream provider/model or historical HTTP destinations. A null
 endpoint means no supported explicit endpoint was resolved, not an official
 provider guarantee. Wrappers, proxies and runtime defaults remain outside that
 identity guarantee. Bridge status identifies transport readiness separately.
+Execution `model` and `runtime.model` retain the configured alias; optional
+`telemetry.reportedModel` records the sanitized CLI self-report, with null when
+absent. A mapped response name does not change the configured runtime identity
+or require another smoke. It is not independently verified provider identity.
 
 WorkBuddy/CodeBuddy capsule teardown never requests recursive bulk deletion
 inside the outer IDE. Native stages remove only the single active-session

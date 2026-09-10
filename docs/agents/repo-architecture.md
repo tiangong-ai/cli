@@ -627,6 +627,10 @@ bridge fingerprint responses, doctor checks and execution results expose the
 configured routing with upstream identity explicitly unverified. Default routes,
 opaque wrappers, credentials and actual network hops are not provider identity
 attestations. No provider registry, live identity probe or new lifecycle is added.
+Execution `model` and the runtime fingerprint retain the configured model alias;
+the separate nullable `telemetry.reportedModel` is a sanitized CLI self-report.
+A mapped response name cannot invalidate the unchanged configured route or
+make the bridge/scientific gate mistake provider telemetry for the route binding.
 `artifact-views.ts` owns immutable packet directories, opaque object selection,
 UTF-8/base64 byte views, exact delivery receipts and once-per-selected-object
 verification for adjacent pages. `artifact-view-mcp.ts` exposes only directory

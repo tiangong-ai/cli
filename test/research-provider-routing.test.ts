@@ -239,6 +239,7 @@ it(
       assert.equal(result.stdout, '{"ok":true}');
       assert.equal(result.model, "sonnet");
       assert.equal(result.runtime?.model, "sonnet");
+      assert.equal(result.telemetry?.reportedModel, "synthetic-glm-mapped");
       assert.equal(sameRuntimeFingerprint(result.runtime!, currentRuntime), true);
       assert.equal(await readFile(join(projectRoot, "model.txt"), "utf8"), "approved-custom-model");
       assert.equal(result.runtime?.providerRouting?.endpointOrigin, "https://first.example.test");
