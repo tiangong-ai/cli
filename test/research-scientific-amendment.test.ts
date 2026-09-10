@@ -21,7 +21,8 @@ import {
 } from "../src/research/workspace/storage.js";
 import type { ResearchPolicyBinding } from "../src/research/workspace/types.js";
 import { initializeResearchWorkspace } from "../src/research/workspace/workspace.js";
-import { scientificDesignInput } from "./helpers/scientific-design.js";
+import { loadScientificFulfillmentView } from "../src/research/workspace/scientific-fulfillment.js";
+import { scientificDesignInput, passResearchDesignGate } from "./helpers/scientific-design.js";
 
 describe("owner-authorized pre-analysis scientific amendments", () => {
   it("plans an exact pending-rule binding correction without changing the project or journal", async () => {
@@ -58,6 +59,7 @@ describe("owner-authorized pre-analysis scientific amendments", () => {
         policy,
         designInput,
       );
+      await passResearchDesignGate(root, projectId);
       const beforeProject = canonicalJson(await loadProject(root, projectId));
       const beforeJournal = await readFile(workspacePaths(root).journal, "utf8");
       const originalPath = join(
@@ -117,6 +119,63 @@ describe("owner-authorized pre-analysis scientific amendments", () => {
       ]);
       assert.equal(repeated.exitCode, 0, repeated.stderr);
       assert.equal(JSON.parse(repeated.stdout).planSha256, plan.planSha256);
+      const planPath = join(root, "reviewed-plan.json");
+      const authorizationPath = join(root, "owner-confirmation.txt");
+      await writeJsonAtomic(planPath, plan);
+      await writeTextAtomic(
+        authorizationPath,
+        "Synthetic owner confirmation of this exact pending-rule binding correction.",
+      );
+      const command = [
+        "research",
+        "scientific",
+        "amendment",
+        "apply",
+        projectId,
+        "--plan",
+        planPath,
+        "--authorization-source",
+        authorizationPath,
+        "--workspace",
+        root,
+        "--json",
+      ];
+      const unconfirmed = await invoke(command);
+      assert.notEqual(unconfirmed.exitCode, 0);
+      assert.equal(await readFile(workspacePaths(root).journal, "utf8"), beforeJournal);
+      const applied = await invoke([...command, "--confirm", plan.planSha256]);
+      assert.equal(applied.exitCode, 0, applied.stderr);
+      const record = JSON.parse(applied.stdout);
+      assert.equal(record.plan.planSha256, plan.planSha256);
+      assert.equal(record.authorization.kind, "operator-confirmation");
+      assert.equal(record.authorization.sourceSha256, await sha256File(authorizationPath));
+      const amended = await loadProject(root, projectId);
+      assert.equal(amended.scientificDesign!.designSha256, beforeDesign);
+      assert.equal(amended.scientificDesign!.gates["research-design"].status, "pending");
+      assert.equal(await sha256File(originalPath), beforeDesign);
+      const view = await loadScientificFulfillmentView(root, amended);
+      const amendedRule = view.contract.policyRuleDispositions.find(
+        (item) => item.ruleId === rule.ruleId,
+      )!;
+      assert.deepEqual(amendedRule.uncertaintyParameterIds, [parameterId]);
+      assert.equal(amendedRule.status, "planned");
+      const journalAfter = await readFile(workspacePaths(root).journal, "utf8");
+      const replay = await invoke([...command, "--confirm", plan.planSha256]);
+      assert.equal(replay.exitCode, 0, replay.stderr);
+      assert.equal(JSON.parse(replay.stdout).recordSha256, record.recordSha256);
+      assert.equal(await readFile(workspacePaths(root).journal, "utf8"), journalAfter);
+      const status = await invoke([
+        "research",
+        "scientific",
+        "amendment",
+        "status",
+        projectId,
+        "--workspace",
+        root,
+        "--json",
+      ]);
+      assert.equal(status.exitCode, 0, status.stderr);
+      assert.equal(JSON.parse(status.stdout).amendmentSha256, record.recordSha256);
     } finally {
       await rm(root, { recursive: true, force: true });
     }
