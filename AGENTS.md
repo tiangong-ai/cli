@@ -65,6 +65,15 @@ This repository owns the Tiangong AI command-line interface.
 - `tiangong-ai research search`
 - `tiangong-ai education search`
 
+Bounded computational investigations share an exact operator-approved envelope
+across immutable native attempts. The current host owns hypotheses and candidate
+selection; the CLI owns scope/resource admission, observation, closure and audit.
+A selected candidate requires separate promotion, existing scientific fulfillment
+or successor approval, and a fresh certification before task-check intake. Existing
+independent review remains required. Calculation output bounds include observed
+streams and declared-file peaks; they do not establish a scratch-filesystem quota,
+hermetic dependencies or scientific correctness.
+
 The built-in atomic data catalog currently contains 20 independently
 discoverable capabilities, 15 available and 5 suspended, for environmental,
 regulatory, news-event, social, video, and water-project data. GDELT DOC,

@@ -613,6 +613,25 @@ committed replay does not execute again. Packets and task audit retain the exact
 program, lock, inputs, outputs and event relationships. Unobserved computational
 reports remain `unverified-execution`; evidence/proof checks are not forced to run.
 
+`investigation*.ts` coordinates fixed-input diagnostic calculations using the
+existing native process observer, immutable task objects, verified journal and
+project budget/mutation recovery. Exact approval reserves an envelope; attempts
+record hypotheses, parents, changed options, declared telemetry and resource use.
+The shared resource view reserves unresolved investigation and certification wall
+time without a persistent cache. Closing preserves records and settles unused
+allocation; it does not certify a result.
+
+Selected recipes require separate promotion authority. Existing fulfillment or a
+reviewed successor freezes the scientific objects, then the native observer runs
+one exact certification with calculation confinement for both probe and program.
+Task intake/context requires that certification for investigated requirements and
+still delegates scientific acceptance to the existing review. Indexed portable
+read stores reuse investigation validators, while source closure follows explicit
+incoming promotion references rather than coincidental project-name strings.
+Output guards count streams and observed declared-file peaks, stop over-budget
+calculations, retain observed overshoot and reject their result artifacts. They
+are not a scratch-disk quota or dependency attestation.
+
 `artifact-read-audit.ts` validates persisted read directories, intrinsic receipt
 identity, packet/delivery authority and exact byte selectors. It groups pages by
 object so full bytes and UTF-8 validity are loaded once per object during this

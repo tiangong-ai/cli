@@ -798,3 +798,21 @@ The portable verifier shares the producer's atom parser, including its deliberat
 exclusion of registration time from the atom content hash. Unamended design
 reads are checked to avoid full-journal rereads. Fresh container RED/GREEN is
 authoritative; these protocol cases do not claim live scientific qualification.
+
+Investigation regressions use real synthetic frozen sources and ordinary local
+processes. They cover one exact envelope, four diagnostic outcomes, missing
+required solver telemetry, parent/configuration links, idempotent replay,
+interrupted result storage, closure and allocation release, and competing
+investigation/certification time reservations. Separate confinement probes test
+workspace reads/writes, symlink escape, host network access and Linux process-root
+access with both disjoint roots and a workspace beneath a runtime root.
+
+The scientific fixture exercises a selected recipe, separate promotion,
+predeclared fulfillment, fresh certification, rejection of old ordinary results,
+and a real reviewed recovery fork with its own certification. Source and
+successor audit bundles verify after deleting the workspace; recomputed manifests
+cannot erase the selected candidate or graft certification purpose onto ordinary
+runs. Output cases exercise stream/file/combined overflow, cumulative exhaustion,
+failed certification and inherited-worker cleanup. These fixtures do not prove
+scientific correctness, provider invoices, arbitrary daemon containment or
+observer-death recovery; qualify those claims separately before making them.

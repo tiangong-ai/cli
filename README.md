@@ -1918,6 +1918,91 @@ A completed workflow or approved reduced scope must not be described as satisfyi
 unanswered original requirements. Use the selected runtime's help/schema discovery
 once before adopting these commands; they are not an implicit runtime upgrade.
 
+## Bounded computational investigations
+
+Use an investigation for a still-unanswered computational requirement when the
+native producer needs several diagnostic attempts over fixed acquired inputs.
+The native host supplies hypotheses, programs, configuration choices and
+interpretation; the CLI observes individual calculations and records their
+relationships. It does not launch another producer or retry loop.
+
+Discover the exact selected CLI's closed schemas first:
+
+```bash
+tiangong-ai research schema show investigation --json
+tiangong-ai research schema show investigation-attempt --json
+tiangong-ai research schema show investigation-candidate --json
+tiangong-ai research schema show investigation-promotion --json
+tiangong-ai research schema show investigation-close --json
+```
+
+An envelope binds the requirement, Policy/design and acquisition versions, exact
+canonical input hashes, existing Node/Python runtimes, program and environment
+bytes, allowed numerical options and required diagnostic metrics/status fields.
+Configure the numeric project budget before approval. Limits include maximum
+runs, cumulative/per-run wall time, cost allocations, per-run `maxOutputBytes`
+and cumulative `maxTotalOutputBytes`. The per-run byte limit is at most 512 MiB.
+A read-only plan starts no program; approval requires its exact hash and the
+actual supplied authorization text:
+
+```bash
+tiangong-ai research project investigation plan PROJECT --input /absolute/envelope.json --json
+tiangong-ai research project investigation approve PROJECT --input /absolute/envelope.json --confirm PLAN_SHA256 --authorization-source /absolute/approval.txt --json
+tiangong-ai research project investigation attempt PROJECT --input /absolute/attempt.json --json
+tiangong-ai research project investigation status PROJECT --investigation INVESTIGATION_ID --json
+```
+
+Add `--workspace /absolute/research` when operating outside the selected research
+workspace. Use a separate scratch directory outside that workspace. Calculation
+confinement denies host network access and workspace reads, makes runtime roots
+read-only, and allows capsule writes. An unsupported boundary is refused before
+execution. Environment locks remain declarations, not dependency attestation;
+programs that require installation or broader capabilities need a separately
+reviewed scope.
+
+Within the approved envelope, attempts need no repeated owner approval. Each
+records a hypothesis, parent attempt (the previous committed attempt by default,
+or explicit `parentAttemptId`), configuration changes, exact results and bounded
+logs. Missing declared solver telemetry is diagnostic-incomplete. Process or
+solver failures remain diagnostic observations, not scientific answers.
+
+Output accounting includes stdout/stderr and the observed high-water sizes of
+declared output files, including the runtime probe. Streams are checked as they
+arrive; files are checked periodically and at completion. Observed overshoot is
+retained honestly; this is not a quota on every temporary filesystem write.
+Exceeding the byte budget terminates the calculation, prevents result admission
+and stops further attempts under that envelope. Unknown cost remains unknown;
+software accounting retains the approved upper-bound allocation.
+
+An identical committed attempt returns its original result. An unresolved start
+keeps its reservation and cannot be blindly replayed or replaced. Status exposes
+current authority, reservations and the permitted next action. `select` records a
+candidate; `close` records why investigation stopped and releases unused cost
+allocation while preserving history. It refuses closure with unresolved work.
+
+```bash
+tiangong-ai research project investigation select PROJECT --input /absolute/selection.json --json
+tiangong-ai research project investigation close PROJECT --input /absolute/closure.json --json
+tiangong-ai research project investigation promotion plan PROJECT --input /absolute/promotion.json --json
+tiangong-ai research project investigation promotion approve PROJECT --input /absolute/promotion.json --confirm PLAN_SHA256 --authorization-source /absolute/promotion-approval.txt --json
+```
+
+Promotion approval alone does not freeze scientific objects or satisfy the task.
+Use existing scientific object registration and fulfillment for predeclared
+pending slots, or a separately approved authoritative successor for a changed
+frozen design. Then supply `investigationPromotionSha256` in a new `task run
+observe` request using the exact frozen recipe. That approval admits one fresh
+certification; a failed or unresolved certification does not authorize another.
+A candidate or older ordinary run cannot substitute for it. A passed observation
+can enter task-check records, with the existing independent review still required
+before the task is answered.
+
+Portable audits retain the investigation, attempt, candidate, promotion,
+certification and closure relationships. A successor includes the explicitly
+referenced source investigation's immutable records and blobs, excluding local
+routing and unrelated investigations. Hash/relationship verification does not
+establish authorship, hermetic execution or scientific truth.
+
 ## Research Search
 
 Forward research-oriented search requests to SCI, report, patent, and ESG edge
