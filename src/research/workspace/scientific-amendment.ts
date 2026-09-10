@@ -6,6 +6,7 @@ import { CliError } from "../../errors.js";
 import { appendJournalEvent, readVerifiedJournal } from "./journal.js";
 import { assertProjectAuthority, projectAuthorityIndex } from "./project-authority.js";
 import { loadProject } from "./projects.js";
+import { assertResearchPolicyBinding } from "./research-policy.js";
 import { configuredResearchSecrets, sanitizeResearchValue } from "./sanitization.js";
 import { evaluateScientificDesign, type ScientificDesignContract } from "./scientific-design.js";
 import {
@@ -166,6 +167,8 @@ export async function planScientificAmendment(
       "Amend only an idle authoritative pre-analysis project. Resolve the active session or handoff; substantive or post-analysis changes require a reviewed successor.",
       "RESEARCH_SCIENTIFIC_AMENDMENT_UNAVAILABLE",
     );
+  if (!project.publicationPolicy) throw conflict();
+  await assertResearchPolicyBinding(root, project.publicationPolicy);
   const view = await loadScientificFulfillmentView(root, project, undefined, events);
   const effective = structuredClone(view.contract);
   const declaredRules = new Set(project.publicationPolicy?.resolvedRules ?? []);
@@ -427,7 +430,12 @@ async function readImmutable(
 
 async function writeImmutable(root: string, locator: string, text: string): Promise<void> {
   const path = await controlledPath(root, locator, true);
-  if (await pathExists(path)) {
+  const existing = await lstat(path).catch((error: NodeJS.ErrnoException) => {
+    if (error.code === "ENOENT") return null;
+    throw conflict();
+  });
+  if (existing) {
+    if (!existing.isFile() || existing.isSymbolicLink()) throw conflict();
     if ((await readImmutable(root, locator)) !== text) throw conflict();
     return;
   }

@@ -282,8 +282,10 @@ describe("owner-authorized pre-analysis scientific amendments", () => {
       });
       syncBuiltinESMExports();
       try {
-        const interrupted = await invoke([...command, "--confirm", plan.planSha256]);
-        assert.notEqual(interrupted.exitCode, 0);
+        await assert.rejects(
+          invoke([...command, "--confirm", plan.planSha256]),
+          (error: unknown) => (error as NodeJS.ErrnoException).code === "EIO",
+        );
         assert.equal(projectionFailures, 2);
       } finally {
         renamer.mock.restore();
