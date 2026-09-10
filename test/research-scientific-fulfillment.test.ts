@@ -1,4 +1,12 @@
 import assert from "node:assert/strict";
+import {
+  defineProjectTask,
+  taskRequirementSha256,
+} from "../src/research/workspace/task-contract.js";
+import {
+  recordProjectTaskAcceptance,
+  compileTaskAcceptanceContext,
+} from "../src/research/workspace/task-acceptance.js";
 import fs from "node:fs/promises";
 import { mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { syncBuiltinESMExports } from "node:module";
@@ -95,6 +103,32 @@ describe("predeclared scientific parameter fulfillment", () => {
         policy,
         designInput,
       );
+      const affectedDeclaration = original.policyRuleDispositions.find(
+        (item) => item.ruleId === "robustness-and-uncertainty-reviewed",
+      )!;
+      const amendmentRequirements = [
+        {
+          id: "declaration-check",
+          text: "Inspect the current planned robustness declaration and parameter bindings.",
+          acceptance: "The inspection reflects the current declaration and its bound claim.",
+          checkKind: "evidence" as const,
+          designClaimIds: affectedDeclaration.claimIds,
+          coverageDimensionIds: [],
+        },
+        {
+          id: "source-check",
+          text: "Inspect the unchanged admitted source parameter text.",
+          acceptance: "Source text and its admitted atom remain readable and consistent.",
+          checkKind: "evidence" as const,
+          designClaimIds: [],
+          coverageDimensionIds: [],
+        },
+      ];
+      await defineProjectTask(root, projectId, {
+        schemaVersion: 1,
+        originalRequest: "Inspect the planned declaration and unchanged source independently.",
+        requirements: amendmentRequirements,
+      });
       const inputPath = join(root, "source.txt");
       const states = parameter.states.map((state, index) => ({
         stateId: state.id,
@@ -271,6 +305,28 @@ describe("predeclared scientific parameter fulfillment", () => {
       const plannedRule = beforeAmendment.contract.policyRuleDispositions.find(
         (item) => item.ruleId === "robustness-and-uncertainty-reviewed",
       )!;
+      const inspectionPath = join(root, "declaration-inspection.txt");
+      await writeFile(inspectionPath, JSON.stringify(plannedRule));
+      const checks = amendmentRequirements.map((requirement) => ({
+        schemaVersion: 1,
+        requirementId: requirement.id,
+        requirementSha256: taskRequirementSha256(requirement),
+        previousRecordSha256: null,
+        outcome: "satisfied",
+        summary: requirement.text,
+        checkKind: "evidence",
+        reportedCommand: null,
+        sourceIds: ["parameter-source"],
+        evidenceAtomIds: [atom.atomId],
+        analysisFindingIds: [],
+        resultFiles: requirement.id === "declaration-check" ? [inspectionPath] : [],
+        limitations: [],
+      }));
+      for (const check of checks) await recordProjectTaskAcceptance(root, projectId, check);
+      const acceptanceBefore = await compileTaskAcceptanceContext(
+        root,
+        await loadProject(root, projectId),
+      );
       const plan = await planScientificAmendment(root, projectId, {
         schemaVersion: 1,
         reason: "Bind the existing source-filled parameter to its planned robustness obligation.",
@@ -295,6 +351,58 @@ describe("predeclared scientific parameter fulfillment", () => {
         await loadProject(root, projectId),
       );
       assert.deepEqual(afterAmendment.records, beforeAmendment.records);
+      const acceptanceAfter = await compileTaskAcceptanceContext(
+        root,
+        await loadProject(root, projectId),
+      );
+      const oldCheck = acceptanceBefore!.requirements.find(
+        (row) => row.id === "declaration-check",
+      )!.record!;
+      assert.equal(
+        acceptanceBefore!.requirements.find((row) => row.id === "declaration-check")!.status,
+        "recorded",
+      );
+      assert.equal(
+        acceptanceAfter!.requirements.find((row) => row.id === "declaration-check")!.status,
+        "stale",
+      );
+      assert.equal(
+        acceptanceAfter!.requirements.find((row) => row.id === "source-check")!.status,
+        "recorded",
+      );
+      assert.notEqual(acceptanceAfter!.contextSha256, acceptanceBefore!.contextSha256);
+      const sourceCheck = acceptanceBefore!.requirements.find(
+        (row) => row.id === "source-check",
+      )!.record!;
+      assert.equal(
+        (await recordProjectTaskAcceptance(root, projectId, checks[1]!)).recordSha256,
+        sourceCheck.recordSha256,
+      );
+      const staleDestination = join(root, "stale-declaration-audit");
+      await exportProjectAuditBundle({ root, projectId, destination: staleDestination });
+      assert.equal((await verifyProjectAuditBundle(staleDestination)).status, "verified");
+      await writeFile(
+        inspectionPath,
+        JSON.stringify(
+          afterAmendment.contract.policyRuleDispositions.find(
+            (item) => item.ruleId === plannedRule.ruleId,
+          ),
+        ),
+      );
+      const freshCheck = await recordProjectTaskAcceptance(root, projectId, {
+        ...checks[0]!,
+        previousRecordSha256: oldCheck.recordSha256,
+        summary: "The current amended declaration now binds the existing source-filled parameter.",
+      });
+      assert.notEqual(freshCheck.recordSha256, oldCheck.recordSha256);
+      const currentAcceptance = await compileTaskAcceptanceContext(
+        root,
+        await loadProject(root, projectId),
+      );
+      assert.equal(
+        currentAcceptance!.requirements.find((row) => row.id === "declaration-check")!.status,
+        "recorded",
+      );
       assert.equal(
         (await loadCurrentEvidenceSnapshot(root, projectId)).snapshotSha256,
         snapshot.snapshotSha256,
