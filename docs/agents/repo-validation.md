@@ -524,6 +524,10 @@ binding, no-overwrite/no-directory-scan behavior, explicit browser handoff, and
 bounded JSON POST broker credential/body redaction. Paper companion tests also
 require execution and doctor to use the installed Skill's locked `runtime.py`,
 including a sanitized actionable missing-runtime error. Authoring readiness
+Paper v3 cases cover a matched identity, equivalent DOI URL input, unresolved or
+wrong-request identity, legacy schema, missing/disagreeing result identity and
+absence of false completion events. No live retrieval is used in those tests.
+Authoring readiness
 tests cover the complete DOCX/PDF/PPTX/XLSX package and command matrices,
 same-runtime binding, component-scoped blocking, all four exact-file functional
 canaries, and the prohibition on implicit pip/npm/system installation.

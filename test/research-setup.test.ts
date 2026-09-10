@@ -2351,7 +2351,46 @@ describe("research setup execution and operator safety", () => {
       assert.notEqual(result.artifact.path, decoyPath);
       assert.equal(result.artifact.sha256, await sha256File(artifactPath));
       const goodManifest = JSON.parse(await readFile(manifestPath, "utf8"));
-      for (const variant of ["unresolved", "wrong-doi", "legacy", "different-result"] as const) {
+      const normalized = await runResearchSetupCompanion(
+        {
+          workspace: root,
+          skillId: "tiangong.academic-paper-download",
+          outputDirectory,
+          doi: "https://doi.org/10.1234/EXAMPLE?from=fixture",
+        },
+        {
+          environment: { PATH: process.env.PATH },
+          runner: async () => ({
+            exitCode: 0,
+            stdout: JSON.stringify({
+              ok: true,
+              data: {
+                results: [
+                  {
+                    success: true,
+                    doi: "10.1234/example",
+                    file: artifactPath,
+                    manifest: manifestPath,
+                    size: pdf.length,
+                    sha256: goodManifest.sha256,
+                    identity_status: "matched",
+                    identity,
+                  },
+                ],
+              },
+            }),
+            stderr: "",
+          }),
+        },
+      );
+      assert.equal(normalized.status, "complete");
+      for (const variant of [
+        "unresolved",
+        "wrong-doi",
+        "legacy",
+        "different-result",
+        "missing-result",
+      ] as const) {
         const manifest = structuredClone(goodManifest);
         if (variant === "unresolved") manifest.identity.status = "unresolved";
         if (variant === "wrong-doi") manifest.identity.requested.doi = "10.1234/different";
@@ -2383,9 +2422,11 @@ describe("research setup execution and operator safety", () => {
                           sha256: goodManifest.sha256,
                           identity_status: "matched",
                           identity:
-                            variant === "different-result"
-                              ? { ...manifest.identity, method: "different" }
-                              : manifest.identity,
+                            variant === "missing-result"
+                              ? undefined
+                              : variant === "different-result"
+                                ? { ...manifest.identity, method: "different" }
+                                : manifest.identity,
                         },
                       ],
                     },
@@ -2406,7 +2447,7 @@ describe("research setup execution and operator safety", () => {
         .split("\n")
         .map((line) => JSON.parse(line))
         .filter((event) => event.type === "research.setup.companion.paper.completed");
-      assert.equal(completed.length, 1);
+      assert.equal(completed.length, 2);
 
       const privateRuntimePath = join(root, "private-runtime-token");
       await assert.rejects(

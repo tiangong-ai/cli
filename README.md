@@ -984,6 +984,11 @@ presentation Skills are post-closure authoring only. Run selected preprocessors
 and acquisition adapters with `research setup companion run`, then admit their
 exact hash-bound output separately. Automatic paper OA exhaustion returns an
 explicit browser handoff and never launches or chooses a browser silently.
+Paper results require the pinned adapter's identity-verified artifact.v3
+manifest: matched document identity must agree between the result and manifest
+and bind the requested or resolved DOI. PDF/manifest paths, bytes and hashes
+remain checked independently. Structural-only legacy metadata cannot establish
+document identity, and successful access does not imply redistribution rights.
 The paper companion and its setup-doctor preflight both enter the verified
 Skill through `scripts/runtime.py`; the CLI never bypasses that lock by invoking
 `fetch.py` or importing `pypdf` from ambient Python. A missing runtime remains

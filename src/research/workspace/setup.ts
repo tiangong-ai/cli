@@ -4276,13 +4276,39 @@ async function runAcademicPaperCompanion(input: {
     );
   }
   const manifest = await readJsonFile<Record<string, unknown>>(manifestPath, "Paper manifest");
+  if (manifest.schema_version !== "academic-paper-download.artifact.v3") {
+    throw companionArtifactError(
+      input.root,
+      "The PDF manifest must use the pinned adapter's identity-verified artifact.v3 contract; legacy structural-only metadata does not establish document identity.",
+    );
+  }
   if (
-    manifest.schema_version !== "academic-paper-download.artifact.v2" ||
     manifest.file !== artifactPath ||
     manifest.sha256 !== artifactSha256 ||
     manifest.size !== artifactInfo.size
   ) {
     throw companionArtifactError(input.root, "The manifest does not bind the exact committed PDF.");
+  }
+  const identity = manifest.identity;
+  const resolvedDoi = normalizedCompanionDoi(manifest.doi);
+  if (
+    !resolvedDoi ||
+    normalizedCompanionDoi(result.doi) !== resolvedDoi ||
+    (doi && normalizedCompanionDoi(doi) !== resolvedDoi) ||
+    manifest.identity_status !== "matched" ||
+    result.identity_status !== "matched" ||
+    !isObject(result.identity) ||
+    !isObject(identity) ||
+    identity.schema_version !== "academic-paper-download.identity.v1" ||
+    identity.status !== "matched" ||
+    !isObject(identity.requested) ||
+    normalizedCompanionDoi(identity.requested.doi) !== resolvedDoi ||
+    canonicalJson(result.identity) !== canonicalJson(identity)
+  ) {
+    throw companionArtifactError(
+      input.root,
+      "The pinned adapter's document identity does not bind the requested or resolved DOI and exact manifest.",
+    );
   }
   await verifyPdfEnvelope(artifactPath, artifactInfo.size, input.root);
   const manifestSha256 = await sha256File(manifestPath);
@@ -4296,6 +4322,7 @@ async function runAcademicPaperCompanion(input: {
       skillTreeSha256: input.skill.expectedTreeSha256,
       sourceRef: setupSource(input.skill.sourceId).immutableRef,
       querySha256: sha256Text(doi ?? title!),
+      documentIdentityStatus: "matched",
       source: typeof manifest.source === "string" ? manifest.source : null,
       artifact: { sha256: artifactSha256, bytes: artifactInfo.size },
       manifest: { sha256: manifestSha256, bytes: manifestInfo.size },
@@ -4314,6 +4341,7 @@ async function runAcademicPaperCompanion(input: {
     provenance: companionProvenance(input.plan, input.skill),
     validation: [
       "pinned-adapter-pypdf",
+      "pinned-adapter-pdf-identity",
       "pdf-header",
       "pdf-eof",
       "size",
@@ -4322,6 +4350,23 @@ async function runAcademicPaperCompanion(input: {
     ],
     next: "Admit the exact PDF or a derived hash-bound view as a declared research input.",
   };
+}
+
+function normalizedCompanionDoi(value: unknown): string | null {
+  if (typeof value !== "string") return null;
+  let raw = value.trim();
+  try {
+    if (/^(?:https?:\/\/)?(?:dx\.)?doi\.org\//i.test(raw)) {
+      const url = new URL(/^https?:\/\//i.test(raw) ? raw : `https://${raw}`);
+      raw = decodeURIComponent(url.pathname.replace(/^\/+/, ""));
+    } else {
+      raw = decodeURIComponent(raw).replace(/^(?:doi:\s*|(?:dx\.)?doi\.org\/)/i, "");
+    }
+  } catch {
+    return null;
+  }
+  raw = raw.trim().toLowerCase();
+  return /^10\.\d{4,9}\/\S+$/.test(raw) && !/[\u0000-\u001f]/.test(raw) ? raw : null;
 }
 
 function safeAcademicPaperRuntimeErrorCode(value: unknown): string {
