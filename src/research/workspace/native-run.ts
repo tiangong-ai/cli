@@ -15,7 +15,8 @@ import {
 } from "./project-mutations.js";
 import { settleProjectCost } from "./project-budget.js";
 import { Ajv2020 } from "ajv/dist/2020.js";
-import { spawn } from "node:child_process";
+import { fork, spawn } from "node:child_process";
+import { fileURLToPath } from "node:url";
 import { createHash } from "node:crypto";
 import { constants } from "node:fs";
 import { chmod, copyFile, lstat, mkdir, mkdtemp, readFile, realpath } from "node:fs/promises";
@@ -1033,13 +1034,62 @@ export async function captureProcess(
     outputLimitExceeded?: boolean;
     observedOutputBytes?: number;
   }>((resolvePromise) => {
-    const child = spawn(binary, args, {
-      cwd,
-      env,
-      shell: false,
-      detached: platform() !== "win32",
-      stdio: ["ignore", "pipe", "pipe"],
-    });
+    const supervised = Boolean(outputLimit);
+    const sourceRuntime = import.meta.url.endsWith(".ts");
+    const supervisorPath = fileURLToPath(
+      new URL(
+        sourceRuntime ? "./native-process-supervisor.ts" : "./native-process-supervisor.js",
+        import.meta.url,
+      ),
+    );
+    const child = supervised
+      ? fork(supervisorPath, [], {
+          cwd,
+          env,
+          detached: platform() !== "win32",
+          execArgv: sourceRuntime ? ["--import", import.meta.resolve("tsx")] : [],
+          stdio: ["ignore", "pipe", "pipe", "ipc"],
+        })
+      : spawn(binary, args, {
+          cwd,
+          env,
+          shell: false,
+          detached: platform() !== "win32",
+          stdio: ["ignore", "pipe", "pipe"],
+        });
+    let supervisorResult: {
+      exitCode: number | null;
+      signal: string | null;
+      timedOut: boolean;
+    } | null = null;
+    if (supervised) {
+      child.on("message", (value: unknown) => {
+        if (
+          isObject(value) &&
+          value.kind === "result" &&
+          (value.exitCode === null || Number.isInteger(value.exitCode)) &&
+          (value.signal === null || typeof value.signal === "string") &&
+          typeof value.timedOut === "boolean"
+        )
+          supervisorResult = {
+            exitCode: value.exitCode as number | null,
+            signal: value.signal as string | null,
+            timedOut: value.timedOut,
+          };
+      });
+      child.send(
+        {
+          kind: "start",
+          binary,
+          args,
+          env,
+          deadlineNs: (start + BigInt(Math.ceil(timeoutSeconds * 1e9))).toString(),
+        },
+        (error) => {
+          if (error) child.kill("SIGTERM");
+        },
+      );
+    }
     const out = createHash("sha256"),
       err = createHash("sha256");
     const stdout: Buffer[] = [],
@@ -1052,6 +1102,17 @@ export async function captureProcess(
       spawnFailed = false;
     const terminate = (signal: NodeJS.Signals) => {
       if (!child.pid) return;
+      if (supervised) {
+        if (child.connected)
+          child.send(
+            { kind: "stop", reason: timedOut ? "timeout" : cancelled ? "cancel" : "output-limit" },
+            (error) => {
+              if (error && child.exitCode === null) child.kill("SIGTERM");
+            },
+          );
+        else if (child.exitCode === null) child.kill("SIGTERM");
+        return;
+      }
       if (!outputLimit && (child.exitCode !== null || child.signalCode !== null)) return;
       try {
         if (platform() === "win32") child.kill(signal);
@@ -1060,7 +1121,7 @@ export async function captureProcess(
         if (child.exitCode === null && child.signalCode === null) child.kill(signal);
       }
     };
-    if (outputLimit) child.once("exit", () => terminate("SIGKILL"));
+
     let outputLimitExceeded = false;
     const filePeaks = new Map<string, number>();
     let pendingScan: Promise<void> | null = null;
@@ -1101,7 +1162,7 @@ export async function captureProcess(
       timedOut = true;
       terminate("SIGKILL");
     }, timeoutSeconds * 1000);
-    child.stdout.on("data", (chunk: Buffer) => {
+    child.stdout!.on("data", (chunk: Buffer) => {
       out.update(chunk);
       stdoutBytes += chunk.length;
       if (
@@ -1111,7 +1172,7 @@ export async function captureProcess(
       else truncated = true;
       checkOutput();
     });
-    child.stderr.on("data", (chunk: Buffer) => {
+    child.stderr!.on("data", (chunk: Buffer) => {
       err.update(chunk);
       stderrBytes += chunk.length;
       if (
@@ -1132,8 +1193,8 @@ export async function captureProcess(
       process.off("SIGINT", cancel);
       process.off("SIGTERM", cancel);
       resolvePromise({
-        exitCode: spawnFailed ? null : exitCode,
-        signal,
+        exitCode: supervised ? (supervisorResult?.exitCode ?? null) : spawnFailed ? null : exitCode,
+        signal: supervised ? (supervisorResult?.signal ?? signal) : signal,
         startedAt,
         finishedAt: new Date().toISOString(),
         wallSeconds: Number(process.hrtime.bigint() - start) / 1e9,
@@ -1144,7 +1205,7 @@ export async function captureProcess(
         stdoutBytes,
         stderrBytes,
         truncated,
-        timedOut,
+        timedOut: timedOut || Boolean(supervisorResult?.timedOut),
         cancelled,
         ...(outputLimit ? { outputLimitExceeded, observedOutputBytes: outputBytes() } : {}),
       });
