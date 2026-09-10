@@ -249,6 +249,9 @@ function parseInput(value: unknown): InvestigationInput {
           (!Number.isSafeInteger(option.minimum) || !Number.isSafeInteger(option.maximum))))
     )
       throw failure("Numerical option bounds are invalid.");
+  for (const option of input.options)
+    if (option.kind === "enum" && option.values.some((value) => /[{}\r\n\0]/.test(value)))
+      throw failure("Enum options must be literal bounded numerical configuration choices.");
   for (const program of input.programs) {
     if (
       new Set(program.outputs.map((output) => output.id)).size !== program.outputs.length ||
@@ -260,7 +263,12 @@ function parseInput(value: unknown): InvestigationInput {
     )
       throw failure("Each program needs unique outputs and one declared JSON diagnostic output.");
     for (const argument of program.arguments) {
-      if (/[\r\n\0]/.test(argument))
+      if (
+        /[\r\n\0]/.test(argument) ||
+        /(?:^|=)(?:\/|[A-Za-z]:[\\/])/.test(argument) ||
+        /--(?:api-key|auth-token|password|cookie)(?:=|$)/i.test(argument) ||
+        /[{}]/.test(argument.replace(/\{(?:input|output|option):[^{}]+\}/g, ""))
+      )
         throw failure("Program arguments must be bounded single argv values.");
       for (const match of argument.matchAll(/\{([^{}]+)\}/g)) {
         const [kind, id, ...rest] = match[1]!.split(":");
@@ -441,6 +449,11 @@ export async function loadInvestigation(
     "recordSha256",
   );
   if (
+    !isObject(record) ||
+    !isObject(record.plan) ||
+    !isObject(record.scopeAuthorization) ||
+    !Array.isArray(record.programs) ||
+    !Array.isArray(record.plan.programs) ||
     record.kind !== "tiangong-investigation" ||
     record.schemaVersion !== 1 ||
     record.projectId !== projectId ||
@@ -449,6 +462,52 @@ export async function loadInvestigation(
     record.scopeAuthorization.planSha256 !== record.plan.planSha256
   )
     throw conflict();
+  if (
+    record.plan.kind !== "tiangong-investigation-plan" ||
+    record.plan.schemaVersion !== 1 ||
+    record.plan.projectId !== projectId ||
+    record.plan.investigationId !== id ||
+    record.plan.purpose !== "diagnostic-candidate-only" ||
+    record.scopeAuthorization.kind !== "operator-confirmation" ||
+    record.scopeAuthorization.sourceSha256 !== record.scopeAuthorization.source?.sha256 ||
+    !HASH.test(record.routingSha256) ||
+    !HASH.test(record.plan.requestSha256) ||
+    record.programs.length !== record.plan.programs.length ||
+    new Set(record.programs.map((p) => p.id)).size !== record.programs.length ||
+    record.programs.some((p) => {
+      const planned = record.plan.programs.find((item) => item.id === p.id);
+      return (
+        !planned ||
+        planned.scriptSha256 !== p.script?.sha256 ||
+        planned.environmentLockSha256 !== p.environmentLock?.sha256 ||
+        !HASH.test(planned.runtime?.binarySha256) ||
+        !HASH.test(planned.runtime?.pathSha256)
+      );
+    })
+  )
+    throw conflict();
+  // Validate the portable envelope with the same closed input schema. Host paths
+  // are deliberately absent from the definition; only local routing contains them.
+  parseInput({
+    schemaVersion: 1,
+    investigationId: id,
+    requirementId: record.plan.requirementId,
+    requirementSha256: record.plan.requirementSha256,
+    objective: record.plan.objective,
+    canonicalInputs: record.plan.canonicalInputs,
+    options: record.plan.options,
+    limits: record.plan.limits,
+    deniedEffects: record.plan.deniedEffects,
+    programs: record.plan.programs.map((p) => ({
+      id: p.id,
+      runtime: { kind: p.runtime.kind, path: "/runtime" },
+      scriptPath: "/script",
+      environmentLockPath: "/environment",
+      arguments: p.arguments,
+      outputs: p.outputs,
+      diagnosticOutputId: p.diagnosticOutputId,
+    })),
+  });
   const { planSha256, ...planCore } = record.plan;
   if (sha256Text(canonicalJson(planCore)) !== planSha256) throw conflict();
   for (const object of [
@@ -601,18 +660,33 @@ export async function inspectInvestigation(root: string, projectId: string, id: 
   const events = await readVerifiedJournal(workspacePaths(root).journal);
   assertProjectAuthority(project, projectAuthorityIndex(events));
   const definition = await loadInvestigation(root, projectId, id, events);
+  const { investigationAttemptHistory, investigationRemaining } =
+    await import("./investigation-attempt.js");
+  const history = await investigationAttemptHistory(root, projectId, definition, events);
+  const remaining = investigationRemaining(definition, history);
   return {
     projectId,
     investigationId: id,
     definitionSha256: definition.recordSha256,
-    status: "authorized",
-    remaining: {
-      runs: definition.plan.limits.maxRuns,
-      wallSeconds: definition.plan.limits.maxWallSeconds,
-      costUpperBoundUsd: definition.plan.limits.maxCostUsd,
-    },
+    status: history.some((a) => !a.record)
+      ? "incomplete"
+      : remaining.runs === 0 ||
+          remaining.wallSeconds < 1 ||
+          remaining.costUpperBoundUsd + 1e-9 < definition.plan.limits.maxRunCostUsd
+        ? "exhausted"
+        : history.length
+          ? "investigating"
+          : "authorized",
+    remaining,
     actualCostUsd: null,
-    attempts: [],
+    attempts: history.map((a) => ({
+      attemptId: a.start.attemptId,
+      startSha256: a.start.recordSha256,
+      recordSha256: a.record?.recordSha256 ?? null,
+      outcome: a.record?.outcome ?? "incomplete",
+      hypothesis: a.start.hypothesis,
+      configuration: a.start.configuration,
+    })),
     executionBoundary: "required-before-observation",
     purpose: definition.plan.purpose,
   };

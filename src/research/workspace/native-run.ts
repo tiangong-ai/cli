@@ -569,7 +569,11 @@ async function assertRunWindow(root: string, project: ProjectState, input: Nativ
     );
   await nativePacketBinding(root, project, input.nativeSessionId);
 }
-async function nativePacketBinding(root: string, project: ProjectState, sessionId: string | null) {
+export async function nativePacketBinding(
+  root: string,
+  project: ProjectState,
+  sessionId: string | null,
+) {
   const active = await pathExists(
     join(workspacePaths(root).projects, project.id, "native/active.json"),
   );
@@ -590,7 +594,7 @@ async function exactDirectory(path: string) {
   // Canonicalize parent aliases such as macOS /var before containment checks.
   return realpath(path);
 }
-async function copyExact(source: string, target: string, sha256: string) {
+export async function copyExact(source: string, target: string, sha256: string) {
   const info = await lstat(source);
   if (!info.isFile() || info.isSymbolicLink() || (await sha256File(source)) !== sha256)
     throw error("A bound calculation file is missing, linked or changed.");
@@ -783,7 +787,7 @@ function safeDiagnostic(text: string, truncated: boolean) {
     .replace(/[A-Za-z]:\\[^\s"']+/gu, "[host-path]")
     .slice(0, 2000);
 }
-async function captureProcess(
+export async function captureProcess(
   binary: string,
   args: string[],
   cwd: string,

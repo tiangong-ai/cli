@@ -14,7 +14,7 @@ async function controlFiles(root: string) {
 }
 
 describe("bounded native investigations", () => {
-  it("plans fixed-input numerical options without execution, then binds one exact authorization", async () => {
+  it("binds one exact envelope, accounts four diagnostic stages and replays attempts without execution", async () => {
     const fx = await acquiredFixture("computation");
     try {
       const budget = await cli([
@@ -35,7 +35,11 @@ describe("bounded native investigations", () => {
       const environmentLockPath = join(fx.files, "environment.json");
       await writeFile(
         scriptPath,
-        "import {readFile,writeFile} from 'node:fs/promises';\nconst bytes=await readFile(process.argv[2]);\nawait writeFile(process.argv[3],JSON.stringify({inputBytes:bytes.length,variant:Number(process.argv[4])}));\n",
+        `import {readFile,writeFile} from 'node:fs/promises';
+const bytes=await readFile(process.argv[2]);const variant=Number(process.argv[4]);
+if(variant===0){console.error('synthetic harness initialization failed');process.exit(2);}
+await writeFile(process.argv[3],JSON.stringify({schemaVersion:1,solverReached:variant>1,feasible:variant===3,metrics:{inputBytes:bytes.length,residual:variant===3?0:1},conclusion:variant===1?'Synthetic solver was not reached':variant===2?'Synthetic numerical constraint failed':'Synthetic bounded candidate found'}));
+`,
       );
       await writeFile(
         environmentLockPath,
@@ -130,6 +134,127 @@ describe("bounded native investigations", () => {
       assert.equal(view.remaining.wallSeconds, 7200);
       assert.equal(view.actualCostUsd, null);
       assert.deepEqual(view.attempts, []);
+      if (process.platform === "win32") {
+        const path = join(fx.files, "unsupported-attempt.json");
+        await writeFile(
+          path,
+          JSON.stringify({
+            schemaVersion: 1,
+            investigationId: "solver-diagnosis",
+            attemptId: "unsupported",
+            programId: "solver-a",
+            hypothesis: "Refuse unsupported execution before starting a program",
+            configuration: { variant: 3 },
+            nativeSessionId: null,
+            workingDirectory: fx.files,
+          }),
+        );
+        const result = await command("attempt", ["--input", path]);
+        assert.notEqual(result.exitCode, 0);
+        assert.equal(
+          (await readFile(workspacePaths(fx.root).journal, "utf8")).includes(
+            "investigation.attempt.started",
+          ),
+          false,
+        );
+        return;
+      }
+      const outcomes = [
+        "harness-failure",
+        "solver-not-reached",
+        "numerical-failure",
+        "feasible-candidate",
+      ];
+      let observedWall = 0;
+      for (const [variant, outcome] of outcomes.entries()) {
+        const attemptPath = join(fx.files, `attempt-${variant}.json`);
+        await writeFile(
+          attemptPath,
+          JSON.stringify({
+            schemaVersion: 1,
+            investigationId: "solver-diagnosis",
+            attemptId: `attempt-${variant}`,
+            programId: "solver-a",
+            hypothesis: `Test predeclared synthetic configuration ${variant}`,
+            configuration: { variant },
+            nativeSessionId: null,
+            workingDirectory: fx.files,
+          }),
+        );
+        const attempt = await command("attempt", ["--input", attemptPath]);
+        assert.equal(attempt.exitCode, 0, attempt.stderr);
+        const result = JSON.parse(attempt.stdout);
+        assert.equal(result.record.outcome, outcome);
+        assert.equal(result.record.purpose, "diagnostic-candidate-only");
+        assert.equal(result.record.actualCostUsd, null);
+        assert.ok(result.record.process.wallSeconds >= 0);
+        observedWall += result.record.process.wallSeconds;
+        if (variant === 0) {
+          const log = await readFile(
+            join(workspacePaths(fx.root).projects, "task-project", result.record.logs.stderr.path),
+            "utf8",
+          );
+          assert.match(log, /synthetic harness initialization failed/);
+        }
+        const afterAttempt = await readFile(workspacePaths(fx.root).journal, "utf8");
+        const replay = await command("attempt", ["--input", attemptPath]);
+        assert.equal(replay.exitCode, 0, replay.stderr);
+        assert.deepEqual(JSON.parse(replay.stdout).record, result.record);
+        assert.equal(JSON.parse(replay.stdout).replayed, true);
+        assert.equal(await readFile(workspacePaths(fx.root).journal, "utf8"), afterAttempt);
+      }
+      const finalStatus = JSON.parse(
+        (await command("status", ["--investigation", "solver-diagnosis"])).stdout,
+      );
+      assert.equal(finalStatus.remaining.runs, 1);
+      assert.ok(Math.abs(finalStatus.remaining.wallSeconds - (7200 - observedWall)) < 1e-6);
+      assert.ok(Math.abs(finalStatus.remaining.costUpperBoundUsd - 0.2) < 1e-9);
+      assert.equal(finalStatus.attempts.length, 4);
+      assert.equal(finalStatus.actualCostUsd, null);
+      const outsidePath = join(fx.files, "outside-attempt.json");
+      await writeFile(
+        outsidePath,
+        JSON.stringify({
+          schemaVersion: 1,
+          investigationId: "solver-diagnosis",
+          attemptId: "outside",
+          programId: "solver-a",
+          hypothesis: "Attempt an unauthorized numerical scope expansion",
+          configuration: { variant: 4 },
+          nativeSessionId: null,
+          workingDirectory: fx.files,
+        }),
+      );
+      const unchanged = await controlFiles(fx.root);
+      const outside = await command("attempt", ["--input", outsidePath]);
+      assert.notEqual(outside.exitCode, 0);
+      assert.deepEqual(await controlFiles(fx.root), unchanged);
+      const contenders = await Promise.all(
+        ["last-a", "last-b"].map(async (attemptId) => {
+          const path = join(fx.files, `${attemptId}.json`);
+          await writeFile(
+            path,
+            JSON.stringify({
+              schemaVersion: 1,
+              investigationId: "solver-diagnosis",
+              attemptId,
+              programId: "solver-a",
+              hypothesis: "Compete for the final authorized attempt without extra approval",
+              configuration: { variant: 3 },
+              nativeSessionId: null,
+              workingDirectory: fx.files,
+            }),
+          );
+          return command("attempt", ["--input", path]);
+        }),
+      );
+      assert.equal(contenders.filter((r) => r.exitCode === 0).length, 1);
+      const exhausted = JSON.parse(
+        (await command("status", ["--investigation", "solver-diagnosis"])).stdout,
+      );
+      assert.equal(exhausted.status, "exhausted");
+      assert.equal(exhausted.remaining.runs, 0);
+      assert.equal(exhausted.attempts.length, 5);
     } finally {
       await fx.cleanup();
     }
