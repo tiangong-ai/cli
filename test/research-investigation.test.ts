@@ -460,13 +460,15 @@ await writeFile(process.argv[3],JSON.stringify({schemaVersion:1,solverReached:va
       assert.notEqual(noNewRun.exitCode, 0);
       assert.match(noNewRun.stderr, /RESEARCH_INVESTIGATION_INCOMPLETE/);
       assert.equal(await readFile(workspacePaths(fx.root).journal, "utf8"), interruptedJournal);
-      for (const mode of ["stdout", "artifact"] as const) {
+      for (const mode of ["stdout", "artifact", "combined"] as const) {
         const overflowingScript = join(fx.files, `${mode}-overflow.mjs`);
         await writeFile(
           overflowingScript,
           mode === "stdout"
             ? "process.stdout.write('x'.repeat(8192)); await new Promise(resolve=>setTimeout(resolve,30000));"
-            : "import {writeFile} from 'node:fs/promises'; await writeFile(process.argv[3],'x'.repeat(8192)); await new Promise(resolve=>setTimeout(resolve,30000));",
+            : mode === "artifact"
+              ? "import {writeFile} from 'node:fs/promises'; await writeFile(process.argv[3],'x'.repeat(8192)); await new Promise(resolve=>setTimeout(resolve,30000));"
+              : "import {writeFile} from 'node:fs/promises'; await writeFile(process.argv[3],'x'.repeat(600)); process.stdout.write('x'.repeat(600)); await new Promise(resolve=>setTimeout(resolve,30000));",
         );
         const bounded = {
           ...input,
@@ -515,7 +517,12 @@ await writeFile(process.argv[3],JSON.stringify({schemaVersion:1,solverReached:va
           false,
           "The output guard must terminate before the ordinary timeout",
         );
-        assert.ok(observed.process.observedOutputBytes >= 8192);
+        assert.ok(observed.process.observedOutputBytes >= (mode === "combined" ? 1200 : 8192));
+        assert.equal(
+          observed.outputs.length,
+          0,
+          "An over-budget result must not admit artifacts even when each file alone fits",
+        );
         const budgetStatus = JSON.parse(
           (await command("status", ["--investigation", bounded.investigationId])).stdout,
         );

@@ -605,7 +605,7 @@ export async function observeNativeRun(
       if (!stable || (await realpath(input.runtime.path)) !== prepared.runtimePath)
         status = "inputs-changed";
       const outputs: NativeRunRecord["outputs"] = [];
-      for (const output of input.outputs) {
+      for (const output of outputLimitExceeded ? [] : input.outputs) {
         const path = prepared.outputPaths.get(output.id)!;
         try {
           const info = await lstat(path);

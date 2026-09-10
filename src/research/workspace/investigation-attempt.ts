@@ -733,9 +733,15 @@ async function observeInvestigationAttemptInternal(
     } catch {
       stale = true;
     }
+    const outputLimitExceeded = Boolean(
+      probe.outputLimitExceeded || observed.outputLimitExceeded || availableOutput <= 0,
+    );
+    const observedOutputBytes =
+      (observed.observedOutputBytes ?? 0) +
+      (observed === probe ? 0 : (probe.observedOutputBytes ?? 0));
     const outputs: InvestigationAttempt["outputs"] = [];
     let diagnostic: Diagnostic | null = null;
-    for (const output of program.outputs) {
+    for (const output of outputLimitExceeded ? [] : program.outputs) {
       const path = prepared.outputPaths.get(output.id)!;
       try {
         const info = await lstat(path);
@@ -780,12 +786,6 @@ async function observeInvestigationAttemptInternal(
             .map((id) => `statuses.${id}`),
         ].sort()
       : [];
-    const outputLimitExceeded = Boolean(
-      probe.outputLimitExceeded || observed.outputLimitExceeded || availableOutput <= 0,
-    );
-    const observedOutputBytes =
-      (observed.observedOutputBytes ?? 0) +
-      (observed === probe ? 0 : (probe.observedOutputBytes ?? 0));
     const outcome: InvestigationAttempt["outcome"] = outputLimitExceeded
       ? "output-limit-exceeded"
       : stale
