@@ -1055,8 +1055,19 @@ describe("production research evidence and broker", () => {
         { maxParallel: 1, maxCycles: 10, dryRun: false, environment: {} },
         brokerBackedExecutor(
           async (request) => {
-            assert.equal(request.maxTurns, 64);
-            assert.equal(request.reservationTurns, 3);
+            assert.ok(
+              request.maxTurns > 3 && request.maxTurns <= 64,
+              "retain useful multi-turn packet reading within the affordable envelope",
+            );
+            assert.equal(request.reservationTurns, request.maxTurns);
+            const budgetConfig = await loadWorkspaceConfig(root);
+            const repeatedPrompt =
+              Math.ceil(Buffer.byteLength(request.prompt) / 3) * request.maxTurns;
+            assert.ok(
+              repeatedPrompt + request.maxOutputTokens <=
+                budgetConfig.budget.packageMaxTokens.review,
+              "every permitted turn must fit the package reservation",
+            );
             const views = await openArtifactViews(
               request.projectRoot,
               request.artifactViews!.index,
@@ -1735,8 +1746,19 @@ describe("production research control plane", () => {
           } else {
             assert.equal(input.fullTextStaged, true);
             assert.equal(request.toolPolicy, "packet-read");
-            assert.equal(request.maxTurns, 64);
-            assert.equal(request.reservationTurns, 3);
+            assert.ok(
+              request.maxTurns > 3 && request.maxTurns <= 64,
+              "retain useful multi-turn packet reading within the affordable envelope",
+            );
+            assert.equal(request.reservationTurns, request.maxTurns);
+            const budgetConfig = await loadWorkspaceConfig(root);
+            const repeatedPrompt =
+              Math.ceil(Buffer.byteLength(request.prompt) / 3) * request.maxTurns;
+            assert.ok(
+              repeatedPrompt + request.maxOutputTokens <=
+                budgetConfig.budget.packageMaxTokens.review,
+              "every permitted turn must fit the package reservation",
+            );
             assert.equal(request.brokerUrl, null);
             assert.doesNotMatch(request.prompt, /### inputs\/review-packet\.json/);
             assert.match(request.prompt, /### inputs\/review-evidence-context\.txt/);

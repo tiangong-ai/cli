@@ -19,7 +19,7 @@ checkPaths:
   - test/**
   - .github/workflows/**
 lastReviewedAt: 2026-09-10
-lastReviewedCommit: dce0a7416c0b9c764dc9239d1ee5ff0f0280059a
+lastReviewedCommit: 70c723411b60e7838957f42391efc546e0380f2b
 ---
 
 # Repo Validation
@@ -547,7 +547,8 @@ production evals for permanent evidence and review packets, exact HTTP policy,
 byte/item/offset/estimated-token extraction bounds and raw-object cache reuse,
 sanitized 429/422 handling, bounded broker-level 429 retry, explicit provider-cost
 admission, concurrent monetary reservations, free project/shared-cache reuse,
-conservative failed-operation allocations, structured-output and provenance repair,
+conservative failed-operation allocations, affordable packet-read turn selection
+with matching reservation and execution envelopes, structured-output and provenance repair,
 audited deterministic Markdown newline-artifact normalization before independent review,
 mechanically normalized dimension/full-text/publication-date coverage,
 bounded local context with full-source review, stage tool isolation, runtime

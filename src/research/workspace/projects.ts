@@ -9,6 +9,7 @@ import {
   providerCostLimits,
 } from "./project-budget.js";
 import { randomUUID } from "node:crypto";
+import { sanitizeResearchRecord } from "./sanitization.js";
 import { cp, lstat, readFile } from "node:fs/promises";
 import { basename, dirname, join, resolve, sep } from "node:path";
 
@@ -1923,8 +1924,16 @@ export async function setProjectBudget(
         code: "RESEARCH_BUDGET_CONFIRMATION_REQUIRED",
         exitCode: 2,
       });
-    if (existing?.authorization.maxCostUsd === maxCostUsd && !pricesChanged)
+    if (existing?.authorization.maxCostUsd === maxCostUsd && !pricesChanged) {
+      await recordBudgetEvent(
+        root,
+        project.id,
+        "project.budget.authorized",
+        budgetAuthorizationPayload(project),
+        true,
+      );
       return { projectId, budget: projectBudgetView(project, config), replayed: true };
+    }
     if (existing && maxCostUsd > existing.authorization.maxCostUsd && !confirm)
       throw new CliError("Increasing the project budget requires --confirm-budget.", {
         code: "RESEARCH_BUDGET_CONFIRMATION_REQUIRED",
@@ -1985,17 +1994,12 @@ export async function setProjectBudget(
     project.budget = proposed;
     project.budgetConfirmedAt = proposed.authorization.authorizedAt;
     await saveProject(root, project);
-    await appendJournalEvent(
-      workspacePaths(root).journal,
-      "project.budget.authorized",
+    await recordBudgetEvent(
+      root,
       project.id,
-      {
-        authorization: proposed.authorization,
-        openingEstimateUsd: proposed.openingEstimateUsd,
-        outstandingReservationIds: proposed.entries
-          .filter((e) => e.status === "reserved")
-          .map((e) => e.id),
-      },
+      "project.budget.authorized",
+      budgetAuthorizationPayload(project),
+      false,
     );
     return { projectId, budget: projectBudgetView(project, config), replayed: false };
   });
@@ -2029,6 +2033,14 @@ export async function resolveProjectBudgetReservation(
         exitCode: 3,
       });
     const config = await loadWorkspaceConfig(root);
+    const resolution = {
+      reservationId: id,
+      sourceProjectId: entry.sourceProjectId,
+      accountedCostUsd: amount,
+      basis: "owner-estimate",
+      reason: reason.trim(),
+      providerInvoiceVerified: false,
+    };
     if (entry.status === "settled") {
       if (
         entry.accountedCostUsd !== amount ||
@@ -2039,6 +2051,13 @@ export async function resolveProjectBudgetReservation(
           code: "RESEARCH_BUDGET_RESERVATION_CONFLICT",
           exitCode: 3,
         });
+      await recordBudgetEvent(
+        root,
+        project.id,
+        "project.budget.reservation.resolved",
+        resolution,
+        true,
+      );
       return { projectId, budget: projectBudgetView(project, config), replayed: true };
     }
     if (entry.kind === "native-stage") {
@@ -2054,19 +2073,70 @@ export async function resolveProjectBudgetReservation(
     settleProjectCost(project, id, amount, "owner-estimate");
     entry.resolutionReason = reason.trim();
     await saveProject(root, project);
-    await appendJournalEvent(
-      workspacePaths(root).journal,
-      "project.budget.reservation.resolved",
+    await recordBudgetEvent(
+      root,
       project.id,
-      {
-        reservationId: id,
-        sourceProjectId: entry.sourceProjectId,
-        accountedCostUsd: amount,
-        basis: "owner-estimate",
-        reason: entry.resolutionReason,
-        providerInvoiceVerified: false,
-      },
+      "project.budget.reservation.resolved",
+      resolution,
+      false,
     );
     return { projectId, budget: projectBudgetView(project, config), replayed: false };
+  });
+}
+
+function budgetAuthorizationPayload(project: ProjectState): Record<string, unknown> {
+  const budget = project.budget!;
+  return {
+    fundingDecision: budget.authorization,
+    openingEstimateUsd: budget.openingEstimateUsd,
+    outstandingReservationIds: budget.entries
+      .filter((entry) => entry.status === "reserved")
+      .map((entry) => entry.id),
+  };
+}
+
+async function recordBudgetEvent(
+  root: string,
+  projectId: string,
+  type: "project.budget.authorized" | "project.budget.reservation.resolved",
+  payload: Record<string, unknown>,
+  replayed: boolean,
+): Promise<void> {
+  payload = sanitizeResearchRecord(payload);
+  if (replayed) {
+    const authorization = payload.fundingDecision;
+    const matches = (await readVerifiedJournal(workspacePaths(root).journal)).filter(
+      (event) =>
+        event.scope === projectId &&
+        event.type === type &&
+        (type === "project.budget.authorized"
+          ? isObject(event.payload.fundingDecision) &&
+            isObject(authorization) &&
+            event.payload.fundingDecision.revision === authorization.revision
+          : event.payload.reservationId === payload.reservationId),
+    );
+    const fields =
+      type === "project.budget.authorized"
+        ? ["fundingDecision"]
+        : ["reservationId", "sourceProjectId", "accountedCostUsd", "basis", "reason"];
+    if (
+      matches.some((event) =>
+        fields.some(
+          (field) =>
+            canonicalJson(event.payload[field] ?? null) !== canonicalJson(payload[field] ?? null),
+        ),
+      )
+    )
+      throw new CliError("Saved budget state conflicts with its recorded audit evidence.", {
+        code: "RESEARCH_BUDGET_JOURNAL_CONFLICT",
+        exitCode: 3,
+      });
+    if (matches.length) return;
+  }
+  // A retry records the saved decision now, explicitly as reconciliation. Its
+  // pending-reservation list is a current snapshot, never a backdated claim.
+  await appendJournalEvent(workspacePaths(root).journal, type, projectId, {
+    ...payload,
+    reconciled: replayed,
   });
 }

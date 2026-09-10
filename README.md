@@ -13,7 +13,7 @@ checkPaths:
   - bin/**
   - src/**
 lastReviewedAt: 2026-09-10
-lastReviewedCommit: dce0a7416c0b9c764dc9239d1ee5ff0f0280059a
+lastReviewedCommit: 70c723411b60e7838957f42391efc546e0380f2b
 ---
 
 # Tiangong AI CLI
@@ -1334,7 +1334,8 @@ It does not claim a provider-side turn or output-token cap for the host app.
 
 Independent review uses the pre-call reservation calculator and the reviewer's
 provider-side structured-output/turn controls where available. Claude packet-only
-review has a 64-turn provider guard; Codex uses the existing finite wall-time and
+review chooses the largest affordable turn count up to a 64-turn provider
+guard and uses that same count in its reservation; Codex uses the existing finite wall-time and
 token/cost guards because its CLI has no equivalent turn flag. Planning uses a
 small initial-context estimate and expected reads, not the entire corpus or an
 unbounded legacy context hint. Preflight reports `inputContextTokenLimit=null`.
@@ -1386,6 +1387,10 @@ reservation ID, an accounted estimate, a reason, and `--confirm-budget`.
 A native reservation requires its original session to have ended first.
 An owner estimate above the ceiling records an overrun and blocks further
 positive-cost work; it does not silently increase the authorization.
+If a command fails after saving the decision but before writing its journal
+record, retrying the same command reconciles the missing record without changing
+the authorization or charging again. The record is marked as reconciliation;
+contradictory journal evidence stops the replay for inspection.
 
 Every evidence source must resolve to an admitted input, a completed broker
 receipt, or a completed structured data-runtime receipt. Successful broker and

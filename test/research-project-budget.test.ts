@@ -1,5 +1,6 @@
+import { appendJournalEvent, readVerifiedJournal } from "../src/research/workspace/journal.js";
 import assert from "node:assert/strict";
-import { mkdtemp, realpath, rm } from "node:fs/promises";
+import { chmod, mkdtemp, realpath, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, it } from "node:test";
@@ -55,6 +56,144 @@ async function cli(root: string, args: string[]) {
 
 // These values are synthetic accounting inputs, not provider invoices.
 describe("numeric project budget authorization", () => {
+  it(
+    "reconciles a saved authorization after a journal write failure without increasing it again",
+    { skip: process.platform === "win32" },
+    async () => {
+      const root = await workspace();
+      try {
+        await fundedProject(root);
+        const args = [
+          "project",
+          "budget",
+          "set",
+          "budget-project",
+          "--max-cost-usd",
+          "60",
+          "--confirm-budget",
+        ];
+        await chmod(workspacePaths(root).journal, 0o400);
+        await assert.rejects(cli(root, args), { code: "EACCES" });
+        const saved = (await loadProject(root, "budget-project")).budget!.authorization;
+        assert.equal(saved.maxCostUsd, 60, "the failure occurs after the state write");
+        await chmod(workspacePaths(root).journal, 0o600);
+        const replay = await cli(root, args);
+        assert.equal(replay.code, 0, replay.stderr);
+        assert.equal(replay.body.replayed, true);
+        assert.deepEqual((await loadProject(root, "budget-project")).budget!.authorization, saved);
+        const events = () =>
+          readVerifiedJournal(workspacePaths(root).journal).then((events) =>
+            events.filter(
+              (event) =>
+                event.type === "project.budget.authorized" &&
+                (event.payload.fundingDecision as { revision: number }).revision === saved.revision,
+            ),
+          );
+        assert.equal((await events()).length, 1, "retry must repair the missing audit record");
+        assert.equal((await events())[0]!.payload.reconciled, true);
+        assert.equal((await cli(root, args)).code, 0);
+        assert.equal(
+          (await events()).length,
+          1,
+          "ordinary replay must not duplicate audit evidence",
+        );
+      } finally {
+        await chmod(workspacePaths(root).journal, 0o600).catch(() => undefined);
+        await rm(root, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it(
+    "reconciles a saved owner estimate after journal failure without charging twice",
+    { skip: process.platform === "win32" },
+    async () => {
+      const root = await workspace();
+      try {
+        await fundedProject(root);
+        await withWorkspaceLock(root, "test.uncertain-cost", async () => {
+          const project = await loadProject(root, "budget-project");
+          reserveProjectCost(project, await loadWorkspaceConfig(root), {
+            id: "uncertain-journal",
+            kind: "provider-operation",
+            reference: "synthetic",
+            maxCostUsd: 5,
+          });
+          await saveProject(root, project);
+        });
+        const args = [
+          "project",
+          "budget",
+          "resolve",
+          "budget-project",
+          "--reservation",
+          "uncertain-journal",
+          "--accounted-cost-usd",
+          "3",
+          "--reason",
+          "Owner reconciled a synthetic attempt; token=synthetic-sensitive-value",
+          "--confirm-budget",
+        ];
+        await chmod(workspacePaths(root).journal, 0o400);
+        await assert.rejects(cli(root, args), { code: "EACCES" });
+        const saved = (await loadProject(root, "budget-project")).budget!.entries[0]!;
+        assert.equal(saved.accountedCostUsd, 3, "the failure occurs after financial settlement");
+        await chmod(workspacePaths(root).journal, 0o600);
+        const replay = await cli(root, args);
+        assert.equal(replay.code, 0, replay.stderr);
+        assert.equal(replay.body.budget.accountedEstimateUsd, 3);
+        assert.equal(replay.body.replayed, true);
+        assert.deepEqual((await loadProject(root, "budget-project")).budget!.entries[0], saved);
+        const events = () =>
+          readVerifiedJournal(workspacePaths(root).journal).then((events) =>
+            events.filter(
+              (event) =>
+                event.type === "project.budget.reservation.resolved" &&
+                event.payload.reservationId === saved.id,
+            ),
+          );
+        assert.equal((await events()).length, 1);
+        assert.equal((await events())[0]!.payload.reconciled, true);
+        assert.doesNotMatch(JSON.stringify(await events()), /synthetic-sensitive-value/);
+        assert.equal((await cli(root, args)).code, 0);
+        assert.equal((await events()).length, 1);
+      } finally {
+        await chmod(workspacePaths(root).journal, 0o600).catch(() => undefined);
+        await rm(root, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it("refuses contradictory authorization evidence on replay", async () => {
+    const root = await workspace();
+    try {
+      await fundedProject(root);
+      const saved = (await loadProject(root, "budget-project")).budget!.authorization;
+      await appendJournalEvent(
+        workspacePaths(root).journal,
+        "project.budget.authorized",
+        "budget-project",
+        {
+          fundingDecision: { ...saved, maxCostUsd: saved.maxCostUsd + 1 },
+        },
+      );
+      const before = (await readVerifiedJournal(workspacePaths(root).journal)).length;
+      const result = await cli(root, [
+        "project",
+        "budget",
+        "set",
+        "budget-project",
+        "--max-cost-usd",
+        String(saved.maxCostUsd),
+      ]);
+      assert.equal(result.body.error?.code, "RESEARCH_BUDGET_JOURNAL_CONFLICT");
+      assert.deepEqual((await loadProject(root, "budget-project")).budget!.authorization, saved);
+      assert.equal((await readVerifiedJournal(workspacePaths(root).journal)).length, before);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
   it("records an owner-estimated overrun without silently increasing the authorization", async () => {
     const root = await workspace();
     try {

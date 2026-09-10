@@ -13,7 +13,7 @@ checkPaths:
   - src/**
   - bin/**
 lastReviewedAt: 2026-09-10
-lastReviewedCommit: dce0a7416c0b9c764dc9239d1ee5ff0f0280059a
+lastReviewedCommit: 70c723411b60e7838957f42391efc546e0380f2b
 ---
 
 # Repo Architecture
@@ -404,6 +404,14 @@ workspace cache reads allocate no additional money. Concurrent handlers serializ
 only ledger reads/writes inside the existing workspace lease, leaving provider
 requests parallel. Broker call-count limits continue to count tool invocations,
 including cache reads, independently of monetary allocations.
+
+Budget authorization and owner-resolution retries reconcile missing journal
+records from already-saved project state. Reconciliation preserves the original
+financial decision, labels the newly recorded snapshot explicitly, and refuses
+contradictory audit evidence. The non-secret `fundingDecision` field preserves
+financial detail without weakening credential redaction. Normal successful
+writes retain the existing state-then-journal sequence; replay performs the
+additional verified-journal lookup only when needed.
 
 Document decomposition is an input-preprocessor and paper download is an
 acquisition adapter. Their explicit companion command verifies the installed
