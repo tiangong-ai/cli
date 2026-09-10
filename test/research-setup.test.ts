@@ -92,11 +92,11 @@ describe("research setup catalog and immutable plans", () => {
       assert.ok(catalog.sources.every((source) => /^[0-9a-f]{40}$/.test(source.immutableRef)));
       assert.equal(
         catalog.sources.find((source) => source.id === "tiangong-ai-skills")?.immutableRef,
-        "56d1afcc1ce3651be0f09cb6fd6ccbafbc629834",
+        "812881fec1ad4141da240c1caa252e262779057f",
       );
       assert.equal(
         catalog.entries.find((entry) => entry.id === "tiangong.auto-research")?.expectedTreeSha256,
-        "8e17a2b65811936969bf86bfdf005b3ab8ca98bf563413156d807f3dcd342756",
+        "16d4adda6a82e855061976c2fd6f4e10c6690fb819c2d96e4725541c79193758",
       );
       assert.ok(catalog.roles.evidenceCapabilities.includes("tiangong.kb-sci-search"));
       assert.ok(catalog.roles.evidenceCapabilities.includes("tiangong.kb-report-search"));
@@ -2252,6 +2252,14 @@ describe("research setup execution and operator safety", () => {
       (candidate) => candidate.id === "tiangong.academic-paper-download",
     )!;
     const originalTreeSha256 = skill.expectedTreeSha256;
+    const wire = JSON.parse(
+      await readFile(new URL("./fixtures/paper-companion-v3.json", import.meta.url), "utf8"),
+    );
+    assert.equal(
+      wire.producerTreeSha256,
+      originalTreeSha256,
+      "Regenerate the real-producer fixture when the pinned paper Skill changes",
+    );
     try {
       await mkdir(outputDirectory);
       const skillDirectory = join(root, ".agents", "skills", skill.skillName);
@@ -2279,14 +2287,8 @@ describe("research setup execution and operator safety", () => {
       await writeFile(decoyPath, "%PDF-1.4\ndecoy\n%%EOF\n");
       const artifactPath = join(outputDirectory, "bound-paper.pdf");
       const manifestPath = `${artifactPath}.json`;
-      const pdf = Buffer.from("%PDF-1.4\nbound-artifact\n%%EOF\n");
-      const identity = {
-        schema_version: "academic-paper-download.identity.v1",
-        status: "matched",
-        method: "doi_document_metadata",
-        confidence: 1,
-        requested: { doi: "10.1234/example", title: null, author: null, year: null },
-      };
+      const pdf = Buffer.from(wire.pdfBase64, "base64");
+      const identity = wire.manifest.identity;
       const result = await runResearchSetupCompanion(
         {
           workspace: root,
@@ -2311,36 +2313,15 @@ describe("research setup execution and operator safety", () => {
             assert.equal(environment.COOKIE, undefined);
             await writeFile(artifactPath, pdf);
             const digest = await sha256File(artifactPath);
-            const manifest = {
-              schema_version: "academic-paper-download.artifact.v3",
-              identity_status: "matched",
-              identity,
-              doi: "10.1234/example",
-              source: "semantic_scholar",
-              file: artifactPath,
-              size: pdf.length,
-              sha256: digest,
-            };
+            const manifest = { ...wire.manifest, file: artifactPath };
+            assert.equal(manifest.sha256, digest);
+            assert.equal(manifest.size, pdf.length);
             await writeFile(manifestPath, `${JSON.stringify(manifest)}\n`);
+            const envelope = structuredClone(wire.envelope);
+            Object.assign(envelope.data.results[0], { file: artifactPath, manifest: manifestPath });
             return {
               exitCode: 0,
-              stdout: JSON.stringify({
-                ok: true,
-                data: {
-                  results: [
-                    {
-                      success: true,
-                      doi: "10.1234/example",
-                      identity_status: "matched",
-                      identity,
-                      file: artifactPath,
-                      manifest: manifestPath,
-                      size: pdf.length,
-                      sha256: digest,
-                    },
-                  ],
-                },
-              }),
+              stdout: JSON.stringify(envelope),
               stderr: `provider note ${secret}`,
             };
           },

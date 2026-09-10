@@ -115,7 +115,7 @@ export const RESEARCH_SETUP_SELECTION_GUIDANCE = {
 } as const;
 
 const BRAVE_COMMIT = "3e088af66eb61f1c207c22b2be0278ca8744d1d1";
-const TIANGONG_SKILLS_COMMIT = "56d1afcc1ce3651be0f09cb6fd6ccbafbc629834";
+const TIANGONG_SKILLS_COMMIT = "812881fec1ad4141da240c1caa252e262779057f";
 const ANTHROPIC_SKILLS_COMMIT = "f17010c9bb483898c1d9c9f42dde2b3a98889434";
 const PPT_MASTER_COMMIT = "4343bd8bfc91e79dfb9680681a378476cc38a280";
 
@@ -418,7 +418,7 @@ export const RESEARCH_SETUP_SKILLS: readonly ResearchSetupSkill[] = [
     skillName: "tiangong-auto-research",
     sourceId: "tiangong-ai-skills",
     sourceRelativePath: "tiangong-auto-research",
-    expectedTreeSha256: "8e17a2b65811936969bf86bfdf005b3ab8ca98bf563413156d807f3dcd342756",
+    expectedTreeSha256: "16d4adda6a82e855061976c2fd6f4e10c6690fb819c2d96e4725541c79193758",
     tier: "orchestrator",
     role: "orchestrator",
     purpose:
@@ -654,7 +654,7 @@ export const RESEARCH_SETUP_SKILLS: readonly ResearchSetupSkill[] = [
     skillName: "academic-paper-download",
     sourceId: "tiangong-ai-skills",
     sourceRelativePath: "academic-paper-download",
-    expectedTreeSha256: "29ae2a10b345cf3dadbf084f30217c29018ba49fe7822caf8c93d62767900b11",
+    expectedTreeSha256: "a1f70d4cd2f3b35c21183727ae00352bf0538f8e046dfac3c7e5493b6f3e3934",
     tier: "enhanced",
     role: "acquisition-adapter",
     purpose:

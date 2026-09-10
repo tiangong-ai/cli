@@ -1,0 +1,228 @@
+{
+  "fixtureVersion": 1,
+  "purpose": "Offline producer/consumer contract, not real acquisition evidence",
+  "producerTreeSha256": "a1f70d4cd2f3b35c21183727ae00352bf0538f8e046dfac3c7e5493b6f3e3934",
+  "pypdfVersion": "6.14.2",
+  "normalization": "Only output-directory strings and retrieval timestamps are normalized",
+  "pdfBase64": "JVBERi0xLjMKJeLjz9MKMSAwIG9iago8PAovUHJvZHVjZXIgKHB5cGRmKQovRE9JICgxMFwwNTYxMjM0XDA1N2V4YW1wbGUpCi9UaXRsZSAoRXhhbXBsZSBwYXBlcikKL0F1dGhvciAoQWxpY2UgRXhhbXBsZSkKL1llYXIgKDIwMjQpCj4+CmVuZG9iagoyIDAgb2JqCjw8Ci9UeXBlIC9QYWdlcwovQ291bnQgMQovS2lkcyBbIDQgMCBSIF0KPj4KZW5kb2JqCjMgMCBvYmoKPDwKL1R5cGUgL0NhdGFsb2cKL1BhZ2VzIDIgMCBSCj4+CmVuZG9iago0IDAgb2JqCjw8Ci9UeXBlIC9QYWdlCi9SZXNvdXJjZXMgPDwKPj4KL01lZGlhQm94IFsgMC4wIDAuMCA2MTIgNzkyIF0KL1BhcmVudCAyIDAgUgo+PgplbmRvYmoKeHJlZgowIDUKMDAwMDAwMDAwMCA2NTUzNSBmIAowMDAwMDAwMDE1IDAwMDAwIG4gCjAwMDAwMDAxNDMgMDAwMDAgbiAKMDAwMDAwMDIwMiAwMDAwMCBuIAowMDAwMDAwMjUxIDAwMDAwIG4gCnRyYWlsZXIKPDwKL1NpemUgNQovUm9vdCAzIDAgUgovSW5mbyAxIDAgUgo+PgpzdGFydHhyZWYKMzQ1CiUlRU9GCg==",
+  "envelope": {
+    "ok": true,
+    "data": {
+      "results": [
+        {
+          "doi": "10.1234/example",
+          "success": true,
+          "source": "semantic_scholar",
+          "source_url": "https://oa.example/s2.pdf",
+          "source_detail": null,
+          "meta": {
+            "title": "Example paper",
+            "year": 2024,
+            "author": "Alice Example",
+            "journal": "Journal"
+          },
+          "sources_tried": [
+            "semantic_scholar"
+          ],
+          "access_basis": "open_access",
+          "license_status": "unknown",
+          "license": "unknown",
+          "license_url": "unknown",
+          "host_type": "unknown",
+          "article_version": "unknown",
+          "retrieved_at": "2026-09-10T00:00:00Z",
+          "file": "<OUTPUT>/Example_2024_Example_paper.pdf",
+          "manifest": "<OUTPUT>/Example_2024_Example_paper.pdf.json",
+          "size": 520,
+          "sha256": "74f6927d9cf11181fb94d75048b38fd72bf4522a93ba9b3c031e46b2b65d0211",
+          "skipped": false,
+          "verified_existing": false,
+          "identity_status": "matched",
+          "identity": {
+            "schema_version": "academic-paper-download.identity.v1",
+            "status": "matched",
+            "method": "doi_document_metadata",
+            "confidence": 1.0,
+            "requested": {
+              "doi": "10.1234/example",
+              "title": "example paper",
+              "author": "alice example",
+              "year": "2024"
+            },
+            "observed": {
+              "document_dois": [
+                "10.1234/example"
+              ],
+              "metadata_context_dois": [],
+              "first_page_dois": [],
+              "first_page_primary_dois": [],
+              "first_page_examined": false,
+              "first_page_encoded_bytes": null,
+              "first_page_content_bytes": 0
+            },
+            "checks": {
+              "doi": {
+                "status": "matched",
+                "requested": "10.1234/example",
+                "document": [
+                  "10.1234/example"
+                ],
+                "metadata_context": [],
+                "first_page": [],
+                "first_page_primary": []
+              },
+              "title": {
+                "status": "matched",
+                "requested": "example paper",
+                "observed": {
+                  "value": "Example paper",
+                  "normalized": "example paper"
+                },
+                "similarity": 1.0,
+                "source": "document_metadata"
+              },
+              "author": {
+                "status": "matched",
+                "requested": "alice example",
+                "observed": {
+                  "value": "Alice Example",
+                  "normalized": "alice example"
+                },
+                "source": "document_metadata"
+              },
+              "year": {
+                "status": "matched",
+                "requested": "2024",
+                "observed": "2024",
+                "source": "document_metadata"
+              }
+            },
+            "limits": {
+              "metadata_value_chars": 2048,
+              "first_page_encoded_bytes": 2097152,
+              "first_page_content_bytes": 2097152,
+              "first_page_text_chars": 65536,
+              "first_page_lines": 80,
+              "identity_header_lines": 24,
+              "first_page_content_streams": 256,
+              "observed_dois": 16
+            },
+            "limitations": [
+              "first_page_only",
+              "no_ocr"
+            ]
+          }
+        }
+      ],
+      "summary": {
+        "total": 1,
+        "succeeded": 1,
+        "failed": 0
+      }
+    },
+    "meta": {
+      "request_id": "req_77634b4343b2",
+      "cli_version": "1.0.0",
+      "schema_version": "3.0.0",
+      "latency_ms": 2
+    }
+  },
+  "manifest": {
+    "schema_version": "academic-paper-download.artifact.v3",
+    "doi": "10.1234/example",
+    "title": "Example paper",
+    "author": "Alice Example",
+    "year": 2024,
+    "journal": "Journal",
+    "source": "semantic_scholar",
+    "source_url": "https://oa.example/s2.pdf",
+    "source_detail": null,
+    "access_basis": "open_access",
+    "license_status": "unknown",
+    "license": "unknown",
+    "license_url": "unknown",
+    "host_type": "unknown",
+    "article_version": "unknown",
+    "access_mode": "http",
+    "retrieved_at": "2026-09-10T00:00:00Z",
+    "downloaded_at": "2026-09-10T10:51:40.279145+00:00",
+    "file": "<OUTPUT>/Example_2024_Example_paper.pdf",
+    "size": 520,
+    "sha256": "74f6927d9cf11181fb94d75048b38fd72bf4522a93ba9b3c031e46b2b65d0211",
+    "identity_status": "matched",
+    "identity": {
+      "schema_version": "academic-paper-download.identity.v1",
+      "status": "matched",
+      "method": "doi_document_metadata",
+      "confidence": 1.0,
+      "requested": {
+        "doi": "10.1234/example",
+        "title": "example paper",
+        "author": "alice example",
+        "year": "2024"
+      },
+      "observed": {
+        "document_dois": [
+          "10.1234/example"
+        ],
+        "metadata_context_dois": [],
+        "first_page_dois": [],
+        "first_page_primary_dois": [],
+        "first_page_examined": false,
+        "first_page_encoded_bytes": null,
+        "first_page_content_bytes": 0
+      },
+      "checks": {
+        "doi": {
+          "status": "matched",
+          "requested": "10.1234/example",
+          "document": [
+            "10.1234/example"
+          ],
+          "metadata_context": [],
+          "first_page": [],
+          "first_page_primary": []
+        },
+        "title": {
+          "status": "matched",
+          "requested": "example paper",
+          "observed": {
+            "value": "Example paper",
+            "normalized": "example paper"
+          },
+          "similarity": 1.0,
+          "source": "document_metadata"
+        },
+        "author": {
+          "status": "matched",
+          "requested": "alice example",
+          "observed": {
+            "value": "Alice Example",
+            "normalized": "alice example"
+          },
+          "source": "document_metadata"
+        },
+        "year": {
+          "status": "matched",
+          "requested": "2024",
+          "observed": "2024",
+          "source": "document_metadata"
+        }
+      },
+      "limits": {
+        "metadata_value_chars": 2048,
+        "first_page_encoded_bytes": 2097152,
+        "first_page_content_bytes": 2097152,
+        "first_page_text_chars": 65536,
+        "first_page_lines": 80,
+        "identity_header_lines": 24,
+        "first_page_content_streams": 256,
+        "observed_dois": 16
+      },
+      "limitations": [
+        "first_page_only",
+        "no_ocr"
+      ]
+    }
+  }
+}
