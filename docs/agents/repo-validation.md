@@ -19,7 +19,7 @@ checkPaths:
   - test/**
   - .github/workflows/**
 lastReviewedAt: 2026-09-11
-lastReviewedCommit: 29a8ed0
+lastReviewedCommit: HEAD
 ---
 
 # Repo Validation
