@@ -1,3 +1,9 @@
+import {
+  validateScientificAmendmentRecord,
+  projectScientificAmendments,
+  type ScientificAmendmentRecord,
+} from "./scientific-amendment.js";
+import type { ScientificFulfillmentRecord } from "./scientific-fulfillment.js";
 import { readFile } from "node:fs/promises";
 import { CliError } from "../../errors.js";
 import { parseScientificDesign } from "./scientific-design.js";
@@ -42,17 +48,25 @@ export async function verifyScientificFulfillmentAudit(
     (event) => event.scope === projectId && event.type === "scientific.fulfillment.recorded",
   );
   const binding = project.scientificDesign;
-  if (!events.length) {
-    if (binding?.fulfillmentSha256) throw invalid();
+  const amendmentEvents = proof.events.filter(
+    (event) => event.scope === projectId && event.type === "scientific.amendment.recorded",
+  );
+  if (!binding) {
+    if (events.length || amendmentEvents.length) throw invalid();
     return;
   }
-  if (!binding || binding.fulfillmentSha256 !== events.at(-1)?.payload.recordSha256)
+  if (
+    (binding.fulfillmentSha256 ?? null) !== (events.at(-1)?.payload.recordSha256 ?? null) ||
+    (binding.amendmentSha256 ?? null) !== (amendmentEvents.at(-1)?.payload.recordSha256 ?? null)
+  )
     throw invalid();
+  if (!events.length && !amendmentEvents.length) return;
   const basePath = `project/scientific/design/objects/${binding.designSha256}.json`;
   if (indexed.get(basePath)?.sha256 !== binding.designSha256) throw invalid();
   const base = parseScientificDesign(await read(basePath));
   if (base.projectId !== projectId) throw invalid();
   const effective = structuredClone(base);
+  const fulfillmentRecords: ScientificFulfillmentRecord[] = [];
   let parent: string | null = null;
   const seen = new Set<string>();
   for (const event of events) {
@@ -126,9 +140,50 @@ export async function verifyScientificFulfillmentAudit(
           }
       }
     }
+    fulfillmentRecords.push(record);
     applyScientificFulfillmentRecord(effective, record);
     parent = hash;
   }
+  const amendments: ScientificAmendmentRecord[] = [];
+  for (const event of amendmentEvents) {
+    if (event.sourcePayloadSha256 !== sha256Text(canonicalJson(event.payload))) throw invalid();
+    const hash = String(event.payload.recordSha256);
+    const record = validateScientificAmendmentRecord(
+      await read(`project/scientific/amendments/${hash}.json`),
+      projectId,
+      hash,
+    );
+    if (
+      event.payload.planSha256 !== record.plan.planSha256 ||
+      event.payload.parentAmendmentSha256 !== record.plan.parentAmendmentSha256 ||
+      !isObject(event.payload.mutation) ||
+      event.payload.mutation.requestSha256 !== hash
+    )
+      throw invalid();
+    const sourcePath = `project/scientific/authorization/${record.amendmentAuthorization.sourceSha256}.txt`;
+    const source = indexed.get(sourcePath);
+    if (
+      source?.sha256 !== record.amendmentAuthorization.sourceSha256 ||
+      source.bytes !== record.amendmentAuthorization.sourceBytes
+    )
+      throw invalid();
+    const sourceBytes = await readFile(resolveContained(bundle, sourcePath));
+    if (
+      sourceBytes.length !== source.bytes ||
+      sha256Text(sourceBytes.toString("utf8")) !== source.sha256
+    )
+      throw invalid();
+    const designPath = `project/scientific/design/objects/${record.design.sha256}.json`;
+    if (indexed.get(designPath)?.sha256 !== record.design.sha256) throw invalid();
+    await read(designPath);
+    amendments.push(record);
+  }
+  const amendedBase = projectScientificAmendments(
+    base,
+    binding.designSha256,
+    fulfillmentRecords,
+    amendments,
+  );
   // Current prepared/passed gate packets must bind their deadline-specific view.
   for (const role of ["research-design", "evidence-construct", "pilot-methods"] as const) {
     const gate = binding.gates[role];
@@ -143,7 +198,9 @@ export async function verifyScientificFulfillmentAudit(
       !isObject(packet.design)
     )
       throw invalid();
-    const view = structuredClone(base);
+    if ((packet.design.amendmentSha256 ?? null) !== (binding.amendmentSha256 ?? null))
+      throw invalid();
+    const view = structuredClone(amendedBase);
     for (const event of events)
       applyScientificFulfillmentRecord(
         view,
@@ -166,7 +223,7 @@ export async function verifyScientificFulfillmentAudit(
 }
 function invalid() {
   return new CliError(
-    "Scientific fulfillment audit relationships or source objects are inconsistent.",
+    "Scientific design history, fulfillment, amendment authorization or source objects are inconsistent.",
     { code: "RESEARCH_AUDIT_BUNDLE_INVALID", exitCode: 3 },
   );
 }

@@ -21,6 +21,11 @@ import {
 } from "../src/research/workspace/storage.js";
 import type { ResearchPolicyBinding } from "../src/research/workspace/types.js";
 import { initializeResearchWorkspace } from "../src/research/workspace/workspace.js";
+import {
+  exportProjectAuditBundle,
+  verifyProjectAuditBundle,
+} from "../src/research/workspace/audit-bundle.js";
+import { prepareScientificReview } from "../src/research/workspace/scientific-review.js";
 import { loadScientificFulfillmentView } from "../src/research/workspace/scientific-fulfillment.js";
 import { scientificDesignInput, passResearchDesignGate } from "./helpers/scientific-design.js";
 
@@ -147,8 +152,8 @@ describe("owner-authorized pre-analysis scientific amendments", () => {
       assert.equal(applied.exitCode, 0, applied.stderr);
       const record = JSON.parse(applied.stdout);
       assert.equal(record.plan.planSha256, plan.planSha256);
-      assert.equal(record.authorization.kind, "operator-confirmation");
-      assert.equal(record.authorization.sourceSha256, await sha256File(authorizationPath));
+      assert.equal(record.amendmentAuthorization.kind, "operator-confirmation");
+      assert.equal(record.amendmentAuthorization.sourceSha256, await sha256File(authorizationPath));
       const amended = await loadProject(root, projectId);
       assert.equal(amended.scientificDesign!.designSha256, beforeDesign);
       assert.equal(amended.scientificDesign!.gates["research-design"].status, "pending");
@@ -176,6 +181,29 @@ describe("owner-authorized pre-analysis scientific amendments", () => {
       ]);
       assert.equal(status.exitCode, 0, status.stderr);
       assert.equal(JSON.parse(status.stdout).amendmentSha256, record.recordSha256);
+      const packet = await prepareScientificReview({
+        root,
+        projectId,
+        role: "research-design",
+        assessmentPath: join(root, `${projectId}-research-design-assessment.json`),
+        reviewerAgent: "claude",
+        reviewerSessionId: "independent-amended-design-review",
+      });
+      assert.equal(packet.design.amendmentSha256, record.recordSha256);
+      assert.ok(
+        packet.stageInputs.some(
+          (item) => item.sha256 === record.amendmentAuthorization.sourceSha256,
+        ),
+      );
+      assert.ok(
+        packet.stageInputs.some((item) =>
+          item.sourceLocator.endsWith(`/amendments/${record.recordSha256}.json`),
+        ),
+      );
+      assert.ok(packet.stageInputs.some((item) => item.purpose === "effective-scientific-design"));
+      const destination = join(root, "portable-amendment-audit");
+      await exportProjectAuditBundle({ root, projectId, destination });
+      assert.equal((await verifyProjectAuditBundle(destination)).status, "verified");
     } finally {
       await rm(root, { recursive: true, force: true });
     }

@@ -156,6 +156,8 @@ import {
   scientificFulfillmentSchema,
 } from "./workspace/scientific-fulfillment.js";
 import {
+  applyScientificAmendment,
+  inspectScientificAmendment,
   planScientificAmendment,
   scientificAmendmentSchema,
 } from "./workspace/scientific-amendment.js";
@@ -246,6 +248,8 @@ export function researchOrchestrationHelp(): string {
   tiangong-ai research scientific fulfillment record <project> --input <json-file> [--workspace <path>] [--json]
   tiangong-ai research scientific fulfillment status <project> [--workspace <path>] [--json]
   tiangong-ai research scientific amendment plan <project> --input <json-file> [--workspace <path>] [--json]
+  tiangong-ai research scientific amendment apply <project> --plan <json-file> --confirm <plan-sha256> --authorization-source <text-file> [--workspace <path>] [--json]
+  tiangong-ai research scientific amendment status <project> [--workspace <path>] [--json]
   tiangong-ai research project task run observe <project> --input <json-file> --confirm-execution [--workspace <path>] [--json]
   tiangong-ai research project task run inspect <project> --run <run-id> [--workspace <path>] [--json]
   tiangong-ai research project budget resolve <project-id> --reservation <id> --accounted-cost-usd <estimate> --reason <text> --confirm-budget [--workspace <path>] [--json]
@@ -311,29 +315,55 @@ async function runScientific(argv: string[], io: CliIO): Promise<number> {
   if (!action || action === "--help" || action === "-h") return writeHelp(io);
   if (action === "amendment") {
     const [operation, ...arguments_] = rest;
-    if (operation !== "plan") throw unknownAction("research scientific amendment", operation ?? "");
+    if (!["plan", "apply", "status"].includes(operation ?? ""))
+      throw unknownAction("research scientific amendment", operation ?? "");
     const args = parseStrictArgs(
       arguments_,
-      { ...WORKSPACE_OPTIONS, input: "string" },
-      "research scientific amendment plan",
+      {
+        ...WORKSPACE_OPTIONS,
+        ...(operation === "plan" ? { input: "string" as const } : {}),
+        ...(operation === "apply"
+          ? {
+              plan: "string" as const,
+              confirm: "string" as const,
+              "authorization-source": "string" as const,
+            }
+          : {}),
+      },
+      `research scientific amendment ${operation}`,
     );
     if (strictBoolean(args, "help")) return writeHelp(io);
-    const projectId = onePositional(args.positionals, "research scientific amendment plan");
-    const path = strictString(args, "input");
-    if (!path)
-      throw new CliError("Amendment plan requires --input.", {
-        code: "RESEARCH_SCIENTIFIC_AMENDMENT_INVALID",
-        exitCode: 2,
-      });
-    writeJson(
-      io,
-      await planScientificAmendment(
-        await workspaceFromArgs(args),
-        projectId,
-        await readBoundedJsonRecord(path, "--input", "RESEARCH_SCIENTIFIC_AMENDMENT_INVALID"),
-      ),
-      args,
-    );
+    const projectId = onePositional(args.positionals, `research scientific amendment ${operation}`);
+    const root = await workspaceFromArgs(args);
+    if (operation === "status")
+      writeJson(io, await inspectScientificAmendment(root, projectId), args);
+    else {
+      const field = operation === "plan" ? "input" : "plan";
+      const path = strictString(args, field);
+      if (!path)
+        throw new CliError(`Amendment ${operation} requires --${field}.`, {
+          code: "RESEARCH_SCIENTIFIC_AMENDMENT_INVALID",
+          exitCode: 2,
+        });
+      const value = await readBoundedJsonRecord(
+        path,
+        `--${field}`,
+        "RESEARCH_SCIENTIFIC_AMENDMENT_INVALID",
+      );
+      writeJson(
+        io,
+        operation === "plan"
+          ? await planScientificAmendment(root, projectId, value)
+          : await applyScientificAmendment(
+              root,
+              projectId,
+              value,
+              strictString(args, "confirm"),
+              strictString(args, "authorization-source"),
+            ),
+        args,
+      );
+    }
     return 0;
   }
   if (action === "fulfillment") {
