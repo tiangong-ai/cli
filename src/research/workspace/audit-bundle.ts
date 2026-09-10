@@ -438,7 +438,7 @@ export async function verifyProjectAuditBundle(bundlePath: string): Promise<{
     }
   }
   await assertPortableTextFiles(bundlePath);
-  const amendmentImpact = await verifyScientificFulfillmentAudit(
+  const scientificHistory = await verifyScientificFulfillmentAudit(
     bundlePath,
     manifest.projectId,
     manifest.files,
@@ -461,7 +461,8 @@ export async function verifyProjectAuditBundle(bundlePath: string): Promise<{
       manifest.projectId,
       manifest.researchChain.task,
       manifest.files,
-      amendmentImpact,
+      scientificHistory?.amendmentImpact,
+      scientificHistory,
     );
   } catch (error) {
     throw auditError("Task audit relationship verification failed.", error);

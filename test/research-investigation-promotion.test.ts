@@ -2,7 +2,7 @@ import { syntheticScientificPolicy } from "./helpers/scientific-policy.js";
 import { scientificDesignInput, passResearchDesignGate } from "./helpers/scientific-design.js";
 import { appendJournalEvent } from "../src/research/workspace/journal.js";
 import assert from "node:assert/strict";
-import { chmod, mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { chmod, cp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { it } from "node:test";
 import { acquiredFixture, cli } from "./helpers/task-fixture.js";
@@ -23,6 +23,87 @@ async function exactControl(root: string) {
       .map(async (path) => [path, await sha256File(path)]),
   );
 }
+async function rewriteCertificationHistory(
+  bundle: string,
+  oldHash: string,
+  effectiveHash: string,
+  lateFreeze: boolean,
+) {
+  const manifestPath = join(bundle, "manifest.json"),
+    proofPath = join(bundle, "state/journal-event-proofs.json");
+  const manifest = JSON.parse(await readFile(manifestPath, "utf8")),
+    proof = JSON.parse(await readFile(proofPath, "utf8"));
+  const oldPath = `project/task/runs/${oldHash}.json`,
+    run = JSON.parse(await readFile(join(bundle, oldPath), "utf8"));
+  run.investigationCertification.effectiveDesignSha256 = effectiveHash;
+  const { recordSha256: _old, ...core } = run;
+  const newHash = sha256Text(canonicalJson(core));
+  const newPath = `project/task/runs/${newHash}.json`,
+    text = JSON.stringify({ ...core, recordSha256: newHash }, null, 2) + "\n";
+  await rm(join(bundle, oldPath));
+  await writeFile(join(bundle, newPath), text);
+  Object.assign(
+    manifest.files.find((f: { path: string }) => f.path === oldPath),
+    { path: newPath, sha256: sha256Text(text), bytes: Buffer.byteLength(text) },
+  );
+  const completed = proof.events.find(
+    (e: { type: string; payload: { recordSha256?: string } }) =>
+      e.type === "project.task.run.completed" && e.payload.recordSha256 === oldHash,
+  );
+  completed.payload.recordSha256 = newHash;
+  if (lateFreeze) {
+    const index = proof.events.findIndex(
+      (e: { type: string }) => e.type === "scientific.fulfillment.recorded",
+    );
+    const [fulfilled] = proof.events.splice(index, 1);
+    const started = proof.events.findIndex(
+      (e: { type: string; payload: { runId?: string } }) =>
+        e.type === "project.task.run.started" && e.payload.runId === run.runId,
+    );
+    proof.events.splice(started + 1, 0, fulfilled);
+  }
+  let previous = "0".repeat(64);
+  for (const [i, event] of proof.events.entries()) {
+    event.sequence = i + 1;
+    event.sourcePreviousHash = previous;
+    event.sourcePayloadSha256 = sha256Text(canonicalJson(event.payload));
+    event.sourceEventHash = sha256Text(
+      canonicalJson({
+        schemaVersion: 1,
+        sequence: event.sequence,
+        timestamp: event.timestamp,
+        type: event.type,
+        scope: event.scope,
+        payload: event.payload,
+        previousHash: previous,
+      }),
+    );
+    previous = event.sourceEventHash;
+  }
+  proof.workspaceJournalHead = previous;
+  manifest.sourceBindings.workspaceJournalHead = previous;
+  const proofText = JSON.stringify(proof, null, 2) + "\n";
+  await chmod(proofPath, 0o600);
+  await writeFile(proofPath, proofText);
+  Object.assign(
+    manifest.files.find((f: { path: string }) => f.path === "state/journal-event-proofs.json"),
+    { sha256: sha256Text(proofText), bytes: Buffer.byteLength(proofText) },
+  );
+  manifest.files.sort((a: { path: string }, b: { path: string }) =>
+    a.path < b.path ? -1 : a.path > b.path ? 1 : 0,
+  );
+  const { manifestSha256: _manifest, ...manifestCore } = manifest;
+  await chmod(manifestPath, 0o600);
+  await writeFile(
+    manifestPath,
+    JSON.stringify(
+      { ...manifestCore, manifestSha256: sha256Text(canonicalJson(manifestCore)) },
+      null,
+      2,
+    ) + "\n",
+  );
+}
+
 it("separately authorizes a selected recipe and freezes only its predeclared scientific slots", async () => {
   if (process.platform === "win32") return; // Execution confinement has its own unsupported-platform regression.
   const fx = await acquiredFixture("computation", 0, true);
@@ -540,6 +621,51 @@ await writeFile(process.argv[3],JSON.stringify({schemaVersion:1,solverReached:tr
       certified.record.investigationCertification.isolation.policySha256,
       /^[a-f0-9]{64}$/,
     );
+    const temporalBase = join(fx.files, "temporal-base-audit");
+    await must(
+      await cli([
+        "research",
+        "project",
+        "audit",
+        "export",
+        projectId,
+        "--output",
+        temporalBase,
+        "--workspace",
+        fx.root,
+        "--json",
+      ]),
+    );
+    for (const lateFreeze of [false, true]) {
+      const tampered = join(fx.files, lateFreeze ? "late-freeze-audit" : "wrong-view-audit");
+      await cp(temporalBase, tampered, { recursive: true });
+      await rewriteCertificationHistory(
+        tampered,
+        certified.record.recordSha256,
+        lateFreeze ? beforeView.effectiveSha256 : "f".repeat(64),
+        lateFreeze,
+      );
+      const rejected = await cli([
+        "research",
+        "project",
+        "audit",
+        "verify",
+        "--bundle",
+        tampered,
+        "--json",
+      ]);
+      assert.notEqual(
+        rejected.exitCode,
+        0,
+        lateFreeze
+          ? "A model frozen after launch cannot justify that certification"
+          : "A recomputed run hash cannot invent a scientific execution view",
+      );
+      assert.match(
+        rejected.stderr,
+        /Certification did not start from its exact frozen scientific execution view/,
+      );
+    }
     const afterProject = await loadProject(fx.root, projectId);
     assert.ok(afterProject.usage.wallSeconds > beforeUsage);
     const allocation = afterProject.budget!.entries.find(

@@ -1,3 +1,4 @@
+import type { ScientificAuditHistory } from "./scientific-fulfillment-audit.js";
 import {
   loadInvestigationAudit,
   type InvestigationProofEvent,
@@ -75,6 +76,7 @@ export async function verifyTaskAudit(
   binding: TaskAuditBinding | undefined,
   files: Array<OutputRecord>,
   amendmentImpact?: ScientificAmendmentImpact,
+  scientificHistory?: ScientificAuditHistory,
 ): Promise<
   | (TaskAuditBinding & { executionCertified: false; investigations?: InvestigationAuditSummary })
   | undefined
@@ -100,7 +102,13 @@ export async function verifyTaskAudit(
   const proof = await read<{ events: ProofEvent[] }>("state/journal-event-proofs.json");
   if (!Array.isArray(proof.events)) throw invalid("Task audit requires its journal proof view.");
   const events = proof.events.filter((event) => event.scope === projectId);
-  const investigations = await loadInvestigationAudit(bundle, projectId, files, proof.events);
+  const investigations = await loadInvestigationAudit(
+    bundle,
+    projectId,
+    files,
+    proof.events,
+    scientificHistory,
+  );
   const currentBinding = latestTaskBinding(events, projectId);
   if (!currentBinding) {
     if (

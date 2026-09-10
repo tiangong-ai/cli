@@ -1,3 +1,8 @@
+import {
+  scientificAuditViewBefore,
+  type ScientificAuditHistory,
+} from "./scientific-fulfillment-audit.js";
+import { applyScientificFulfillmentRecord } from "./scientific-fulfillment.js";
 import { loadInvestigationClosure } from "./investigation-close.js";
 import { relevantInvestigationEvents } from "./investigation-lineage.js";
 import { readFile } from "node:fs/promises";
@@ -42,6 +47,7 @@ export async function loadInvestigationAudit(
   projectId: string,
   files: OutputRecord[],
   proofs: InvestigationProofEvent[],
+  scientificHistory?: ScientificAuditHistory,
 ) {
   if (
     !proofs.some(
@@ -197,6 +203,20 @@ export async function loadInvestigationAudit(
     if (event.type !== "investigation.promotion.approved") continue;
     const promotion = preloadedPromotions.get(String(event.payload.recordSha256));
     if (!promotion) throw invalid("Investigation promotion has no selected project authority.");
+    if (
+      !scientificHistory ||
+      scientificHistory.project.id !== promotion.projectId ||
+      scientificHistory.project.scientificDesign?.designSha256 !== promotion.plan.designSha256 ||
+      scientificHistory.project.publicationPolicy?.resolvedPolicySha256 !==
+        promotion.plan.policySha256
+    )
+      throw invalid("Promotion has no verified target scientific history.");
+    const beforePromotion = scientificAuditViewBefore(scientificHistory, event.sequence);
+    if (sha256Text(canonicalJson(beforePromotion)) !== promotion.plan.beforeEffectiveDesignSha256)
+      throw invalid("Promotion does not bind its actual pre-approval scientific view.");
+    applyScientificFulfillmentRecord(beforePromotion, promotion.plan.fulfillment);
+    if (sha256Text(canonicalJson(beforePromotion)) !== promotion.plan.expectedEffectiveDesignSha256)
+      throw invalid("Promotion invents a different projected scientific fulfillment.");
     const plan = promotion.plan,
       definition = definitions.get(plan.definitionSha256),
       candidate = candidates.get(plan.candidateSha256);
@@ -278,6 +298,26 @@ export async function loadInvestigationAudit(
         cert.recipeSha256 !== candidate.recipeSha256
       )
         throw invalid("Certification references an absent or foreign promoted candidate.");
+      if (!scientificHistory) throw invalid("Certification has no verified scientific history.");
+      const atStart = scientificAuditViewBefore(scientificHistory, started.sequence);
+      const frozen = atStart.identity.modelStructures.find(
+        (model) => model.id === promotion.plan.modelId,
+      );
+      if (
+        cert.effectiveDesignSha256 !== sha256Text(canonicalJson(atStart)) ||
+        run.designSha256 !== promotion.plan.designSha256 ||
+        run.policySha256 !== promotion.plan.policySha256 ||
+        !frozen ||
+        frozen.implementationStatus !== "executable-frozen" ||
+        frozen.implementationArtifactSha256 !== candidate.recipe.script.sha256 ||
+        frozen.implementationEntrypoint !==
+          (candidate.recipe.runtime.kind === "node" ? "program.mjs" : "program.py") ||
+        frozen.environmentLockStatus !== "exact-frozen" ||
+        frozen.environmentLockSha256 !== candidate.recipe.environmentLock.sha256
+      )
+        throw invalid(
+          "Certification did not start from its exact frozen scientific execution view.",
+        );
       const recipe = candidate.recipe;
       if (
         run.requirementId !== promotion.plan.requirementId ||

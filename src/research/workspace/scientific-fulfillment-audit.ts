@@ -8,7 +8,7 @@ import type { ScientificFulfillmentRecord } from "./scientific-fulfillment.js";
 import { readFile } from "node:fs/promises";
 import { parseAtomRecord } from "./content-evidence.js";
 import { CliError } from "../../errors.js";
-import { parseScientificDesign } from "./scientific-design.js";
+import { parseScientificDesign, type ScientificDesignContract } from "./scientific-design.js";
 import {
   applyScientificFulfillmentRecord,
   validateScientificFulfillmentRecord,
@@ -16,12 +16,37 @@ import {
 import { canonicalJson, isObject, resolveContained, sha256Text } from "./storage.js";
 import type { JournalEvent, OutputRecord, ProjectState } from "./types.js";
 
+export interface ScientificAuditHistory {
+  project: ProjectState;
+  base: ScientificDesignContract;
+  fulfillments: Array<{ sequence: number; record: ScientificFulfillmentRecord }>;
+  amendments: Array<{ sequence: number; record: ScientificAmendmentRecord }>;
+  amendmentImpact: ReturnType<typeof scientificAmendmentImpact>;
+}
+/** Reconstruct only already verified declarations committed before one event. */
+export function scientificAuditViewBefore(history: ScientificAuditHistory, sequence: number) {
+  const records = history.fulfillments
+    .filter((item) => item.sequence < sequence)
+    .map((item) => item.record);
+  const amendments = history.amendments
+    .filter((item) => item.sequence < sequence)
+    .map((item) => item.record);
+  const view = projectScientificAmendments(
+    history.base,
+    history.project.scientificDesign!.designSha256,
+    records,
+    amendments,
+  );
+  for (const record of records) applyScientificFulfillmentRecord(view, record);
+  return view;
+}
+
 /** A portable integrity check, not certification of authorship, scientific truth or execution. */
 export async function verifyScientificFulfillmentAudit(
   bundle: string,
   projectId: string,
   files: OutputRecord[],
-) {
+): Promise<ScientificAuditHistory | undefined> {
   const indexed = new Map(files.map((file) => [file.path, file]));
   const cache = new Map<string, unknown>();
   const read = async <T>(path: string): Promise<T> => {
@@ -42,7 +67,11 @@ export async function verifyScientificFulfillmentAudit(
   const project = await read<ProjectState>("state/project.json");
   const proof = await read<{
     events: Array<
-      Pick<JournalEvent, "scope" | "type" | "payload"> & { sourcePayloadSha256: string }
+      Pick<JournalEvent, "scope" | "type" | "payload" | "sequence" | "timestamp"> & {
+        sourcePayloadSha256: string;
+        sourcePreviousHash: string;
+        sourceEventHash: string;
+      }
     >;
   }>("state/journal-event-proofs.json");
   if (project.id !== projectId || !Array.isArray(proof.events)) throw invalid();
@@ -62,7 +91,26 @@ export async function verifyScientificFulfillmentAudit(
     (binding.amendmentSha256 ?? null) !== (amendmentEvents.at(-1)?.payload.recordSha256 ?? null)
   )
     throw invalid();
-  if (!events.length && !amendmentEvents.length) return;
+  for (const event of [...events, ...amendmentEvents]) {
+    if (
+      !Number.isSafeInteger(event.sequence) ||
+      event.sequence < 1 ||
+      event.sourcePayloadSha256 !== sha256Text(canonicalJson(event.payload)) ||
+      event.sourceEventHash !==
+        sha256Text(
+          canonicalJson({
+            schemaVersion: 1,
+            sequence: event.sequence,
+            timestamp: event.timestamp,
+            type: event.type,
+            scope: event.scope,
+            payload: event.payload,
+            previousHash: event.sourcePreviousHash,
+          }),
+        )
+    )
+      throw invalid();
+  }
   const basePath = `project/scientific/design/objects/${binding.designSha256}.json`;
   if (indexed.get(basePath)?.sha256 !== binding.designSha256) throw invalid();
   const base = parseScientificDesign(await read(basePath));
@@ -225,7 +273,19 @@ export async function verifyScientificFulfillmentAudit(
         throw invalid();
     } else if (canonicalJson(view) !== canonicalJson(base)) throw invalid();
   }
-  return scientificAmendmentImpact(amendments, base);
+  return {
+    project,
+    base,
+    fulfillments: fulfillmentRecords.map((record, index) => ({
+      record,
+      sequence: events[index]!.sequence,
+    })),
+    amendments: amendments.map((record, index) => ({
+      record,
+      sequence: amendmentEvents[index]!.sequence,
+    })),
+    amendmentImpact: scientificAmendmentImpact(amendments, base),
+  };
 }
 function invalid() {
   return new CliError(
