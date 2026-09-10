@@ -19,7 +19,18 @@ import {
   initializeProject,
   loadProject,
 } from "../src/research/workspace/projects.js";
-import { recordScientificFulfillment } from "../src/research/workspace/scientific-fulfillment.js";
+import {
+  applyScientificAmendment,
+  planScientificAmendment,
+} from "../src/research/workspace/scientific-amendment.js";
+import {
+  exportProjectAuditBundle,
+  verifyProjectAuditBundle,
+} from "../src/research/workspace/audit-bundle.js";
+import {
+  loadScientificFulfillmentView,
+  recordScientificFulfillment,
+} from "../src/research/workspace/scientific-fulfillment.js";
 import { readAndVerifyScientificDesign } from "../src/research/workspace/scientific-design.js";
 import { prepareScientificReview } from "../src/research/workspace/scientific-review.js";
 import {
@@ -248,6 +259,56 @@ describe("predeclared scientific parameter fulfillment", () => {
           },
         ],
       });
+      const beforeAmendment = await loadScientificFulfillmentView(
+        root,
+        await loadProject(root, projectId),
+      );
+      const beforeContent = await readFile(
+        join(workspacePaths(root).projects, projectId, "outputs/content-snapshot.json"),
+        "utf8",
+      );
+      const beforeSource = await sha256File(inputPath);
+      const plannedRule = beforeAmendment.contract.policyRuleDispositions.find(
+        (item) => item.ruleId === "robustness-and-uncertainty-reviewed",
+      )!;
+      const plan = await planScientificAmendment(root, projectId, {
+        schemaVersion: 1,
+        reason: "Bind the existing source-filled parameter to its planned robustness obligation.",
+        changes: [
+          {
+            ruleId: plannedRule.ruleId,
+            dueGate: "evidence-construct",
+            rationale: plannedRule.rationale,
+            modelStructureIds: [],
+            uncertaintyParameterIds: [parameter.id],
+          },
+        ],
+      });
+      const confirmationPath = join(root, "amendment-confirmation.txt");
+      await writeFile(
+        confirmationPath,
+        "Synthetic owner approval of this exact rule-binding amendment.",
+      );
+      await applyScientificAmendment(root, projectId, plan, plan.planSha256, confirmationPath);
+      const afterAmendment = await loadScientificFulfillmentView(
+        root,
+        await loadProject(root, projectId),
+      );
+      assert.deepEqual(afterAmendment.records, beforeAmendment.records);
+      assert.equal(
+        (await loadCurrentEvidenceSnapshot(root, projectId)).snapshotSha256,
+        snapshot.snapshotSha256,
+      );
+      assert.equal(
+        await readFile(
+          join(workspacePaths(root).projects, projectId, "outputs/content-snapshot.json"),
+          "utf8",
+        ),
+        beforeContent,
+      );
+      assert.equal(await sha256File(inputPath), beforeSource);
+      assert.ok(afterAmendment.deferredObjectRuleIds.includes(plannedRule.ruleId));
+      await passResearchDesignGate(root, projectId, "fresh-amended-parameter-design-review");
       let atomReads = 0;
       const originalReadFile = fs.readFile;
       const reader = t.mock.method(fs, "readFile", (...args: Parameters<typeof readFile>) => {
@@ -335,6 +396,9 @@ describe("predeclared scientific parameter fulfillment", () => {
         ),
         "scientific review needs the exact acquired source bytes, not only source hashes/excerpts",
       );
+      const destination = join(root, "amended-fulfillment-audit");
+      await exportProjectAuditBundle({ root, projectId, destination });
+      assert.equal((await verifyProjectAuditBundle(destination)).status, "verified");
     } finally {
       await rm(root, { recursive: true, force: true });
     }
@@ -378,7 +442,7 @@ async function parameterPolicy(root: string, projectId: string): Promise<Researc
       centralClaim: "Protocol behavior is validated using explicitly synthetic sources.",
       centralOutcome: "Correct hash and parameter bindings, not a scientific estimate.",
       contributionType: "protocol-fixture",
-      rules: ["uncertainty-propagated"],
+      rules: ["uncertainty-propagated", "robustness-and-uncertainty-reviewed"],
       constraints: {
         requireScientificDesignContract: true,
         requireEarlyScientificReviews: true,

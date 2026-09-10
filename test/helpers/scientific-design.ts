@@ -374,10 +374,13 @@ async function stageFixtureGapSources(
   }
 }
 
-export async function passResearchDesignGate(root: string, projectId: string): Promise<void> {
+export async function passResearchDesignGate(
+  root: string,
+  projectId: string,
+  sessionId = `independent-${projectId}-research-design-review`,
+): Promise<void> {
   const { scientificDesign } = await loadProject(root, projectId);
   if (!scientificDesign) throw new Error("Test project has no scientific design binding.");
-  const sessionId = `independent-${projectId}-research-design-review`;
   const assessmentPath = join(root, `${projectId}-research-design-assessment.json`);
   await writeJsonAtomic(assessmentPath, {
     schemaVersion: 1,

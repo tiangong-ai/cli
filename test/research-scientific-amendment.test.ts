@@ -1,11 +1,13 @@
 import assert from "node:assert/strict";
+import fs from "node:fs/promises";
+import { syncBuiltinESMExports } from "node:module";
 import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, it } from "node:test";
 import { runCli } from "../src/cli.js";
 import type { CliIO } from "../src/io.js";
-import { initializeProject, loadProject } from "../src/research/workspace/projects.js";
+import { initializeProject, loadProject, saveProject } from "../src/research/workspace/projects.js";
 import { readAndVerifyScientificDesign } from "../src/research/workspace/scientific-design.js";
 import {
   initializeResearchPolicy,
@@ -30,7 +32,7 @@ import { loadScientificFulfillmentView } from "../src/research/workspace/scienti
 import { scientificDesignInput, passResearchDesignGate } from "./helpers/scientific-design.js";
 
 describe("owner-authorized pre-analysis scientific amendments", () => {
-  it("plans an exact pending-rule binding correction without changing the project or journal", async () => {
+  it("plans an exact pending-rule binding correction without changing the project or journal", async (t) => {
     const root = await mkdtemp(join(tmpdir(), "tiangong-design-amendment-"));
     const projectId = "design-amendment";
     try {
@@ -66,6 +68,24 @@ describe("owner-authorized pre-analysis scientific amendments", () => {
       );
       await passResearchDesignGate(root, projectId);
       const beforeProject = canonicalJson(await loadProject(root, projectId));
+      let journalReads = 0;
+      const originalRead = fs.readFile;
+      const reader = t.mock.method(fs, "readFile", (...args: Parameters<typeof readFile>) => {
+        if (String(args[0]) === workspacePaths(root).journal) journalReads += 1;
+        return originalRead(...args);
+      });
+      syncBuiltinESMExports();
+      try {
+        await loadScientificFulfillmentView(root, await loadProject(root, projectId));
+      } finally {
+        reader.mock.restore();
+        syncBuiltinESMExports();
+      }
+      assert.equal(
+        journalReads,
+        0,
+        "an unamended base must not reread the full journal for each design view",
+      );
       const beforeJournal = await readFile(workspacePaths(root).journal, "utf8");
       const originalPath = join(
         workspacePaths(root).control,
@@ -124,12 +144,62 @@ describe("owner-authorized pre-analysis scientific amendments", () => {
       ]);
       assert.equal(repeated.exitCode, 0, repeated.stderr);
       assert.equal(JSON.parse(repeated.stdout).planSha256, plan.planSha256);
+      const inputValue = JSON.parse(await readFile(inputPath, "utf8"));
+      for (const bad of [
+        { ...inputValue, question: "Change the scientific question" },
+        { ...inputValue, changes: [{ ...inputValue.changes[0], status: "satisfied-by-design" }] },
+        {
+          ...inputValue,
+          changes: [{ ...inputValue.changes[0], uncertaintyParameterIds: ["undeclared"] }],
+        },
+        { ...inputValue, changes: [inputValue.changes[0], inputValue.changes[0]] },
+      ]) {
+        await writeJsonAtomic(inputPath, bad);
+        const rejected = await invoke([
+          "research",
+          "scientific",
+          "amendment",
+          "plan",
+          projectId,
+          "--input",
+          inputPath,
+          "--workspace",
+          root,
+          "--json",
+        ]);
+        assert.notEqual(rejected.exitCode, 0);
+        assert.equal(await readFile(workspacePaths(root).journal, "utf8"), beforeJournal);
+      }
+      await writeJsonAtomic(inputPath, {
+        ...inputValue,
+        reason: "A separate proposed correction requiring its own fresh approval.",
+        changes: [
+          {
+            ...inputValue.changes[0],
+            rationale: "Bind the same declared parameter under a separately proposed rationale.",
+          },
+        ],
+      });
+      const alternate = await invoke([
+        "research",
+        "scientific",
+        "amendment",
+        "plan",
+        projectId,
+        "--input",
+        inputPath,
+        "--workspace",
+        root,
+        "--json",
+      ]);
+      assert.equal(alternate.exitCode, 0, alternate.stderr);
+      const stalePlan = JSON.parse(alternate.stdout);
       const planPath = join(root, "reviewed-plan.json");
       const authorizationPath = join(root, "owner-confirmation.txt");
       await writeJsonAtomic(planPath, plan);
       await writeTextAtomic(
         authorizationPath,
-        "Synthetic owner confirmation of this exact pending-rule binding correction.",
+        "\uFEFF批准此精确修订。Synthetic owner confirmation of this exact pending-rule binding correction.",
       );
       const command = [
         "research",
@@ -165,6 +235,11 @@ describe("owner-authorized pre-analysis scientific amendments", () => {
       assert.deepEqual(amendedRule.uncertaintyParameterIds, [parameterId]);
       assert.equal(amendedRule.status, "planned");
       const journalAfter = await readFile(workspacePaths(root).journal, "utf8");
+      await writeJsonAtomic(planPath, stalePlan);
+      const stale = await invoke([...command, "--confirm", stalePlan.planSha256]);
+      assert.equal(stale.exitCode, 3, stale.stderr);
+      assert.equal(await readFile(workspacePaths(root).journal, "utf8"), journalAfter);
+      await writeJsonAtomic(planPath, plan);
       const replay = await invoke([...command, "--confirm", plan.planSha256]);
       assert.equal(replay.exitCode, 0, replay.stderr);
       assert.equal(JSON.parse(replay.stdout).recordSha256, record.recordSha256);
@@ -204,6 +279,23 @@ describe("owner-authorized pre-analysis scientific amendments", () => {
       const destination = join(root, "portable-amendment-audit");
       await exportProjectAuditBundle({ root, projectId, destination });
       assert.equal((await verifyProjectAuditBundle(destination)).status, "verified");
+      const postAnalysis = await loadProject(root, projectId);
+      postAnalysis.packages.find((item) => item.stage === "analyze")!.attempts = 1;
+      await saveProject(root, postAnalysis);
+      const late = await invoke([
+        "research",
+        "scientific",
+        "amendment",
+        "plan",
+        projectId,
+        "--input",
+        inputPath,
+        "--workspace",
+        root,
+        "--json",
+      ]);
+      assert.equal(late.exitCode, 3, late.stderr);
+      assert.equal(JSON.parse(late.stderr).error.code, "RESEARCH_SCIENTIFIC_AMENDMENT_UNAVAILABLE");
     } finally {
       await rm(root, { recursive: true, force: true });
     }
