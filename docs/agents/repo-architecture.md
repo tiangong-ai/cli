@@ -13,7 +13,7 @@ checkPaths:
   - src/**
   - bin/**
 lastReviewedAt: 2026-09-10
-lastReviewedCommit: e457212717842d7b238dc914461eb6ded7e83ca3
+lastReviewedCommit: 8fa13b4e4428d7b8d75ea3f193998cb789daff3a
 ---
 
 # Repo Architecture
@@ -505,7 +505,8 @@ inside that operation-local view, making long-history enumeration linear
 without a persistent cache or artifact rescan.
 
 `project-mutations.ts` is limited to fork, package retry, pre-analysis acquisition
-revision, and task-scope approval metadata, not a general workflow engine.
+revision, task-scope approval, scientific fulfillment and bounded design
+amendment metadata, not a general workflow engine.
 A journal-bound pending intent precedes fork target
 creation; all target bytes precede the `project.forked` commit point. Source
 state and supersession ledger records are idempotent post-commit projections.
@@ -572,6 +573,26 @@ Model registration and frozen typed-content atoms remain the source authorities.
 `scientific-fulfillment-audit.ts` checks the same slot transitions, raw objects,
 registration hashes and committed head using portable indexed files. It does not
 turn an object-filing obligation into independent scientific approval.
+
+`scientific-amendment.ts` derives a read-only plan for existing planned Policy
+rule lifecycle declarations and model/parameter links. Apply binds exact plan
+confirmation and supplied UTF-8 source bytes to an immutable declaration version
+and parent record through the existing project mutation journal. Original base
+and fulfillment records remain immutable; the effective-design loader verifies
+and projects their history. Current review packets stage amendment records,
+confirmation source, version bytes and effective view. The amendment resets the
+three early scientific gates but changes no evidence or numerical values.
+
+An operation-local impact index uses existing rule claim/evidence-role links and
+task requirement claim/coverage bindings. Each affected acceptance record binds
+only its latest relevant amendment, so unrelated checks retain their exact
+identity and replay behavior. Plans/status expose affected requirement IDs;
+current task context and portable audit compute the same required binding.
+The ordinary unamended view keeps constant-cost absent-history checks and reuses
+supplied journal views. No persistent dependency graph or provider work is added.
+Confirmation provenance and hash integrity do not authenticate authorship or
+prove scientific correctness. Inference-frozen/post-analysis or substantive
+changes remain successor work.
 
 `analysis-run.ts` centralizes mode consistency for both stage submission and
 publication freeze. Qualitative records retain `not-applicable` computational

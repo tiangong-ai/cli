@@ -3,6 +3,7 @@ import { constants } from "node:fs";
 import { chmod, copyFile, lstat, mkdir, readFile } from "node:fs/promises";
 import { isAbsolute, join, relative, resolve, sep } from "node:path";
 
+import { scientificAmendmentLocator } from "./scientific-amendment.js";
 import { CliError } from "../../errors.js";
 import { taskContext } from "./task-contract.js";
 import { nativeRunArtifactRecords } from "./native-run.js";
@@ -199,6 +200,7 @@ interface ScientificReviewStageInput {
     | "model-implementation"
     | "model-environment-lock"
     | "scientific-fulfillment"
+    | "scientific-amendment"
     | "effective-scientific-design"
     | "original-request-source"
     | "native-calculation"
@@ -221,6 +223,7 @@ export interface ScientificReviewPacket {
     sha256: string;
     objectLocator: string;
     fulfillment?: { headSha256: string | null; effectiveSha256: string };
+    amendmentSha256?: string | null;
   };
   policy: {
     resolvedPolicySha256: string;
@@ -611,7 +614,28 @@ export async function prepareScientificReview(input: {
     }
     if (input.role !== "research-design")
       stageInputs.push(...(await modelObjectInputs(input.root, project.id, design)));
-    if (fulfillment.records.length) {
+    const amendmentInputs = new Set<string>();
+    for (const record of fulfillment.amendments) {
+      for (const locator of [
+        scientificAmendmentLocator(project.id, record.recordSha256),
+        record.amendmentAuthorization.sourceLocator,
+        record.design.objectLocator,
+      ]) {
+        if (amendmentInputs.has(locator)) continue;
+        amendmentInputs.add(locator);
+        stageInputs.push({
+          ...(await fileRecord(resolveContained(paths.control, locator), locator)),
+          purpose: "scientific-amendment",
+          ownerId: project.id,
+          sourceLocator: locator,
+          hashBasis: "raw-file-bytes",
+          mediaType: locator.endsWith(".txt") ? "text/plain" : "application/json",
+          objectKind: null,
+          registrationRecordSha256: null,
+        });
+      }
+    }
+    if (fulfillment.records.length || fulfillment.amendments.length) {
       for (const record of fulfillment.records) {
         const locator = scientificFulfillmentLocator(project.id, record.recordSha256);
         stageInputs.push({
@@ -674,6 +698,7 @@ export async function prepareScientificReview(input: {
       design: {
         sha256: project.scientificDesign.designSha256,
         objectLocator: project.scientificDesign.objectLocator,
+        amendmentSha256: project.scientificDesign.amendmentSha256 ?? null,
         fulfillment: {
           headSha256: fulfillment.headSha256,
           effectiveSha256: fulfillment.effectiveSha256,
@@ -714,7 +739,7 @@ export async function prepareScientificReview(input: {
       },
       instructions: [
         ...reviewInstructions(input.role),
-        "Scientific fulfillment files supply only previously declared pending object slots. The base design and policy dispositions remain immutable. Discharging an object-filing blocker does not establish calibration, justification or scientific correctness: independently assess the actual code, locks and source-bound values under every original policy rule.",
+        "Scientific fulfillment files supply only previously declared pending object slots. Original design bytes remain immutable. Owner-authorized lifecycle/binding amendments, when present, are staged with their exact changes, new design version and supplied authorization source. Review the current effective design; supplied confirmation does not authenticate human identity or establish scientific satisfaction. Discharging an object-filing blocker does not establish calibration, justification or scientific correctness: independently assess the actual code, locks and source-bound values under every original policy rule.",
       ],
     };
     const packetSha256 = sha256Text(canonicalJson(packetCore));
@@ -2009,6 +2034,10 @@ async function loadBoundPacket(
   }
   await assertBoundPolicyObject(root, project, value.policy);
   const fulfillment = await loadScientificFulfillmentView(root, project, role);
+  if (
+    (value.design.amendmentSha256 ?? null) !== (project.scientificDesign?.amendmentSha256 ?? null)
+  )
+    throw scientificGateError("Scientific review has a stale amendment generation.", role);
   if (value.design.fulfillment) {
     if (
       value.design.fulfillment.effectiveSha256 !== fulfillment.effectiveSha256 ||
@@ -2298,6 +2327,10 @@ function isScientificReviewPacket(
     isObject(value.design) &&
     typeof value.design.sha256 === "string" &&
     typeof value.design.objectLocator === "string" &&
+    (value.design.amendmentSha256 === undefined ||
+      value.design.amendmentSha256 === null ||
+      (typeof value.design.amendmentSha256 === "string" &&
+        new RegExp(SHA256_PATTERN).test(value.design.amendmentSha256))) &&
     (value.design.fulfillment === undefined ||
       (isObject(value.design.fulfillment) &&
         (value.design.fulfillment.headSha256 === null ||
@@ -2333,6 +2366,7 @@ function isScientificReviewPacket(
           "model-implementation",
           "model-environment-lock",
           "scientific-fulfillment",
+          "scientific-amendment",
           "effective-scientific-design",
           "original-request-source",
           "native-calculation",

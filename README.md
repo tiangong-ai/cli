@@ -13,7 +13,7 @@ checkPaths:
   - bin/**
   - src/**
 lastReviewedAt: 2026-09-10
-lastReviewedCommit: e457212717842d7b238dc914461eb6ded7e83ca3
+lastReviewedCommit: 8fa13b4e4428d7b8d75ea3f193998cb789daff3a
 ---
 
 # Tiangong AI CLI
@@ -1721,13 +1721,61 @@ acquisition snapshot; unchanged records are reused. Single and batch intake shar
 this rule. Historical records remain immutable, and atoms from deselected artifacts
 cannot fill current coverage. Same-snapshot conflicting extraction still fails.
 
-Actual question/Policy/design changes or post-analysis work require the existing
+Substantive question/Policy/design changes or post-analysis work require the existing
 fork/addendum flow. Pre-feature snapshots without immutable evidence records cannot
 be repaired in place; use `research project fork SOURCE --to TARGET
 --resume-through discover` to reuse discovery/receipts/artifacts, or explicitly
 start a new generation. There is no automatic migration. A top-journal successor
 requires a Policy approved for TARGET and `--design`, `--design-producer-agent`,
 and `--design-producer-session`; it cannot inherit scientific approval.
+
+### Amend planned design declarations before analysis
+
+At an idle boundary before analysis or inference freeze, a compatible runtime
+can amend an existing planned Policy rule's due gate, rationale, or links to
+already declared models/parameters. The question, claims, thresholds, model
+and parameter definitions/values, evidence requirements and Policy content stay
+fixed. Substantive changes continue through a reviewed successor.
+
+```bash
+tiangong-ai research schema show scientific-amendment --json
+tiangong-ai research scientific amendment plan PROJECT \
+  --input /absolute/amendment-input.json --workspace /absolute/workspace --json
+```
+
+The closed input contains `schemaVersion: 1`, a reason and `changes`; use the
+schema for their exact fields. Amendment status exposes the current editable
+fields under `plannedRules`, so unchanged links can be preserved explicitly. Save the returned plan JSON unchanged externally.
+It shows before/after declarations, current parent bindings, preserved acquisition,
+invalidated scientific gates and `affectedTaskRequirementIds`. Planning does not
+mutate the project or request a provider. After explicit approval of that exact
+plan, retain the actual supplied confirmation text in a bounded UTF-8 file:
+
+```bash
+tiangong-ai research scientific amendment apply PROJECT \
+  --plan /absolute/amendment-plan.json --confirm REVIEWED_PLAN_SHA256 \
+  --authorization-source /absolute/confirmation.txt --workspace /absolute/workspace --json
+tiangong-ai research scientific amendment status PROJECT --workspace /absolute/workspace --json
+```
+
+The CLI records operator-supplied confirmation, not authenticated human identity.
+Original design bytes, fulfillment records and valid evidence remain unchanged;
+a new immutable declaration version and its exact parent/changes/source are
+retained. Planned rules are not marked scientifically satisfied. New early
+scientific reviews receive the version history and current effective design.
+
+Task checks linked through existing claim/coverage bindings to changed rules
+become stale; unrelated checks remain reusable and idempotent. Affected check
+contexts expose `requiredDesignAmendmentSha256`; an explicit reassessment records
+its applicable amendment without requiring unchanged sources or calculations to
+be rerun. Unbound source-only checks do not establish the amended design's
+validity. Portable audit verifies the same selective relationships.
+
+Changed parents or Policy, unsupported fields, active stages and late amendments
+reject. Inspect and replan instead of editing hashes. A committed but interrupted
+apply recovers through the existing project transaction and identical retry;
+unknown or conflicting files are preserved. This path does not add a new paid
+review role or silently upgrade a locked runtime that lacks these commands.
 
 ### Fulfill predeclared scientific objects
 

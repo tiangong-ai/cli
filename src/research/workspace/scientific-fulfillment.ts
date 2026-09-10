@@ -29,6 +29,11 @@ import {
   writeJsonAtomic,
 } from "./storage.js";
 import type { JournalEvent, ProjectState, ScientificReviewRole } from "./types.js";
+import {
+  loadScientificAmendments,
+  projectScientificAmendments,
+  type ScientificAmendmentRecord,
+} from "./scientific-amendment.js";
 import { withWorkspaceLock } from "./workspace.js";
 
 const HASH = /^[a-f0-9]{64}$/;
@@ -69,6 +74,8 @@ export interface ScientificFulfillmentRecord extends Omit<
 }
 export interface ScientificFulfillmentView {
   base: ScientificDesignContract;
+  amendedBase: ScientificDesignContract;
+  amendments: ScientificAmendmentRecord[];
   contract: ScientificDesignContract;
   headSha256: string | null;
   effectiveSha256: string;
@@ -294,14 +301,22 @@ export async function loadScientificFulfillmentView(
     });
   }
   const head = binding.fulfillmentSha256 ?? null;
+  const hasFulfillmentHistory =
+    Boolean(head) ||
+    (await pathExists(join(workspacePaths(root).projects, project.id, "scientific/fulfillments")));
+  const hasAmendmentHistory =
+    Boolean(binding.amendmentSha256) ||
+    (await pathExists(join(workspacePaths(root).projects, project.id, "scientific/amendments")));
+  // Legacy/unamended reads retain constant-cost absent-namespace checks. Reuse
+  // an operation's verified journal when supplied; active history is never cached.
+  const journalEvents =
+    knownEvents ??
+    (hasFulfillmentHistory || hasAmendmentHistory
+      ? await readVerifiedJournal(workspacePaths(root).journal)
+      : []);
   const records: ScientificFulfillmentRecord[] = [];
-  if (
-    head ||
-    (await pathExists(join(workspacePaths(root).projects, project.id, "scientific/fulfillments")))
-  ) {
-    const events = (
-      knownEvents ?? (await readVerifiedJournal(workspacePaths(root).journal))
-    ).filter(
+  if (hasFulfillmentHistory) {
+    const events = journalEvents.filter(
       (event) => event.scope === project.id && event.type === "scientific.fulfillment.recorded",
     );
     if ((events.at(-1)?.payload.recordSha256 ?? null) !== head) throw conflict();
@@ -330,8 +345,15 @@ export async function loadScientificFulfillmentView(
   const atomBindings = records.some((record) => record.parameterStates.length)
     ? await loadAtomBindings(root, project.id)
     : undefined;
-  const complete = structuredClone(verified.contract);
-  const contract = throughGate ? structuredClone(verified.contract) : complete;
+  const amendments = await loadScientificAmendments(root, project, journalEvents);
+  const amendedBase = projectScientificAmendments(
+    verified.contract,
+    binding.designSha256,
+    records,
+    amendments,
+  );
+  const complete = structuredClone(amendedBase);
+  const contract = throughGate ? structuredClone(amendedBase) : complete;
   for (const record of records) {
     await assertObjectRecords(root, record, atomBindings);
     // Even an early-gate projection must reject invalid future-due slots.
@@ -340,16 +362,13 @@ export async function loadScientificFulfillmentView(
   }
   return {
     base: verified.contract,
+    amendedBase,
+    amendments,
     contract,
     headSha256: head,
     effectiveSha256: sha256Text(canonicalJson(contract)),
     records,
-    deferredObjectRuleIds: resolvedDeferredObjectRules(
-      verified.contract,
-      contract,
-      records,
-      throughGate,
-    ),
+    deferredObjectRuleIds: resolvedDeferredObjectRules(amendedBase, contract, records, throughGate),
   };
 }
 async function loadAtomBindings(root: string, projectId: string): Promise<Map<string, string>> {

@@ -1,3 +1,7 @@
+import {
+  loadScientificAmendmentImpact,
+  requirementAmendmentBinding,
+} from "./scientific-amendment.js";
 import { Ajv2020 } from "ajv/dist/2020.js";
 import { lstat, readFile, realpath } from "node:fs/promises";
 import { isAbsolute, join, relative, resolve } from "node:path";
@@ -105,6 +109,7 @@ export interface TaskAcceptanceRecord {
   findingBindings: Binding[];
   results: OutputRecord[];
   designSha256: string | null;
+  designAmendmentSha256?: string | null;
   policySha256: string | null;
   limitations: string[];
   trust: "native-observation";
@@ -134,6 +139,7 @@ export interface TaskAcceptanceContext {
       current: boolean;
       status: string;
       record: TaskAcceptanceRecord | null;
+      requiredDesignAmendmentSha256?: string;
     }
   >;
   results: OutputRecord[];
@@ -258,6 +264,10 @@ export async function recordProjectTaskAcceptance(
         "A positive or valid negative conclusion needs exact evidence or result bindings.",
       );
     }
+    const amendmentBinding = requirementAmendmentBinding(
+      requirement,
+      await loadScientificAmendmentImpact(root, project, events),
+    );
     const core = {
       schemaVersion: 1 as const,
       kind: "tiangong-task-acceptance" as const,
@@ -278,6 +288,7 @@ export async function recordProjectTaskAcceptance(
         .map((item) => item.record)
         .sort((a, b) => a.sha256.localeCompare(b.sha256)),
       designSha256: project.scientificDesign?.designSha256 ?? null,
+      ...(amendmentBinding ? { designAmendmentSha256: amendmentBinding } : {}),
       policySha256: project.publicationPolicy?.resolvedPolicySha256 ?? null,
       limitations: value.limitations as string[],
       trust: "native-observation" as const,
@@ -328,6 +339,9 @@ export async function compileTaskAcceptanceContext(
   const latest = latestAcceptanceEvents(view.events, project.id);
   const references = latest.size ? await referenceView(root, project) : null;
   const results = new Map<string, OutputRecord>();
+  const amendmentImpact = latest.size
+    ? await loadScientificAmendmentImpact(root, project, view.events)
+    : undefined;
   for (const [hash, row] of rows) {
     const event = latest.get(hash);
     if (!event) continue;
@@ -343,7 +357,9 @@ export async function compileTaskAcceptanceContext(
       const observed = await readNativeRun(root, project.id, record.nativeRunSha256);
       if (canonicalJson(observed) !== canonicalJson(record.nativeRun)) throw artifactDrift();
     }
-    row.status = taskRecordStatus(record, references!, project);
+    const amendmentBinding = requirementAmendmentBinding(row, amendmentImpact);
+    if (amendmentBinding) row.requiredDesignAmendmentSha256 = amendmentBinding;
+    row.status = taskRecordStatus(record, references!, project, amendmentBinding);
     for (const result of record.results) {
       if (results.has(result.sha256)) continue;
       if (result.path.startsWith("task/run-objects/")) {
@@ -399,10 +415,12 @@ export function taskRecordStatus(
   record: TaskAcceptanceRecord,
   references: ReferenceView,
   project: ProjectState,
+  amendmentBinding: string | null = null,
 ) {
   const current =
     references.ready &&
     record.designSha256 === (project.scientificDesign?.designSha256 ?? null) &&
+    (record.designAmendmentSha256 ?? null) === amendmentBinding &&
     record.policySha256 === (project.publicationPolicy?.resolvedPolicySha256 ?? null) &&
     bindingsMatch(record.sourceBindings, references.sources) &&
     bindingsMatch(record.atomBindings, references.atoms) &&
@@ -692,6 +710,10 @@ export function validateTaskAcceptanceRecord(record: TaskAcceptanceRecord, proje
     record.trust !== "native-observation" ||
     record.executionCertified !== false ||
     !HASH.test(record.requirementSha256) ||
+    (record.designAmendmentSha256 !== undefined &&
+      record.designAmendmentSha256 !== null &&
+      (typeof record.designAmendmentSha256 !== "string" ||
+        !HASH.test(record.designAmendmentSha256))) ||
     !outcomeNames.includes(record.outcome) ||
     ![record.sourceBindings, record.atomBindings, record.findingBindings].every(
       (bindings) =>

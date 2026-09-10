@@ -1,3 +1,7 @@
+import {
+  requirementAmendmentBinding,
+  type ScientificAmendmentImpact,
+} from "./scientific-amendment.js";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 
@@ -62,6 +66,7 @@ export async function verifyTaskAudit(
   projectId: string,
   binding: TaskAuditBinding | undefined,
   files: Array<OutputRecord>,
+  amendmentImpact?: ScientificAmendmentImpact,
 ): Promise<(TaskAuditBinding & { executionCertified: false }) | undefined> {
   const indexed = new Map(files.map((file) => [file.path, file]));
   const json = new Map<string, unknown>();
@@ -114,6 +119,8 @@ export async function verifyTaskAudit(
   const project = await read<ProjectState>("state/project.json");
   if (project.id !== projectId || history.current.questionSha256 !== sha256Text(project.question))
     throw invalid("Audit task belongs to a different research question.");
+  if (project.scientificDesign?.amendmentSha256 && !amendmentImpact)
+    throw invalid("Amended task acceptance requires verified design history.");
   const context = validateTaskObject<TaskAcceptanceContext>(
     await read("state/task-acceptance.json"),
     binding.contextSha256,
@@ -305,7 +312,9 @@ export async function verifyTaskAudit(
     const record = latest.get(hash);
     if (!record) continue;
     row.record = record;
-    row.status = taskRecordStatus(record, references, project);
+    const amendmentBinding = requirementAmendmentBinding(row, amendmentImpact);
+    if (amendmentBinding) row.requiredDesignAmendmentSha256 = amendmentBinding;
+    row.status = taskRecordStatus(record, references, project, amendmentBinding);
     for (const result of record.results) results.set(result.sha256, result);
   }
   if (

@@ -424,7 +424,11 @@ export async function verifyProjectAuditBundle(bundlePath: string): Promise<{
     }
   }
   await assertPortableTextFiles(bundlePath);
-  await verifyScientificFulfillmentAudit(bundlePath, manifest.projectId, manifest.files);
+  const amendmentImpact = await verifyScientificFulfillmentAudit(
+    bundlePath,
+    manifest.projectId,
+    manifest.files,
+  );
   const readProof = await readJsonFile<{
     events: Array<Pick<import("./types.js").JournalEvent, "type" | "scope" | "payload">>;
   }>(join(bundlePath, "state/journal-event-proofs.json"), "Artifact read journal proof");
@@ -443,6 +447,7 @@ export async function verifyProjectAuditBundle(bundlePath: string): Promise<{
       manifest.projectId,
       manifest.researchChain.task,
       manifest.files,
+      amendmentImpact,
     );
   } catch (error) {
     throw auditError("Task audit relationship verification failed.", error);
