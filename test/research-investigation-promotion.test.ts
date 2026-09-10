@@ -1,3 +1,5 @@
+import { syntheticScientificPolicy } from "./helpers/scientific-policy.js";
+import { scientificDesignInput, passResearchDesignGate } from "./helpers/scientific-design.js";
 import { appendJournalEvent } from "../src/research/workspace/journal.js";
 import assert from "node:assert/strict";
 import { chmod, readFile, rm, writeFile } from "node:fs/promises";
@@ -26,13 +28,13 @@ it("separately authorizes a selected recipe and freezes only its predeclared sci
   const fx = await acquiredFixture("computation", 0, true);
   try {
     const projectId = "task-project";
-    const command = (parts: string[], args: string[] = []) =>
+    const command = (parts: string[], args: string[] = [], requestedProjectId = projectId) =>
       cli([
         "research",
         "project",
         "investigation",
         ...parts,
-        projectId,
+        requestedProjectId,
         ...args,
         "--workspace",
         fx.root,
@@ -426,7 +428,7 @@ await writeFile(process.argv[3],JSON.stringify({schemaVersion:1,solverReached:tr
     const competingPlan = await must(
       await command(["plan"], ["--input", competingInvestigationPath]),
     );
-    await must(
+    const competingDefinition = await must(
       await command(
         ["approve"],
         [
@@ -579,9 +581,217 @@ await writeFile(process.argv[3],JSON.stringify({schemaVersion:1,solverReached:tr
         "--json",
       ]),
     );
+    const targetId = "task-project-successor";
+    const targetPolicy = await syntheticScientificPolicy(fx.root, targetId, [
+      "model-calibrated-or-justified",
+    ]);
+    const targetDesign = await scientificDesignInput(fx.root, targetId, {
+      pendingModels: true,
+      policyRules: targetPolicy.resolvedRules,
+      approvalStatus: "candidate-only",
+    });
+    await must(
+      await cli([
+        "research",
+        "project",
+        "fork",
+        projectId,
+        "--to",
+        targetId,
+        "--resume-through",
+        "acquire",
+        "--design",
+        join(fx.root, `${targetId}-scientific-design.json`),
+        "--design-producer-agent",
+        targetDesign.producerAgent,
+        "--design-producer-session",
+        targetDesign.producerSessionId,
+        "--workspace",
+        fx.root,
+        "--json",
+      ]),
+    );
+    await passResearchDesignGate(fx.root, targetId);
+    const targetStatus = JSON.parse((await fx.task(["status"], targetId)).stdout);
+    const targetRow = targetStatus.currentScope.requirements[0];
+    const targetModel = targetDesign.design.contract.identity.modelStructures[0]!;
+    const targetPromotionPath = join(fx.files, "successor-promotion.json");
+    await writeFile(
+      targetPromotionPath,
+      JSON.stringify({
+        ...promotionInput,
+        promotionId: "successor-promotion",
+        requirementId: targetRow.id,
+        requirementSha256: targetRow.requirementSha256,
+        modelId: targetModel.id,
+      }),
+    );
+    const targetPlan = await must(
+      await command(["promotion", "plan"], ["--input", targetPromotionPath], targetId),
+    );
+    assert.equal(targetPlan.route, "successor-fulfillment");
+    const targetApproval = await must(
+      await command(
+        ["promotion", "approve"],
+        [
+          "--input",
+          targetPromotionPath,
+          "--confirm",
+          targetPlan.planSha256,
+          "--authorization-source",
+          source,
+        ],
+        targetId,
+      ),
+    );
+    const targetFulfillmentPath = join(fx.files, "successor-fulfillment.json");
+    await writeFile(
+      targetFulfillmentPath,
+      JSON.stringify({
+        ...fulfillmentInput,
+        designSha256: targetPlan.designSha256,
+        parentFulfillmentSha256: null,
+        modelImplementations: fulfillmentInput.modelImplementations.map((i) => ({
+          ...i,
+          modelId: targetModel.id,
+        })),
+        environmentLocks: fulfillmentInput.environmentLocks.map((i) => ({
+          ...i,
+          modelId: targetModel.id,
+        })),
+      }),
+    );
+    await must(
+      await scientific(["fulfillment", "record", targetId], ["--input", targetFulfillmentPath]),
+    );
+    const targetAcceptancePath = join(fx.files, "successor-acceptance.json");
+    const targetAcceptance = {
+      ...oldAcceptance,
+      requirementId: targetRow.id,
+      requirementSha256: targetRow.requirementSha256,
+      previousRecordSha256: null,
+      nativeRunSha256: certified.record.recordSha256,
+    };
+    await writeFile(targetAcceptancePath, JSON.stringify(targetAcceptance));
+    const targetAccept = () =>
+      cli([
+        "research",
+        "project",
+        "task",
+        "acceptance",
+        "record",
+        targetId,
+        "--input",
+        targetAcceptancePath,
+        "--workspace",
+        fx.root,
+        "--json",
+      ]);
+    const cannotBorrow = await targetAccept();
+    assert.notEqual(cannotBorrow.exitCode, 0);
+    const targetRunPath = join(fx.files, "successor-run.json");
+    await writeFile(
+      targetRunPath,
+      JSON.stringify({
+        ...certificationInput,
+        runId: "successor-certification",
+        requirementId: targetRow.id,
+        requirementSha256: targetRow.requirementSha256,
+        investigationPromotionSha256: targetApproval.recordSha256,
+      }),
+    );
+    const targetRun = await must(
+      await cli([
+        "research",
+        "project",
+        "task",
+        "run",
+        "observe",
+        targetId,
+        "--input",
+        targetRunPath,
+        "--confirm-execution",
+        "--workspace",
+        fx.root,
+        "--json",
+      ]),
+    );
+    assert.equal(targetRun.record.investigationCertification.status, "passed");
+    assert.notEqual(targetRun.record.recordSha256, certified.record.recordSha256);
+    await writeFile(
+      targetAcceptancePath,
+      JSON.stringify({ ...targetAcceptance, nativeRunSha256: targetRun.record.recordSha256 }),
+    );
+    await must(await targetAccept());
+    const targetBundle = join(fx.files, "successor-audit");
+    const targetManifest = await must(
+      await cli([
+        "research",
+        "project",
+        "audit",
+        "export",
+        targetId,
+        "--output",
+        targetBundle,
+        "--workspace",
+        fx.root,
+        "--json",
+      ]),
+    );
+    assert.ok(
+      targetManifest.files.some(
+        (f: { path: string }) =>
+          f.path ===
+          `investigation-sources/${projectId}/task/investigation-candidates/${candidate.recordSha256}.json`,
+      ),
+    );
+    assert.equal(
+      targetManifest.files.some((f: { path: string }) =>
+        f.path.includes(competingDefinition.recordSha256),
+      ),
+      false,
+    );
     await rm(fx.root, { recursive: true, force: true });
     const verify = () =>
       cli(["research", "project", "audit", "verify", "--bundle", bundle, "--json"]);
+    const verifiedTarget = await must(
+      await cli(["research", "project", "audit", "verify", "--bundle", targetBundle, "--json"]),
+    );
+    assert.deepEqual(verifiedTarget.task.investigations, {
+      definitions: 1,
+      attempts: 1,
+      candidates: 1,
+      promotions: 1,
+      certifications: 1,
+    });
+    {
+      const targetManifestPath = join(targetBundle, "manifest.json");
+      const missingSourcePath = `investigation-sources/${projectId}/task/investigation-candidates/${candidate.recordSha256}.json`;
+      const changed = JSON.parse(await readFile(targetManifestPath, "utf8"));
+      await rm(join(targetBundle, missingSourcePath));
+      changed.files = changed.files.filter((f: { path: string }) => f.path !== missingSourcePath);
+      const { manifestSha256: _previous, ...core } = changed;
+      await chmod(targetManifestPath, 0o600);
+      await writeFile(
+        targetManifestPath,
+        JSON.stringify({ ...core, manifestSha256: sha256Text(canonicalJson(core)) }, null, 2) +
+          "\n",
+      );
+      const missingSource = await cli([
+        "research",
+        "project",
+        "audit",
+        "verify",
+        "--bundle",
+        targetBundle,
+        "--json",
+      ]);
+      assert.notEqual(
+        missingSource.exitCode,
+        0,
+        "A successor cannot discard the original selected candidate behind its recipe",
+      );
+    }
     const verifiedAudit = await must(await verify());
     assert.deepEqual(verifiedAudit.task.investigations, {
       definitions: 2,

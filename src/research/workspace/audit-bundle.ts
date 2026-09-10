@@ -1,3 +1,5 @@
+import { stageInvestigationSources } from "./investigation-source-export.js";
+import { relevantInvestigationEvents } from "./investigation-lineage.js";
 import { isProjectBudgetState } from "./project-budget.js";
 import { isUtf8 } from "node:buffer";
 import { randomUUID } from "node:crypto";
@@ -235,6 +237,15 @@ export async function exportProjectAuditBundle(input: {
         0o444,
       );
       staged.add("state/environment.json");
+      const investigationSources = await stageInvestigationSources(
+        input.root,
+        project.id,
+        journalEvents,
+        stageFile,
+      );
+      const investigationEvents = new Set(
+        relevantInvestigationEvents(project.id, journalEvents, investigationSources),
+      );
       await writeJsonAtomic(
         join(temporary, "state", "journal-event-proofs.json"),
         {
@@ -243,7 +254,9 @@ export async function exportProjectAuditBundle(input: {
           events: journalEvents
             .filter(
               (event) =>
-                event.scope === project.id || containsExactString(event.payload, project.id),
+                event.scope === project.id ||
+                containsExactString(event.payload, project.id) ||
+                investigationEvents.has(event),
             )
             .map(portableJournalEvent),
         },
