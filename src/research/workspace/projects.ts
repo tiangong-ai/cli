@@ -5,7 +5,7 @@ import {
   projectCostExposure,
   isProjectBudgetState,
   inheritedProjectBudget,
-  finalizeSupersededBudget,
+  settleProjectCost,
 } from "./project-budget.js";
 import { randomUUID } from "node:crypto";
 import { cp, lstat, readFile } from "node:fs/promises";
@@ -869,7 +869,6 @@ export async function forkProject(
           ),
         );
       }
-      finalizeSupersededBudget(source);
       source.lineage.supersededBy = targetProjectId;
       source.evidenceState.staleReason = `Superseded by recovery fork ${targetProjectId}.`;
       refreshProject(source);
@@ -1206,7 +1205,6 @@ export async function createProjectAddendum(
     await writeJsonAtomic(join(targetRoot, "project.json"), target);
 
     const taskContract = await inheritProjectTask(root, source, target);
-    finalizeSupersededBudget(source);
     source.lineage.supersededBy = targetProjectId;
     source.evidenceState.staleReason = `Superseded by evidence addendum ${targetProjectId}.`;
     refreshProject(source);
@@ -1982,6 +1980,76 @@ export async function setProjectBudget(
         outstandingReservationIds: proposed.entries
           .filter((e) => e.status === "reserved")
           .map((e) => e.id),
+      },
+    );
+    return { projectId, budget: projectBudgetView(project, config), replayed: false };
+  });
+}
+
+export async function resolveProjectBudgetReservation(
+  root: string,
+  projectId: string,
+  id: string,
+  amount: number,
+  reason: string,
+  confirm: boolean,
+) {
+  if (!confirm)
+    throw new CliError("Resolving unknown costs requires explicit --confirm-budget.", {
+      code: "RESEARCH_BUDGET_CONFIRMATION_REQUIRED",
+      exitCode: 2,
+    });
+  if (!Number.isFinite(amount) || amount < 0 || reason.trim().length < 8 || reason.length > 1000)
+    throw new CliError(
+      "Supply a nonnegative finite accounting estimate and a bounded explanation.",
+      { code: "RESEARCH_BUDGET_INVALID", exitCode: 2 },
+    );
+  return withWorkspaceLock(root, "project.budget.resolve", async () => {
+    const project = await loadProject(root, projectId);
+    assertProjectAuthority(project, await readProjectAuthorityIndex(root));
+    const entry = project.budget?.entries.find((item) => item.id === id);
+    if (!entry)
+      throw new CliError("The reservation does not exist in this project's budget authority.", {
+        code: "RESEARCH_BUDGET_RESERVATION_MISSING",
+        exitCode: 3,
+      });
+    const config = await loadWorkspaceConfig(root);
+    if (entry.status === "settled") {
+      if (
+        entry.accountedCostUsd !== amount ||
+        entry.settlementBasis !== "owner-estimate" ||
+        entry.resolutionReason !== reason.trim()
+      )
+        throw new CliError("Settled cost evidence cannot be rewritten.", {
+          code: "RESEARCH_BUDGET_RESERVATION_CONFLICT",
+          exitCode: 3,
+        });
+      return { projectId, budget: projectBudgetView(project, config), replayed: true };
+    }
+    if (entry.kind === "native-stage") {
+      validateProjectId(entry.sourceProjectId);
+      const { nativeStageBudgetReservation } = await import("./runtime.js");
+      const active = await nativeStageBudgetReservation(root, entry.sourceProjectId);
+      if (active?.id === id)
+        throw new CliError(
+          "Complete or explicitly abort the native session before resolving its cost estimate.",
+          { code: "RESEARCH_BUDGET_OPERATION_ACTIVE", exitCode: 3 },
+        );
+    }
+    settleProjectCost(project, id, amount, "owner-estimate");
+    entry.resolutionReason = reason.trim();
+    await saveProject(root, project);
+    await appendJournalEvent(
+      workspacePaths(root).journal,
+      "project.budget.reservation.resolved",
+      project.id,
+      {
+        reservationId: id,
+        sourceProjectId: entry.sourceProjectId,
+        accountedCostUsd: amount,
+        basis: "owner-estimate",
+        reason: entry.resolutionReason,
+        providerInvoiceVerified: false,
       },
     );
     return { projectId, budget: projectBudgetView(project, config), replayed: false };

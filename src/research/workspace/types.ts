@@ -354,13 +354,15 @@ export interface ProjectBudgetAuthorization {
 
 export interface ProjectBudgetEntry {
   id: string;
+  sourceProjectId: string;
   kind: "native-stage" | "review" | "provider-operation";
   reference: string;
   authorizationRevision: number;
   maxCostUsd: number;
   status: "reserved" | "settled";
   accountedCostUsd: number | null;
-  settlementBasis: "reported-usage" | "allocated-upper-bound" | null;
+  settlementBasis: "reported-usage" | "allocated-upper-bound" | "owner-estimate" | null;
+  resolutionReason?: string;
   createdAt: string;
   settledAt: string | null;
 }

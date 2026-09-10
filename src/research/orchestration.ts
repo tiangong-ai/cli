@@ -89,6 +89,7 @@ import {
   createProjectAddendum,
   initializeProject,
   setProjectBudget,
+  resolveProjectBudgetReservation,
   forkProject,
   listProjects,
   loadProject,
@@ -235,6 +236,7 @@ export function researchOrchestrationHelp(): string {
   tiangong-ai research scientific fulfillment status <project> [--workspace <path>] [--json]
   tiangong-ai research project task run observe <project> --input <json-file> --confirm-execution [--workspace <path>] [--json]
   tiangong-ai research project task run inspect <project> --run <run-id> [--workspace <path>] [--json]
+  tiangong-ai research project budget resolve <project-id> --reservation <id> --accounted-cost-usd <estimate> --reason <text> --confirm-budget [--workspace <path>] [--json]
   tiangong-ai research project budget set <project-id> --max-cost-usd <amount> [--confirm-budget] [--workspace <path>] [--json]
   tiangong-ai research project init <project-id> --question <question> [--goal evidence-report|top-journal] [--design <absolute-json> --design-producer-agent codex|claude --design-producer-session <opaque-id>] [--requirements <absolute-json>] [--input-plan <absolute-json>] [--max-cost-usd <amount>] [--confirm-budget] [--workspace <path>] [--json]
   tiangong-ai research project preflight --question <question> [--goal evidence-report|top-journal] [--policy-project <project-id> --design <absolute-json>] [--requirements <absolute-json>] [--input-plan <absolute-json>] [--max-cost-usd <amount>] [--workspace <path>] [--json]
@@ -2021,6 +2023,43 @@ async function runProject(argv: string[], io: CliIO): Promise<number> {
   }
   if (action === "budget") {
     const [budgetAction, ...budgetRest] = rest;
+    if (budgetAction === "resolve") {
+      const args = parseStrictArgs(
+        budgetRest,
+        {
+          ...WORKSPACE_OPTIONS,
+          reservation: "string",
+          "accounted-cost-usd": "string",
+          reason: "string",
+          "confirm-budget": "boolean",
+        },
+        "research project budget resolve",
+      );
+      if (strictBoolean(args, "help")) return writeHelp(io);
+      const projectId = onePositional(args.positionals, "research project budget resolve");
+      const reservation = strictString(args, "reservation"),
+        amount = strictString(args, "accounted-cost-usd"),
+        reason = strictString(args, "reason");
+      if (!reservation || amount === undefined || !reason)
+        throw new CliError(
+          "Budget resolution requires --reservation, --accounted-cost-usd and --reason.",
+          { code: "INVALID_ARGS", exitCode: 2 },
+        );
+      const root = await workspaceFromArgs(args);
+      writeJson(
+        io,
+        await resolveProjectBudgetReservation(
+          root,
+          projectId,
+          reservation,
+          Number(amount),
+          reason,
+          strictBoolean(args, "confirm-budget"),
+        ),
+        args,
+      );
+      return 0;
+    }
     if (budgetAction !== "set") throw unknownAction("research project budget", budgetAction ?? "");
     const args = parseStrictArgs(
       budgetRest,

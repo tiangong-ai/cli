@@ -97,7 +97,21 @@ export function projectBudgetView(project: ProjectState, config: WorkspaceConfig
     accountedEstimateUsd: displayCost(accounted),
     outstandingReservationsUsd: reserved === null ? null : displayCost(reserved),
     remainingUsd: budget ? displayCost(remainingProjectCostUsd(project, config)) : null,
+    overrunEstimateUsd: budget
+      ? displayCost(Math.max(0, projectCostExposure(project) - projectCostLimit(config, project)))
+      : null,
+    admissionState: !budget
+      ? "legacy"
+      : projectCostExposure(project) > projectCostLimit(config, project)
+        ? "overrun"
+        : remainingProjectCostUsd(project, config) === 0
+          ? "exhausted"
+          : "available",
     providerInvoiceUsd: null,
+    pendingReservations:
+      budget?.entries
+        .filter((entry) => entry.status === "reserved")
+        .map((entry) => ({ ...entry })) ?? [],
     accountingBasis: budget
       ? "software-accounted-estimates-and-allocations"
       : "legacy-accounting-without-numeric-project-authorization",
@@ -126,6 +140,11 @@ export function reserveProjectCost(
   input: Pick<ProjectBudgetEntry, "id" | "kind" | "reference" | "maxCostUsd">,
 ): ProjectBudgetEntry | null {
   if (!project.budget) return null;
+  if (project.lineage.supersededBy)
+    throw new CliError("Budget authority belongs to the current recovery project.", {
+      code: "RESEARCH_PROJECT_NOT_AUTHORITATIVE",
+      exitCode: 3,
+    });
   if (!finiteCost(input.maxCostUsd))
     throw new CliError("Operation cost is unbounded or unknown.", {
       code: "RESEARCH_PROJECT_BUDGET_PRICE_REQUIRED",
@@ -158,6 +177,7 @@ export function reserveProjectCost(
     });
   const entry: ProjectBudgetEntry = {
     ...input,
+    sourceProjectId: project.id,
     authorizationRevision: project.budget.authorization.revision,
     status: "reserved",
     accountedCostUsd: null,
@@ -176,6 +196,11 @@ export function settleProjectCost(
   basis: NonNullable<ProjectBudgetEntry["settlementBasis"]>,
 ): void {
   if (!project.budget) return;
+  if (project.lineage.supersededBy)
+    throw new CliError("Budget authority belongs to the current recovery project.", {
+      code: "RESEARCH_PROJECT_NOT_AUTHORITATIVE",
+      exitCode: 3,
+    });
   if (!finiteCost(costUsd))
     throw new CliError("Reported operation cost is invalid.", {
       code: "RESEARCH_BUDGET_INVALID",
@@ -202,6 +227,9 @@ export function settleProjectCost(
 }
 
 export function settleProjectAllocation(project: ProjectState, id: string): void {
+  // Historical native cancellation may clean its session, but the successor
+  // now owns the unresolved funding obligation.
+  if (project.lineage.supersededBy) return;
   const entry = project.budget?.entries.find((item) => item.id === id);
   if (entry?.status === "reserved")
     settleProjectCost(project, id, entry.maxCostUsd, "allocated-upper-bound");
@@ -212,16 +240,15 @@ export function inheritedProjectBudget(source: ProjectState): ProjectBudgetState
   return {
     schemaVersion: 1,
     authorization: structuredClone(source.budget.authorization),
-    openingEstimateUsd: projectCostExposure(source),
+    openingEstimateUsd:
+      source.budget.openingEstimateUsd +
+      source.budget.entries
+        .filter((entry) => entry.status === "settled")
+        .reduce((sum, entry) => sum + entry.accountedCostUsd!, 0),
     openingBasis: "recovery-exposure",
     openingSourceProjectId: source.id,
-    entries: [],
+    entries: structuredClone(source.budget.entries.filter((entry) => entry.status === "reserved")),
   };
-}
-
-export function finalizeSupersededBudget(source: ProjectState): void {
-  for (const entry of source.budget?.entries ?? [])
-    if (entry.status === "reserved") settleProjectAllocation(source, entry.id);
 }
 
 export function isProjectBudgetState(value: unknown): value is ProjectBudgetState {
@@ -255,6 +282,7 @@ export function isProjectBudgetState(value: unknown): value is ProjectBudgetStat
     if (
       !isObject(entry) ||
       typeof entry.id !== "string" ||
+      typeof entry.sourceProjectId !== "string" ||
       !entry.id ||
       ids.has(entry.id) ||
       !["native-stage", "review", "provider-operation"].includes(String(entry.kind)) ||
@@ -276,11 +304,18 @@ export function isProjectBudgetState(value: unknown): value is ProjectBudgetStat
     } else if (entry.status === "settled") {
       if (
         !finiteCost(entry.accountedCostUsd) ||
-        !["reported-usage", "allocated-upper-bound"].includes(String(entry.settlementBasis)) ||
+        !["reported-usage", "allocated-upper-bound", "owner-estimate"].includes(
+          String(entry.settlementBasis),
+        ) ||
         typeof entry.settledAt !== "string"
       )
         return false;
     } else return false;
+    if (
+      entry.settlementBasis === "owner-estimate" &&
+      (typeof entry.resolutionReason !== "string" || entry.resolutionReason.trim().length < 8)
+    )
+      return false;
     ids.add(entry.id);
   }
   return true;

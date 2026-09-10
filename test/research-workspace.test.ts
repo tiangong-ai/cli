@@ -6,6 +6,7 @@ import { describe, it } from "node:test";
 import { setTimeout as delay } from "node:timers/promises";
 
 import { runCli } from "../src/cli.js";
+import { projectBudgetView } from "../src/research/workspace/project-budget.js";
 import { CliError } from "../src/errors.js";
 import { lockCapabilities, verifyCapabilities } from "../src/research/workspace/capabilities.js";
 import { startCapabilityBroker } from "../src/research/workspace/broker.js";
@@ -25,6 +26,8 @@ import {
   initializeProject,
   loadProject,
   saveProject,
+  setProjectBudget,
+  retryProjectPackage,
 } from "../src/research/workspace/projects.js";
 import { evaluateProjectPreflight } from "../src/research/workspace/preflight.js";
 import {
@@ -1235,6 +1238,13 @@ describe("research project execution", () => {
     const root = await temporaryDirectory();
     try {
       await initializeResearchWorkspace(root, undefined);
+      const budgetConfig = await loadWorkspaceConfig(root);
+      budgetConfig.reviewer.pricing = {
+        inputUsdPerMillionTokens: 1,
+        cachedInputUsdPerMillionTokens: 0.1,
+        outputUsdPerMillionTokens: 2,
+      };
+      await writeJsonAtomic(workspacePaths(root).config, budgetConfig);
       await lockCapabilities(root);
       await initializeProject(root, "native-host", "Evaluate a native-host research flow.");
       const inputPath = join(root, "native-evidence.txt");
@@ -1367,28 +1377,60 @@ describe("research project execution", () => {
         });
       }
 
+      await setProjectBudget(root, "native-host", 50, true);
       const launched: string[] = [];
       const reviewerExecutor = fakeExecutor(launched);
+      let reviewCalls = 0;
+      const executeReview: PackageExecutor = async (request) => {
+        assert.match(request.prompt, /Operate only inside this isolated research capsule/);
+        assert.match(request.prompt, /Do not write stage output files directly/);
+        assert.match(request.prompt, /Your final response must be only the JSON object/);
+        assert.match(request.prompt, /No new evidence acquisition/);
+        assert.doesNotMatch(request.prompt, /Save only the final schema-conforming JSON object/);
+        assert.equal(request.toolPolicy, "packet-read");
+        assert.equal(request.brokerUrl, null);
+        const funded = await loadProject(root, "native-host");
+        assert.ok(
+          funded.budget?.entries.some(
+            (entry) => entry.kind === "review" && entry.status === "reserved",
+          ),
+          "the regular reviewer must be funded durably before execution",
+        );
+        reviewCalls++;
+        return {
+          ...(await reviewerExecutor(request)),
+          costUsd: reviewCalls === 1 ? 0.02 : 0.03,
+          exitCode: reviewCalls === 1 ? 1 : 0,
+        };
+      };
+      const failed = await runNativeControlledWorkspace(
+        root,
+        { maxParallel: 1, maxCycles: 1, dryRun: false, environment: {} },
+        executeReview,
+      );
+      assert.notEqual(failed.status, "complete");
+      const failedBudget = projectBudgetView(await loadProject(root, "native-host"), budgetConfig);
+      assert.equal(
+        failedBudget.accountedEstimateUsd,
+        0.02,
+        "returned failure usage must settle the reservation",
+      );
+      assert.equal(failedBudget.outstandingReservationsUsd, 0);
+      await retryProjectPackage(root, "native-host", "review");
       const completed = await runNativeControlledWorkspace(
         root,
         { maxParallel: 1, maxCycles: 5, dryRun: false, environment: {} },
-        async (request) => {
-          assert.match(request.prompt, /Operate only inside this isolated research capsule/);
-          assert.match(request.prompt, /Do not write stage output files directly/);
-          assert.match(request.prompt, /Your final response must be only the JSON object/);
-          assert.match(request.prompt, /No new evidence acquisition/);
-          assert.doesNotMatch(request.prompt, /Save only the final schema-conforming JSON object/);
-          assert.equal(request.toolPolicy, "packet-read");
-          assert.equal(request.brokerUrl, null);
-          return reviewerExecutor(request);
-        },
+        executeReview,
       );
       assert.equal(completed.status, "complete", JSON.stringify(completed));
       assert.deepEqual(nativeAgents, ["codex", "codex", "codex", "codex"]);
-      assert.deepEqual(launched, ["claude"]);
+      assert.deepEqual(launched, ["claude", "claude"]);
       const project = await loadProject(root, "native-host");
       assert.equal(project.status, "complete");
-      assert.equal(project.usage.tokens, nativeReservedTokens + 10);
+      const budget = projectBudgetView(project, budgetConfig);
+      assert.equal(budget.accountedEstimateUsd, 0.05);
+      assert.equal(budget.outstandingReservationsUsd, 0);
+      assert.equal(project.usage.tokens, nativeReservedTokens + 20);
       const runFiles = await regularTreeFiles(
         join(workspacePaths(root).projects, "native-host", "runs"),
       );

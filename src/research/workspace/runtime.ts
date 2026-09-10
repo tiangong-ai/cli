@@ -599,6 +599,7 @@ export async function nativeStageBudgetReservation(root: string, projectId: stri
     });
   return {
     id: `native:${session.packet.sessionId}`,
+    sourceProjectId: projectId,
     kind: "native-stage" as const,
     reference: session.packet.packageId,
     maxCostUsd,
@@ -2010,6 +2011,8 @@ async function executeWorkPackage(
 
   const runId = randomUUID();
   const startedAt = new Date().toISOString();
+  const budgetEntryId = `package:${runId}`;
+  let executionUncertain = false;
   let capsuleRoot: string | undefined;
   let capsuleDisposition: NativeCapsuleDisposition | null = null;
   let retainedCapsuleId: string | null = null;
@@ -2133,6 +2136,14 @@ async function executeWorkPackage(
         expectedRuntime: runtimeForRoute(doctorAttestation, route),
       });
       assertPreCallTokenReservation(project, workPackage, config, primaryRequest, 0, true);
+      const budgetEntry = reserveProjectCost(project, config, {
+        id: budgetEntryId,
+        kind: "review",
+        reference: workPackage.id,
+        maxCostUsd: primaryRequest.maxCostUsd,
+      });
+      if (budgetEntry) await saveProject(root, project);
+      executionUncertain = true;
       result = await withHeartbeat(
         selectedPackageExecutor(primaryRequest),
         options,
@@ -2141,6 +2152,7 @@ async function executeWorkPackage(
         workPackage,
         config,
       );
+      executionUncertain = false;
       accountedResult = result;
       if (primaryRequest.artifactViews && result.artifactReads?.length) {
         await persistArtifactReads(
@@ -2208,6 +2220,7 @@ async function executeWorkPackage(
           result.tokens,
           false,
         );
+        executionUncertain = true;
         const repair = await withHeartbeat(
           selectedPackageExecutor(repairRequest),
           options,
@@ -2216,6 +2229,7 @@ async function executeWorkPackage(
           workPackage,
           config,
         );
+        executionUncertain = false;
         accountedResult = combineExecutionResults(result, repair);
         assertExecutorSucceeded(repair);
         assertActualPackageBudget(
@@ -2235,7 +2249,7 @@ async function executeWorkPackage(
           capsule.reviewPacketSha256,
         );
       }
-      assertProjectedBudget(project, config, accountedResult);
+      assertProjectedBudget(project, config, accountedResult, budgetEntryId);
       promotedOutputs = await validateAndImportOutputs(
         root,
         project,
@@ -2286,6 +2300,8 @@ async function executeWorkPackage(
     }
 
     const completedAt = new Date().toISOString();
+    if (project.budget && workPackage.stage !== "close")
+      settleProjectCost(project, budgetEntryId, accountedResult.costUsd, "reported-usage");
     applyUsage(project, accountedResult);
     workPackage.status = "complete";
     workPackage.completedAt = completedAt;
@@ -2370,7 +2386,14 @@ async function executeWorkPackage(
       ),
       2000,
     );
-    if (accountedResult) applyUsage(failedProject, accountedResult);
+    if (accountedResult) {
+      if (
+        !executionUncertain &&
+        failedProject.budget?.entries.some((entry) => entry.id === budgetEntryId)
+      )
+        settleProjectCost(failedProject, budgetEntryId, accountedResult.costUsd, "reported-usage");
+      applyUsage(failedProject, accountedResult);
+    }
     const classification = classifyFailure(error);
     failedPackage.lastError = message;
     failedPackage.lastFailureKind = classification.kind;

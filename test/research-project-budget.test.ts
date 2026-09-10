@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, it } from "node:test";
 import { runCli } from "../src/cli.js";
+import { reserveProjectCost, settleProjectCost } from "../src/research/workspace/project-budget.js";
 import { initializeProject, loadProject, saveProject } from "../src/research/workspace/projects.js";
 import {
   prepareNativeResearchStage,
@@ -54,6 +55,287 @@ async function cli(root: string, args: string[]) {
 
 // These values are synthetic accounting inputs, not provider invoices.
 describe("numeric project budget authorization", () => {
+  it("records an owner-estimated overrun without silently increasing the authorization", async () => {
+    const root = await workspace();
+    try {
+      await fundedProject(root);
+      await withWorkspaceLock(root, "test.pending-overrun", async () => {
+        const project = await loadProject(root, "budget-project");
+        reserveProjectCost(project, await loadWorkspaceConfig(root), {
+          id: "uncertain",
+          kind: "provider-operation",
+          reference: "synthetic",
+          maxCostUsd: 15,
+        });
+        await saveProject(root, project);
+      });
+      const resolved = await cli(root, [
+        "project",
+        "budget",
+        "resolve",
+        "budget-project",
+        "--reservation",
+        "uncertain",
+        "--accounted-cost-usd",
+        "100",
+        "--reason",
+        "Owner supplied a conservative estimate after the operation.",
+        "--confirm-budget",
+      ]);
+      assert.equal(resolved.code, 0, resolved.stderr);
+      assert.equal(resolved.body.budget.authorization.maxCostUsd, 50);
+      assert.equal(resolved.body.budget.accountedEstimateUsd, 100);
+      assert.equal(resolved.body.budget.overrunEstimateUsd, 50);
+      assert.equal(resolved.body.budget.admissionState, "overrun");
+      await assert.rejects(
+        withWorkspaceLock(root, "test.overrun-blocks-next", async () => {
+          const project = await loadProject(root, "budget-project");
+          reserveProjectCost(project, await loadWorkspaceConfig(root), {
+            id: "next",
+            kind: "provider-operation",
+            reference: "synthetic",
+            maxCostUsd: 1,
+          });
+        }),
+        { code: "RESEARCH_BUDGET_RESERVATION_FAILED" },
+      );
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("keeps inherited native funding pending until its old session is explicitly stopped", async () => {
+    const root = await workspace();
+    try {
+      await fundedProject(root);
+      const packet = await prepareNativeResearchStage({
+        root,
+        projectId: "budget-project",
+        stage: "discover",
+        hostAgent: "codex",
+      });
+      const id = `native:${packet.sessionId}`;
+      const args = [
+        "project",
+        "budget",
+        "resolve",
+        "budget-project",
+        "--reservation",
+        id,
+        "--accounted-cost-usd",
+        "0",
+        "--reason",
+        "Synthetic caller has verified no provider expense.",
+        "--confirm-budget",
+      ];
+      assert.equal((await cli(root, args)).body.error?.code, "RESEARCH_BUDGET_OPERATION_ACTIVE");
+      assert.equal(
+        (await cli(root, ["project", "fork", "budget-project", "--to", "budget-next"])).code,
+        0,
+      );
+      args[3] = "budget-next";
+      assert.equal((await cli(root, args)).body.error?.code, "RESEARCH_BUDGET_OPERATION_ACTIVE");
+      await abortNativeResearchStage({
+        root,
+        projectId: "budget-project",
+        sessionId: packet.sessionId,
+      });
+      const pending = (await loadProject(root, "budget-next")).budget!.entries.find(
+        (e) => e.id === id,
+      )!;
+      assert.equal(pending.status, "reserved");
+      assert.equal(pending.sourceProjectId, "budget-project");
+      const resolved = await cli(root, args);
+      assert.equal(resolved.code, 0, resolved.stderr);
+      assert.equal(resolved.body.budget.remainingUsd, 50);
+      assert.equal(resolved.body.budget.providerInvoiceUsd, null);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("refuses 10 before execution when 30 is accounted and 15 is still reserved under 50", async () => {
+    const root = await workspace();
+    try {
+      await fundedProject(root);
+      await withWorkspaceLock(root, "test.account-and-reserve", async () => {
+        const project = await loadProject(root, "budget-project"),
+          config = await loadWorkspaceConfig(root);
+        reserveProjectCost(project, config, {
+          id: "spent",
+          kind: "review",
+          reference: "synthetic",
+          maxCostUsd: 30,
+        });
+        settleProjectCost(project, "spent", 30, "reported-usage");
+        reserveProjectCost(project, config, {
+          id: "pending",
+          kind: "provider-operation",
+          reference: "synthetic",
+          maxCostUsd: 15,
+        });
+        await saveProject(root, project);
+      });
+      let calls = 0;
+      await assert.rejects(
+        withWorkspaceLock(root, "test.next-operation", async () => {
+          const project = await loadProject(root, "budget-project");
+          reserveProjectCost(project, await loadWorkspaceConfig(root), {
+            id: "next",
+            kind: "provider-operation",
+            reference: "synthetic",
+            maxCostUsd: 10,
+          });
+          await saveProject(root, project);
+          calls++;
+        }),
+        { code: "RESEARCH_BUDGET_RESERVATION_FAILED" },
+      );
+      assert.equal(calls, 0);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("does not allocate two in-flight operations of 4 from a remaining allowance of 5", async () => {
+    const root = await workspace();
+    try {
+      await fundedProject(root);
+      await withWorkspaceLock(root, "test.spent", async () => {
+        const project = await loadProject(root, "budget-project"),
+          config = await loadWorkspaceConfig(root);
+        reserveProjectCost(project, config, {
+          id: "spent",
+          kind: "review",
+          reference: "synthetic",
+          maxCostUsd: 45,
+        });
+        settleProjectCost(project, "spent", 45, "reported-usage");
+        await saveProject(root, project);
+      });
+      let signalReserved!: () => void,
+        finishFirst!: () => void,
+        calls = 0;
+      const reserved = new Promise<void>((resolve) => {
+        signalReserved = resolve;
+      });
+      const pending = new Promise<void>((resolve) => {
+        finishFirst = resolve;
+      });
+      const first = (async () => {
+        await withWorkspaceLock(root, "test.first-reservation", async () => {
+          const project = await loadProject(root, "budget-project");
+          reserveProjectCost(project, await loadWorkspaceConfig(root), {
+            id: "first",
+            kind: "provider-operation",
+            reference: "synthetic",
+            maxCostUsd: 4,
+          });
+          await saveProject(root, project);
+        });
+        calls++;
+        signalReserved();
+        await pending;
+      })();
+      await reserved;
+      try {
+        await assert.rejects(
+          withWorkspaceLock(root, "test.second-reservation", async () => {
+            const project = await loadProject(root, "budget-project");
+            reserveProjectCost(project, await loadWorkspaceConfig(root), {
+              id: "second",
+              kind: "provider-operation",
+              reference: "synthetic",
+              maxCostUsd: 4,
+            });
+            await saveProject(root, project);
+            calls++;
+          }),
+          { code: "RESEARCH_BUDGET_RESERVATION_FAILED" },
+        );
+        assert.equal(calls, 1);
+      } finally {
+        finishFirst();
+        await first;
+      }
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("transfers unresolved reservation identity and requires explicit owner resolution without inventing an invoice", async () => {
+    const root = await workspace();
+    try {
+      await fundedProject(root);
+      await withWorkspaceLock(root, "test.pending-operation", async () => {
+        const project = await loadProject(root, "budget-project");
+        reserveProjectCost(project, await loadWorkspaceConfig(root), {
+          id: "pending-provider",
+          kind: "provider-operation",
+          reference: "synthetic-provider",
+          maxCostUsd: 15,
+        });
+        await saveProject(root, project);
+      });
+      const forked = await cli(root, ["project", "fork", "budget-project", "--to", "budget-next"]);
+      assert.equal(forked.code, 0, forked.stderr);
+      const next = await loadProject(root, "budget-next");
+      const pending = next.budget!.entries.find((e) => e.id === "pending-provider");
+      assert.equal(
+        pending?.status,
+        "reserved",
+        "a fork must not turn an unresolved operation into a settled charge",
+      );
+      assert.equal(pending?.maxCostUsd, 15);
+      const resolveArgs = [
+        "project",
+        "budget",
+        "resolve",
+        "budget-next",
+        "--reservation",
+        "pending-provider",
+        "--accounted-cost-usd",
+        "0",
+        "--reason",
+        "Synthetic owner confirmed this operation did not reach a provider.",
+      ];
+      const refused = await cli(root, resolveArgs);
+      assert.equal(refused.body.error?.code, "RESEARCH_BUDGET_CONFIRMATION_REQUIRED");
+      const blank = [...resolveArgs];
+      blank[blank.indexOf("--accounted-cost-usd") + 1] = "";
+      const invalid = await cli(root, [...blank, "--confirm-budget"]);
+      assert.equal(
+        invalid.body.error?.code,
+        "INVALID_ARGS",
+        "an empty estimate must not become zero",
+      );
+      const resolved = await cli(root, [...resolveArgs, "--confirm-budget"]);
+      assert.equal(resolved.code, 0, resolved.stderr);
+      assert.equal(resolved.body.budget.outstandingReservationsUsd, 0);
+      assert.equal(resolved.body.budget.accountedEstimateUsd, 0);
+      assert.equal(resolved.body.budget.providerInvoiceUsd, null);
+      const replay = await cli(root, [...resolveArgs, "--confirm-budget"]);
+      assert.equal(replay.code, 0, replay.stderr);
+      assert.equal(replay.body.replayed, true);
+      const historical = await cli(root, [
+        "project",
+        "budget",
+        "resolve",
+        "budget-project",
+        "--reservation",
+        "pending-provider",
+        "--accounted-cost-usd",
+        "0",
+        "--reason",
+        "Do not mutate a superseded financial authority.",
+        "--confirm-budget",
+      ]);
+      assert.equal(historical.body.error?.code, "RESEARCH_PROJECT_NOT_AUTHORITATIVE");
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
   it("refuses a lifecycle estimate that fits the workspace guard but exceeds the selected project amount", async () => {
     const root = await workspace();
     try {
@@ -308,3 +590,17 @@ describe("numeric project budget authorization", () => {
     }
   });
 });
+
+async function fundedProject(root: string) {
+  const result = await cli(root, [
+    "project",
+    "init",
+    "budget-project",
+    "--question",
+    "How should this synthetic evidence be evaluated?",
+    "--max-cost-usd",
+    "50",
+    "--confirm-budget",
+  ]);
+  assert.equal(result.code, 0, result.stderr);
+}
