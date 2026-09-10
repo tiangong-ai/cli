@@ -92,11 +92,11 @@ describe("research setup catalog and immutable plans", () => {
       assert.ok(catalog.sources.every((source) => /^[0-9a-f]{40}$/.test(source.immutableRef)));
       assert.equal(
         catalog.sources.find((source) => source.id === "tiangong-ai-skills")?.immutableRef,
-        "56d1afcc1ce3651be0f09cb6fd6ccbafbc629834",
+        "812881fec1ad4141da240c1caa252e262779057f",
       );
       assert.equal(
         catalog.entries.find((entry) => entry.id === "tiangong.auto-research")?.expectedTreeSha256,
-        "8e17a2b65811936969bf86bfdf005b3ab8ca98bf563413156d807f3dcd342756",
+        "16d4adda6a82e855061976c2fd6f4e10c6690fb819c2d96e4725541c79193758",
       );
       assert.ok(catalog.roles.evidenceCapabilities.includes("tiangong.kb-sci-search"));
       assert.ok(catalog.roles.evidenceCapabilities.includes("tiangong.kb-report-search"));
@@ -2252,6 +2252,14 @@ describe("research setup execution and operator safety", () => {
       (candidate) => candidate.id === "tiangong.academic-paper-download",
     )!;
     const originalTreeSha256 = skill.expectedTreeSha256;
+    const wire = JSON.parse(
+      await readFile(new URL("./fixtures/paper-companion-v3.json", import.meta.url), "utf8"),
+    );
+    assert.equal(
+      wire.producerTreeSha256,
+      originalTreeSha256,
+      "Regenerate the real-producer fixture when the pinned paper Skill changes",
+    );
     try {
       await mkdir(outputDirectory);
       const skillDirectory = join(root, ".agents", "skills", skill.skillName);
@@ -2279,7 +2287,8 @@ describe("research setup execution and operator safety", () => {
       await writeFile(decoyPath, "%PDF-1.4\ndecoy\n%%EOF\n");
       const artifactPath = join(outputDirectory, "bound-paper.pdf");
       const manifestPath = `${artifactPath}.json`;
-      const pdf = Buffer.from("%PDF-1.4\nbound-artifact\n%%EOF\n");
+      const pdf = Buffer.from(wire.pdfBase64, "base64");
+      const identity = wire.manifest.identity;
       const result = await runResearchSetupCompanion(
         {
           workspace: root,
@@ -2304,31 +2313,15 @@ describe("research setup execution and operator safety", () => {
             assert.equal(environment.COOKIE, undefined);
             await writeFile(artifactPath, pdf);
             const digest = await sha256File(artifactPath);
-            const manifest = {
-              schema_version: "academic-paper-download.artifact.v2",
-              doi: "10.1234/example",
-              source: "semantic_scholar",
-              file: artifactPath,
-              size: pdf.length,
-              sha256: digest,
-            };
+            const manifest = { ...wire.manifest, file: artifactPath };
+            assert.equal(manifest.sha256, digest);
+            assert.equal(manifest.size, pdf.length);
             await writeFile(manifestPath, `${JSON.stringify(manifest)}\n`);
+            const envelope = structuredClone(wire.envelope);
+            Object.assign(envelope.data.results[0], { file: artifactPath, manifest: manifestPath });
             return {
               exitCode: 0,
-              stdout: JSON.stringify({
-                ok: true,
-                data: {
-                  results: [
-                    {
-                      success: true,
-                      file: artifactPath,
-                      manifest: manifestPath,
-                      size: pdf.length,
-                      sha256: digest,
-                    },
-                  ],
-                },
-              }),
+              stdout: JSON.stringify(envelope),
               stderr: `provider note ${secret}`,
             };
           },
@@ -2338,6 +2331,150 @@ describe("research setup execution and operator safety", () => {
       assert.equal(result.artifact.path, artifactPath);
       assert.notEqual(result.artifact.path, decoyPath);
       assert.equal(result.artifact.sha256, await sha256File(artifactPath));
+      const goodManifest = JSON.parse(await readFile(manifestPath, "utf8"));
+      const normalized = await runResearchSetupCompanion(
+        {
+          workspace: root,
+          skillId: "tiangong.academic-paper-download",
+          outputDirectory,
+          doi: "https://doi.org/10.1234/EXAMPLE?from=fixture",
+        },
+        {
+          environment: { PATH: process.env.PATH },
+          runner: async () => ({
+            exitCode: 0,
+            stdout: JSON.stringify({
+              ok: true,
+              data: {
+                results: [
+                  {
+                    success: true,
+                    doi: "10.1234/example",
+                    file: artifactPath,
+                    manifest: manifestPath,
+                    size: pdf.length,
+                    sha256: goodManifest.sha256,
+                    identity_status: "matched",
+                    identity,
+                  },
+                ],
+              },
+            }),
+            stderr: "",
+          }),
+        },
+      );
+      assert.equal(normalized.status, "complete");
+      for (const [requestedDoi, canonicalDoi] of [
+        ["https%3A%2F%2Fdoi.org%2F10.1234%2FEXAMPLE", "10.1234/example"],
+        ["10.1234/percent%25", "10.1234/percent%"],
+      ]) {
+        const canonicalIdentity = {
+          ...identity,
+          requested: { ...identity.requested, doi: canonicalDoi },
+        };
+        const manifest = { ...goodManifest, doi: canonicalDoi, identity: canonicalIdentity };
+        const compatible = await runResearchSetupCompanion(
+          {
+            workspace: root,
+            skillId: "tiangong.academic-paper-download",
+            outputDirectory,
+            doi: requestedDoi!,
+          },
+          {
+            environment: { PATH: process.env.PATH },
+            runner: async () => {
+              await writeFile(manifestPath, JSON.stringify(manifest));
+              return {
+                exitCode: 0,
+                stdout: JSON.stringify({
+                  ok: true,
+                  data: {
+                    results: [
+                      {
+                        success: true,
+                        doi: canonicalDoi,
+                        file: artifactPath,
+                        manifest: manifestPath,
+                        size: pdf.length,
+                        sha256: goodManifest.sha256,
+                        identity_status: "matched",
+                        identity: canonicalIdentity,
+                      },
+                    ],
+                  },
+                }),
+                stderr: "",
+              };
+            },
+          },
+        );
+        assert.equal(compatible.status, "complete");
+      }
+      for (const variant of [
+        "unresolved",
+        "wrong-doi",
+        "legacy",
+        "different-result",
+        "missing-result",
+      ] as const) {
+        const manifest = structuredClone(goodManifest);
+        if (variant === "unresolved") manifest.identity.status = "unresolved";
+        if (variant === "wrong-doi") manifest.identity.requested.doi = "10.1234/different";
+        if (variant === "legacy") manifest.schema_version = "academic-paper-download.artifact.v2";
+        await assert.rejects(
+          runResearchSetupCompanion(
+            {
+              workspace: root,
+              skillId: skill.id as "tiangong.academic-paper-download",
+              outputDirectory,
+              doi: "10.1234/example",
+            },
+            {
+              environment: { PATH: process.env.PATH },
+              runner: async () => {
+                await writeFile(manifestPath, JSON.stringify(manifest));
+                return {
+                  exitCode: 0,
+                  stdout: JSON.stringify({
+                    ok: true,
+                    data: {
+                      results: [
+                        {
+                          success: true,
+                          doi: "10.1234/example",
+                          file: artifactPath,
+                          manifest: manifestPath,
+                          size: pdf.length,
+                          sha256: goodManifest.sha256,
+                          identity_status: "matched",
+                          identity:
+                            variant === "missing-result"
+                              ? undefined
+                              : variant === "different-result"
+                                ? { ...manifest.identity, method: "different" }
+                                : manifest.identity,
+                        },
+                      ],
+                    },
+                  }),
+                  stderr: "",
+                };
+              },
+            },
+          ),
+          (error: unknown) =>
+            error instanceof Error &&
+            "code" in error &&
+            error.code === "RESEARCH_SETUP_COMPANION_ARTIFACT_INVALID",
+        );
+      }
+      const completed = (await readFile(workspacePaths(root).journal, "utf8"))
+        .trim()
+        .split("\n")
+        .map((line) => JSON.parse(line))
+        .filter((event) => event.type === "research.setup.companion.paper.completed");
+      assert.equal(completed.length, 4);
 
       const privateRuntimePath = join(root, "private-runtime-token");
       await assert.rejects(

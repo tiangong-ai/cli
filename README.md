@@ -13,7 +13,7 @@ checkPaths:
   - bin/**
   - src/**
 lastReviewedAt: 2026-09-10
-lastReviewedCommit: 75fb1e0779cdf42ba95647ed6c5e4ed2ee495dfc
+lastReviewedCommit: e457212717842d7b238dc914461eb6ded7e83ca3
 ---
 
 # Tiangong AI CLI
@@ -830,7 +830,11 @@ audit manifest separately records the raw stored packet-file digest. This keeps
 packet identity and byte-level transfer verification explicit rather than
 overloading one hash with both meanings.
 
-After base closure, the current native host writes a final Markdown/plain-text
+After base closure, inspect `research publication lineage PROJECT --json` before
+authoring materials. It verifies the existing closure and reviewed packet's
+analysis, report and evidence-chain hashes and returns their analysis identity
+with an empty material-file template. It does not certify or relabel previously
+authored files. The current native host then writes a final Markdown/plain-text
 manuscript, schema-valid publication assessment, and an explicit submission
 manifest. The manuscript must contain Abstract, Introduction, Methods, Results,
 Discussion, Data availability, Code availability, and References. Decimal
@@ -840,10 +844,26 @@ unrelated titles and body text still cannot satisfy a required section. The
 submission manifest must bind distinct absolute files for cover letter, title
 page, reporting checklist, data availability, code availability, and source
 data; figure/table index, extended data, and supplementary methods are optional.
+The schema-version-1 submission manifest also requires `resultLineage`, following
+`research schema show publication-result-lineage --json`. Preserve the source
+analysis identity from material preparation. Include a role, actual byte SHA-256
+and source `analysisSha256` for the manuscript, assessment, every submission file
+and each `supplement-N` (one-based supplied order). Include the actual figures,
+tables and source inputs as submission files or supplements; an index alone is
+not their contents. Do not replace a stale parent hash merely to pass validation.
+Completeness and scientific derivation remain producer claims for independent
+review; the CLI verifies declared lineage and bytes, not scientific truth.
 `research publication freeze` then content-addresses the Policy, scientific
 design and early reviews, acquisition/content/inference snapshots, mode-bound
 analysis, Claim-Evidence Graph, base outputs, manuscript, assessment,
 supplements, role-complete submission files, and reproducibility manifest.
+Validation reads the frozen copies. The generation, review packet and closure
+carry `analysisGenerationId` and a content-addressed material-results manifest;
+the reproducibility record binds that manifest. A different closed generation,
+changed report, mixed file parent or changed prepared bytes fails before review.
+Status/review/closure recheck the current closed lineage and report the affected
+object and binding. Legacy generations without the manifest retain their history
+but cannot establish current readiness; prepare an honest binding and refreeze.
 Computational/mixed analysis still requires reproduced metadata with exact
 implementation/environment bindings. Qualitative analysis uses
 `status: not-applicable`, null command/seed and empty implementation/environment
@@ -861,6 +881,9 @@ generation, packet, review, journal, and closure objects persist only their
 SHA-256 bindings.
 
 ```bash
+tiangong-ai research publication lineage top-journal-paper \
+  --workspace /absolute/path/to/workspace --json
+tiangong-ai research schema show publication-result-lineage --json
 tiangong-ai research schema show publication-assessment --json
 tiangong-ai research publication freeze top-journal-paper \
   --manuscript /absolute/path/to/final-manuscript.md \
@@ -961,6 +984,11 @@ presentation Skills are post-closure authoring only. Run selected preprocessors
 and acquisition adapters with `research setup companion run`, then admit their
 exact hash-bound output separately. Automatic paper OA exhaustion returns an
 explicit browser handoff and never launches or chooses a browser silently.
+Paper results require the pinned adapter's identity-verified artifact.v3
+manifest: matched document identity must agree between the result and manifest
+and bind the requested or resolved DOI. PDF/manifest paths, bytes and hashes
+remain checked independently. Structural-only legacy metadata cannot establish
+document identity, and successful access does not imply redistribution rights.
 The paper companion and its setup-doctor preflight both enter the verified
 Skill through `scripts/runtime.py`; the CLI never bypasses that lock by invoking
 `fetch.py` or importing `pypdf` from ambient Python. A missing runtime remains
