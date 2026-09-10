@@ -417,12 +417,12 @@ Document decomposition is an input-preprocessor and paper download is an
 acquisition adapter. Their explicit companion command verifies the installed
 tree, builds a minimal child environment, and returns hash-bound output for
 later input admission; neither executes inside an agent capsule or becomes
-evidence by itself. The paper adapter is entered only through its verified
-source and artifact.v3 identity contract. The CLI checks matched/request-bound
+evidence by itself. The paper adapter uses its verified artifact.v3 identity
+contract. The CLI checks matched/request-bound
 DOI identity and exact result/manifest agreement, while the pinned Python
 adapter owns PDF identity extraction; no second identity algorithm or implicit
-browser fallback is added. Its
-`runtime.py` lock for both execution and setup doctor; ambient `fetch.py` and
+browser fallback is added. Both execution and setup doctor enter through its
+`runtime.py` lock; ambient `fetch.py` and
 ambient `pypdf` execution are not valid control-plane paths. Authoring Skills
 run only after closure. DOCX, PDF, PPTX, and XLSX readiness resolves one
 Python/Node runtime, probes the complete selected dependency/command matrix,

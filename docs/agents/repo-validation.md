@@ -523,7 +523,7 @@ exact document/paper artifact
 binding, no-overwrite/no-directory-scan behavior, explicit browser handoff, and
 bounded JSON POST broker credential/body redaction. Paper companion tests also
 require execution and doctor to use the installed Skill's locked `runtime.py`,
-including a sanitized actionable missing-runtime error. Authoring readiness
+including a sanitized actionable missing-runtime error.
 Paper v3 cases cover a matched identity, equivalent DOI URL input, unresolved or
 wrong-request identity, legacy schema, missing/disagreeing result identity and
 absence of false completion events. No live retrieval is used in those tests.

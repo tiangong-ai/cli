@@ -4355,15 +4355,24 @@ async function runAcademicPaperCompanion(input: {
 function normalizedCompanionDoi(value: unknown): string | null {
   if (typeof value !== "string") return null;
   let raw = value.trim();
-  try {
-    if (/^(?:https?:\/\/)?(?:dx\.)?doi\.org\//i.test(raw)) {
-      const url = new URL(/^https?:\/\//i.test(raw) ? raw : `https://${raw}`);
-      raw = decodeURIComponent(url.pathname.replace(/^\/+/, ""));
-    } else {
-      raw = decodeURIComponent(raw).replace(/^(?:doi:\s*|(?:dx\.)?doi\.org\/)/i, "");
-    }
-  } catch {
-    return null;
+  // Match the pinned Python adapter's urllib.parse.unquote behavior: literal
+  // percent signs survive, encoded URLs are unwrapped after one decoding pass,
+  // and URL path segments are not rewritten by WHATWG URL normalization.
+  const unquote = (text: string) =>
+    text.replace(/(?:%[0-9a-f]{2})+/gi, (sequence) =>
+      Buffer.from(sequence.replaceAll("%", ""), "hex").toString("utf8"),
+    );
+  const urlPrefix = /^(?:https?:\/\/)?(?:dx\.)?doi\.org\//i;
+  if (urlPrefix.test(raw)) {
+    raw = unquote(
+      raw
+        .replace(urlPrefix, "")
+        .replace(/[\t\r\n]/g, "")
+        .split(/[?#]/, 1)[0]!
+        .replace(/^\/+/, ""),
+    );
+  } else {
+    raw = unquote(raw).replace(/^(?:(?:https?:\/\/)?(?:dx\.)?doi\.org\/|doi:\s*)/i, "");
   }
   raw = raw.trim().toLowerCase();
   return /^10\.\d{4,9}\/\S+$/.test(raw) && !/[\u0000-\u001f]/.test(raw) ? raw : null;
