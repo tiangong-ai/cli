@@ -25,6 +25,7 @@ import {
 } from "../src/research/workspace/research-policy.js";
 import {
   canonicalJson,
+  fileRecord,
   sha256Text,
   workspacePaths,
   writeJsonAtomic,
@@ -48,6 +49,147 @@ const REVIEW_ROLES: PublicationReviewRole[] = [
 ];
 
 describe("top-journal publication workflow", () => {
+  it("rejects a report changed after the mechanical base closure", async () => {
+    const fixture = await publicationFixture("stale-closed-report");
+    try {
+      const outputs = join(workspacePaths(fixture.root).projects, fixture.projectId, "outputs");
+      const closurePath = join(outputs, "closure.json");
+      const closure = JSON.parse(await readFile(closurePath, "utf8"));
+      closure.artifacts = await Promise.all(
+        ["analysis.json", "report.md"].map((name) =>
+          fileRecord(join(outputs, name), `outputs/${name}`),
+        ),
+      );
+      await writeJsonAtomic(closurePath, closure);
+      await writeFile(join(outputs, "report.md"), "# Unreviewed corrected report B\n");
+      await assert.rejects(
+        freezePublicationManuscript({
+          root: fixture.root,
+          projectId: fixture.projectId,
+          manuscriptPath: fixture.manuscript,
+          assessmentPath: fixture.assessment,
+          supplementPaths: [],
+          submissionFiles: fixture.submissionFiles,
+          producerAgent: "codex",
+          producerSessionId: "stale-report-producer",
+        }),
+        (error: unknown) => errorCode(error) === "RESEARCH_PUBLICATION_ANALYSIS_BINDING_STALE",
+      );
+    } finally {
+      await rm(fixture.root, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects prepared generation B materials against individually valid generation A analysis", async () => {
+    const fixture = await publicationFixture("mixed-result-generations");
+    try {
+      const outputs = join(workspacePaths(fixture.root).projects, fixture.projectId, "outputs");
+      const names = ["analysis.json", "claim-evidence-graph.json", "report.md"];
+      const original = new Map(
+        await Promise.all(
+          names.map(async (name) => [name, await readFile(join(outputs, name), "utf8")] as const),
+        ),
+      );
+      const analysis = JSON.parse(original.get("analysis.json")!);
+      analysis.analysisRun.id = "publication-fixture-run-b";
+      analysis.findings[0].statement = "The corrected central outcome was two units.";
+      await writeJsonAtomic(join(outputs, "analysis.json"), analysis);
+      const graph = JSON.parse(original.get("claim-evidence-graph.json")!);
+      graph.analysisRunId = analysis.analysisRun.id;
+      graph.analysisSha256 = sha256Text(await readFile(join(outputs, "analysis.json"), "utf8"));
+      for (const node of graph.nodes) {
+        if (node.type === "analysis-run") {
+          node.id = `analysis-run:${analysis.analysisRun.id}`;
+          node.label = analysis.analysisRun.id;
+        }
+        if (node.id === "finding:finding-central") {
+          node.label = analysis.findings[0].statement;
+          node.sha256 = sha256Text(canonicalJson(analysis.findings[0]));
+        }
+      }
+      for (const edge of graph.edges) {
+        if (edge.type === "finding-produced-by-analysis-run")
+          edge.to = `analysis-run:${analysis.analysisRun.id}`;
+      }
+      delete graph.graphSha256;
+      await writeJsonAtomic(join(outputs, "claim-evidence-graph.json"), {
+        ...graph,
+        graphSha256: sha256Text(canonicalJson(graph)),
+      });
+      await writeFile(
+        join(outputs, "report.md"),
+        "# Corrected generation B report\n\nThe outcome was two units.\n",
+      );
+      await writeFile(fixture.supplement, "measure,value\noutcome,2\n");
+      await writeFile(
+        fixture.manuscript,
+        `${await readFile(fixture.manuscript, "utf8")}\nCorrected result generation B: two units.\n`,
+      );
+      const assessment = JSON.parse(await readFile(fixture.assessment, "utf8"));
+      assessment.results[0].statement = analysis.findings[0].statement;
+      await writeJsonAtomic(fixture.assessment, assessment);
+      const resultLineage = {
+        schemaVersion: 1,
+        analysisRunId: analysis.analysisRun.id,
+        analysisSha256: graph.analysisSha256,
+        claimEvidenceGraphSha256: sha256Text(
+          await readFile(join(outputs, "claim-evidence-graph.json"), "utf8"),
+        ),
+        reportSha256: sha256Text(await readFile(join(outputs, "report.md"), "utf8")),
+        files: await Promise.all(
+          [
+            { role: "manuscript", path: fixture.manuscript },
+            { role: "assessment", path: fixture.assessment },
+            ...fixture.submissionFiles,
+          ].map(async (file) => ({
+            role: file.role,
+            sha256: sha256Text(await readFile(file.path, "utf8")),
+          })),
+        ),
+      };
+      await writeJsonAtomic(fixture.submissionManifest, {
+        schemaVersion: 1,
+        files: fixture.submissionFiles,
+        resultLineage,
+      });
+      const freeze = () =>
+        invokeCli([
+          "research",
+          "publication",
+          "freeze",
+          fixture.projectId,
+          "--manuscript",
+          fixture.manuscript,
+          "--assessment",
+          fixture.assessment,
+          "--submission",
+          fixture.submissionManifest,
+          "--producer-agent",
+          "codex",
+          "--producer-session",
+          "synthetic-generation-producer",
+          "--workspace",
+          fixture.root,
+          "--json",
+        ]);
+      const validB = await freeze();
+      assert.equal(validB.exitCode, 0, validB.stderr);
+      for (const [name, content] of original) await writeFile(join(outputs, name), content);
+      const mixed = await freeze();
+      assert.equal(
+        mixed.exitCode,
+        3,
+        "B material lineage must not silently bind to restored A analysis",
+      );
+      assert.equal(
+        JSON.parse(mixed.stderr).error.code,
+        "RESEARCH_PUBLICATION_ANALYSIS_BINDING_STALE",
+      );
+    } finally {
+      await rm(fixture.root, { recursive: true, force: true });
+    }
+  });
+
   it("carries the original task and current check matrix into the existing publication review", async () => {
     const fixture = await publicationFixture("task-bound-publication", {}, {}, true);
     try {
