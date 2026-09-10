@@ -62,6 +62,7 @@ it("separately authorizes a selected recipe and freezes only its predeclared sci
       scriptPath,
       `import {readFile,writeFile} from 'node:fs/promises';
 const bytes=await readFile(process.argv[2]);
+await new Promise(resolve=>setTimeout(resolve,2000));
 await writeFile(process.argv[3],JSON.stringify({schemaVersion:1,solverReached:true,feasible:true,metrics:{iterations:1,inputBytes:bytes.length,residual:0},statuses:{runStatus:'completed',modelStatus:'feasible'},conclusion:'Synthetic deterministic candidate only; no scientific qualification is claimed.'}));
 `,
     );
@@ -286,6 +287,27 @@ await writeFile(process.argv[3],JSON.stringify({schemaVersion:1,solverReached:tr
       beforeView.effectiveSha256,
       "Approval alone does not fabricate scientific fulfillment",
     );
+    const parallelPromotionPath = join(fx.files, "parallel-promotion.json");
+    await writeFile(
+      parallelPromotionPath,
+      JSON.stringify({ ...promotionInput, promotionId: "parallel-certification" }),
+    );
+    const parallelPlan = await must(
+      await command(["promotion", "plan"], ["--input", parallelPromotionPath]),
+    );
+    const parallelApproval = await must(
+      await command(
+        ["promotion", "approve"],
+        [
+          "--input",
+          parallelPromotionPath,
+          "--confirm",
+          parallelPlan.planSha256,
+          "--authorization-source",
+          source,
+        ],
+      ),
+    );
     const certificationInput = {
       schemaVersion: 1,
       runId: "certification-one",
@@ -303,7 +325,7 @@ await writeFile(process.argv[3],JSON.stringify({schemaVersion:1,solverReached:tr
       investigationPromotionSha256: approved.recordSha256,
     };
     const certificationPath = join(fx.files, "certification.json");
-    const observe = () =>
+    const observe = (path = certificationPath) =>
       cli([
         "research",
         "project",
@@ -312,7 +334,7 @@ await writeFile(process.argv[3],JSON.stringify({schemaVersion:1,solverReached:tr
         "observe",
         projectId,
         "--input",
-        certificationPath,
+        path,
         "--confirm-execution",
         "--workspace",
         fx.root,
@@ -395,8 +417,95 @@ await writeFile(process.argv[3],JSON.stringify({schemaVersion:1,solverReached:tr
     assert.notEqual(changed.exitCode, 0);
     assert.equal(await readFile(workspacePaths(fx.root).journal, "utf8"), beforeChanged);
     await writeFile(certificationPath, JSON.stringify(certificationInput));
+    const competingInvestigationPath = join(fx.files, "competing-investigation.json");
+    await writeFile(
+      competingInvestigationPath,
+      JSON.stringify({ ...envelope, investigationId: "post-freeze-diagnostics" }),
+    );
+    const competingPlan = await must(
+      await command(["plan"], ["--input", competingInvestigationPath]),
+    );
+    await must(
+      await command(
+        ["approve"],
+        [
+          "--input",
+          competingInvestigationPath,
+          "--confirm",
+          competingPlan.planSha256,
+          "--authorization-source",
+          source,
+        ],
+      ),
+    );
+    await writeFile(
+      competingInvestigationPath,
+      JSON.stringify({
+        schemaVersion: 1,
+        investigationId: "post-freeze-diagnostics",
+        attemptId: "competing-investigation",
+        programId: "solver",
+        hypothesis: "Honor the time already reserved by a different promoted calculation",
+        configuration: {},
+        nativeSessionId: null,
+        workingDirectory: fx.files,
+      }),
+    );
     const beforeUsage = (await loadProject(fx.root, projectId)).usage.wallSeconds;
-    const certified = await must(await observe());
+    const configPath = workspacePaths(fx.root).config;
+    const originalConfig = await readFile(configPath, "utf8");
+    const tightConfig = JSON.parse(originalConfig);
+    tightConfig.budget.maxWallSeconds = Math.ceil(beforeUsage) + 30;
+    await writeFile(configPath, JSON.stringify(tightConfig));
+    const parallelRunPath = join(fx.files, "parallel-certification.json");
+    await writeFile(
+      parallelRunPath,
+      JSON.stringify({
+        ...certificationInput,
+        runId: "parallel-certification",
+        investigationPromotionSha256: parallelApproval.recordSha256,
+      }),
+    );
+    let firstFinished = false;
+    const firstRun = observe().finally(() => {
+      firstFinished = true;
+    });
+    const deadline = Date.now() + 10000;
+    while (Date.now() < deadline) {
+      const events = (await readFile(workspacePaths(fx.root).journal, "utf8"))
+        .trim()
+        .split("\n")
+        .map((line) => JSON.parse(line));
+      if (
+        events.some(
+          (e) => e.type === "project.task.run.started" && e.payload.runId === "certification-one",
+        )
+      )
+        break;
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    assert.equal(
+      firstFinished,
+      false,
+      "The first actual process must still be in flight for this concurrency regression",
+    );
+    const [competing, competingInvestigation] = await Promise.all([
+      observe(parallelRunPath),
+      command(["attempt"], ["--input", competingInvestigationPath]),
+    ]);
+    const firstResult = await firstRun;
+    await writeFile(configPath, originalConfig);
+    assert.notEqual(
+      competing.exitCode,
+      0,
+      "Separate promotions must share the remaining project wall budget",
+    );
+    assert.notEqual(
+      competingInvestigation.exitCode,
+      0,
+      "Investigation attempts must also honor in-flight certification time",
+    );
+    const certified = await must(firstResult);
     assert.equal(certified.record.status, "succeeded");
     assert.equal(
       certified.record.investigationCertification.promotionSha256,
@@ -468,10 +577,10 @@ await writeFile(process.argv[3],JSON.stringify({schemaVersion:1,solverReached:tr
       cli(["research", "project", "audit", "verify", "--bundle", bundle, "--json"]);
     const verifiedAudit = await must(await verify());
     assert.deepEqual(verifiedAudit.task.investigations, {
-      definitions: 1,
+      definitions: 2,
       attempts: 1,
       candidates: 1,
-      promotions: 1,
+      promotions: 2,
       certifications: 1,
     });
     {

@@ -1,3 +1,4 @@
+import { investigationWallReservations } from "./investigation-resources.js";
 import { createCalculationSandboxInvocation } from "./executor.js";
 import {
   assertInvestigationCertificationRequired,
@@ -287,10 +288,15 @@ export async function observeNativeRun(
       await assertInvestigationCertificationRequired(root, projectId, input, events);
       await assertRunWindow(root, project, input);
       const config = await loadWorkspaceConfig(root);
+      const { wallSeconds: reservedWall } = await investigationWallReservations(
+        root,
+        projectId,
+        events,
+      );
       const timeoutSeconds = Math.min(
         input.timeoutSeconds,
         config.budget.packageMaxWallSeconds.analyze,
-        config.budget.maxWallSeconds - project.usage.wallSeconds,
+        config.budget.maxWallSeconds - project.usage.wallSeconds - reservedWall,
       );
       if (timeoutSeconds < input.timeoutSeconds)
         throw error(
@@ -511,6 +517,8 @@ export async function observeNativeRun(
     const runtimeValid =
       !probe ||
       (probe.exitCode === 0 &&
+        !probe.timedOut &&
+        !probe.cancelled &&
         probeVersion === prepared.certification!.promotion.plan.recipe.runtime.version);
     const availableSeconds = prepared.timeoutSeconds - (probe?.wallSeconds ?? 0);
     const observed =

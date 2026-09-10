@@ -1,3 +1,4 @@
+import { investigationWallReservations } from "./investigation-resources.js";
 import { localInvestigationReadStore, type InvestigationReadStore } from "./investigation-store.js";
 import { arch, platform, tmpdir } from "node:os";
 import { Ajv2020 } from "ajv/dist/2020.js";
@@ -421,21 +422,11 @@ async function observeInvestigationAttemptInternal(
       }
       const remaining = investigationRemaining(definition, history);
       const config = await loadWorkspaceConfig(root);
-      const pendingEvents = events.filter(
-        (e) =>
-          e.scope === projectId &&
-          e.type === "investigation.attempt.started" &&
-          !events.some(
-            (c) =>
-              c.scope === projectId &&
-              c.type === "investigation.attempt.completed" &&
-              c.payload.investigationId === e.payload.investigationId &&
-              c.payload.attemptId === e.payload.attemptId,
-          ),
+      const { wallSeconds: reservedWall } = await investigationWallReservations(
+        root,
+        projectId,
+        events,
       );
-      let reservedWall = 0;
-      for (const event of pendingEvents)
-        reservedWall += (await readStart(root, projectId, event)).timeoutSeconds;
       const timeoutSeconds = Math.floor(
         Math.min(
           plan.limits.maxRunSeconds,
