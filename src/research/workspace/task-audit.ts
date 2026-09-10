@@ -13,7 +13,11 @@ import { join } from "node:path";
 
 import { CliError } from "../../errors.js";
 import { unrecordedRequestProvenance } from "./request-provenance.js";
-import { validateNativeRunRecord, type NativeRunRecord } from "./native-run.js";
+import {
+  assertNativeRunJournalBinding,
+  validateNativeRunRecord,
+  type NativeRunRecord,
+} from "./native-run.js";
 import {
   compileTaskAcceptanceContext,
   taskRecordStatus,
@@ -188,23 +192,9 @@ export async function verifyTaskAudit(
         projectId,
       );
       const started = runStarts.get(run.runId);
-      if (
-        !started ||
-        nativeRuns.has(hash) ||
-        event.payload.runId !== run.runId ||
-        event.payload.requestSha256 !== run.requestSha256 ||
-        event.payload.status !== run.status ||
-        started.payload.requestSha256 !== run.requestSha256 ||
-        started.payload.requirementSha256 !== run.requirementSha256 ||
-        started.payload.requirementId !== run.requirementId ||
-        started.payload.scriptSha256 !== run.script.sha256 ||
-        started.payload.environmentLockSha256 !== run.environmentLock.sha256 ||
-        started.payload.runtimeBinarySha256 !== run.runtime.binarySha256 ||
-        started.payload.nativePacketSha256 !== run.nativePacketSha256
-      )
-        throw invalid(
-          "Native run completion does not bind its exact observed start and artifacts.",
-        );
+      if (!started || nativeRuns.has(hash))
+        throw invalid("Native run completion has no unique start.");
+      assertNativeRunJournalBinding(run, started, event);
       for (const object of [run.script, run.environmentLock, ...run.inputs, ...run.outputs]) {
         const file = indexed.get(`project/${object.path}`);
         if (!file || file.sha256 !== object.sha256 || file.bytes !== object.bytes)

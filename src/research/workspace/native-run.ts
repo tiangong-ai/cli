@@ -825,6 +825,47 @@ export async function inspectNativeRun(root: string, projectId: string, runId: s
     automaticRetry: false,
   };
 }
+type NativeRunEventBinding = Pick<JournalEvent, "scope" | "type" | "payload" | "sequence">;
+/** Shared by live inspection and portable audit, including ordinary histories
+ * that contain no investigation records to trigger a separate verifier. */
+export function assertNativeRunJournalBinding(
+  record: NativeRunRecord,
+  started: NativeRunEventBinding | undefined,
+  completed: NativeRunEventBinding | undefined,
+): void {
+  const certification = record.investigationCertification;
+  if (
+    !started ||
+    !completed ||
+    started.scope !== record.projectId ||
+    completed.scope !== record.projectId ||
+    started.type !== "project.task.run.started" ||
+    completed.type !== "project.task.run.completed" ||
+    started.payload.runId !== record.runId ||
+    completed.payload.runId !== record.runId ||
+    completed.payload.recordSha256 !== record.recordSha256 ||
+    completed.payload.requestSha256 !== record.requestSha256 ||
+    started.payload.requestSha256 !== record.requestSha256 ||
+    started.payload.requirementId !== record.requirementId ||
+    started.payload.requirementSha256 !== record.requirementSha256 ||
+    started.payload.scriptSha256 !== record.script.sha256 ||
+    started.payload.runtimeBinarySha256 !== record.runtime.binarySha256 ||
+    started.payload.environmentLockSha256 !== record.environmentLock.sha256 ||
+    started.payload.nativePacketSha256 !== record.nativePacketSha256 ||
+    (certification !== undefined &&
+      (!isObject(certification) ||
+        typeof certification.promotionSha256 !== "string" ||
+        !HASH.test(certification.promotionSha256))) ||
+    started.payload.investigationPromotionSha256 !== certification?.promotionSha256 ||
+    completed.payload.status !== record.status ||
+    started.sequence >= completed.sequence
+  )
+    throw error(
+      "Native run does not match its committed start and completion.",
+      "RESEARCH_NATIVE_RUN_BINDING_INVALID",
+    );
+}
+
 export async function readNativeRun(
   root: string,
   projectId: string,
@@ -843,23 +884,7 @@ export async function readNativeRun(
       event.type === "project.task.run.started" &&
       event.payload.runId === record.runId,
   );
-  if (
-    completed?.payload.recordSha256 !== hash ||
-    completed.payload.requestSha256 !== record.requestSha256 ||
-    started?.payload.requestSha256 !== record.requestSha256 ||
-    started.payload.scriptSha256 !== record.script.sha256 ||
-    started.payload.runtimeBinarySha256 !== record.runtime.binarySha256 ||
-    started.payload.environmentLockSha256 !== record.environmentLock.sha256 ||
-    started.payload.nativePacketSha256 !== record.nativePacketSha256 ||
-    started.payload.investigationPromotionSha256 !==
-      record.investigationCertification?.promotionSha256 ||
-    completed.payload.status !== record.status ||
-    started.sequence >= completed.sequence
-  )
-    throw error(
-      "Native run does not match its committed start and completion.",
-      "RESEARCH_NATIVE_RUN_BINDING_INVALID",
-    );
+  assertNativeRunJournalBinding(record, started, completed);
   await taskDirectory(root, projectId, "run-objects", false);
   for (const object of [
     record.script,

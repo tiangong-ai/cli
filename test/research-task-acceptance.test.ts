@@ -51,6 +51,114 @@ import type { ResearchPolicyBinding } from "../src/research/workspace/types.js";
 import { inspectScientificReviewStatus } from "../src/research/workspace/scientific-review.js";
 
 describe("lightweight original task and authorized scope", () => {
+  for (const example of [
+    { label: "a promotion hash", value: { promotionSha256: "a".repeat(64) } },
+    { label: "no promotion hash", value: { status: "passed" } },
+  ]) {
+    it(`rejects grafted certification with ${example.label} in an ordinary portable run`, async () => {
+      const fx = await acquiredFixture("computation");
+      try {
+        const request = await nativeRunTestRequest(
+          fx,
+          "ghost-certification",
+          `import {writeFile} from 'node:fs/promises'; await writeFile(process.argv[3],JSON.stringify({value:1}));`,
+        );
+        const observed = await cli(request.argv);
+        assert.equal(observed.exitCode, 0, observed.stderr);
+        const run = JSON.parse(observed.stdout).record;
+        const bundle = join(fx.files, "ghost-certification-audit");
+        const exported = await cli([
+          "research",
+          "project",
+          "audit",
+          "export",
+          "task-project",
+          "--output",
+          bundle,
+          "--workspace",
+          fx.root,
+          "--json",
+        ]);
+        assert.equal(exported.exitCode, 0, exported.stderr);
+        const manifestPath = join(bundle, "manifest.json"),
+          proofPath = join(bundle, "state/journal-event-proofs.json");
+        const manifest = JSON.parse(await readFile(manifestPath, "utf8")),
+          proof = JSON.parse(await readFile(proofPath, "utf8"));
+        const { recordSha256: oldHash, ...core } = run;
+        core.investigationCertification = example.value;
+        const newHash = sha256Text(canonicalJson(core)),
+          changedRun = { ...core, recordSha256: newHash };
+        const oldPath = `project/task/runs/${oldHash}.json`,
+          newPath = `project/task/runs/${newHash}.json`;
+        const runText = JSON.stringify(changedRun, null, 2) + "\n";
+        await rm(join(bundle, oldPath));
+        await writeFile(join(bundle, newPath), runText);
+        const entry = manifest.files.find((f: { path: string }) => f.path === oldPath);
+        Object.assign(entry, {
+          path: newPath,
+          sha256: sha256Text(runText),
+          bytes: Buffer.byteLength(runText),
+        });
+        const completed = proof.events.find(
+          (e: { type: string; payload: { recordSha256?: string } }) =>
+            e.type === "project.task.run.completed" && e.payload.recordSha256 === oldHash,
+        );
+        completed.payload.recordSha256 = newHash;
+        completed.sourcePayloadSha256 = sha256Text(canonicalJson(completed.payload));
+        completed.sourceEventHash = sha256Text(
+          canonicalJson({
+            schemaVersion: 1,
+            sequence: completed.sequence,
+            timestamp: completed.timestamp,
+            type: completed.type,
+            scope: completed.scope,
+            payload: completed.payload,
+            previousHash: completed.sourcePreviousHash,
+          }),
+        );
+        proof.workspaceJournalHead = completed.sourceEventHash;
+        manifest.sourceBindings.workspaceJournalHead = completed.sourceEventHash;
+        const proofText = JSON.stringify(proof, null, 2) + "\n";
+        await chmod(proofPath, 0o600);
+        await writeFile(proofPath, proofText);
+        const proofEntry = manifest.files.find(
+          (f: { path: string }) => f.path === "state/journal-event-proofs.json",
+        );
+        proofEntry.sha256 = sha256Text(proofText);
+        proofEntry.bytes = Buffer.byteLength(proofText);
+        manifest.files.sort((a: { path: string }, b: { path: string }) =>
+          a.path < b.path ? -1 : a.path > b.path ? 1 : 0,
+        );
+        const { manifestSha256: _old, ...manifestCore } = manifest;
+        await chmod(manifestPath, 0o600);
+        await writeFile(
+          manifestPath,
+          JSON.stringify(
+            { ...manifestCore, manifestSha256: sha256Text(canonicalJson(manifestCore)) },
+            null,
+            2,
+          ) + "\n",
+        );
+        const checked = await cli([
+          "research",
+          "project",
+          "audit",
+          "verify",
+          "--bundle",
+          bundle,
+          "--json",
+        ]);
+        assert.notEqual(
+          checked.exitCode,
+          0,
+          "Certification claims cannot be added without a matching authorized start",
+        );
+        assert.match(checked.stderr, /Native run.*committed start/);
+      } finally {
+        await fx.cleanup();
+      }
+    });
+  }
   it("binds acceptance to one observed native calculation and replays without running it again", async () => {
     const fx = await acquiredFixture("computation");
     try {
