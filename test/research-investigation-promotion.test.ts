@@ -106,6 +106,74 @@ await writeFile(process.argv[3],JSON.stringify({schemaVersion:1,solverReached:tr
       source,
       "Synthetic owner authorizes exactly the displayed envelope and later exact promotion plan in this protocol regression.",
     );
+    const oldRunPath = join(fx.files, "prior-observation.json");
+    await writeFile(
+      oldRunPath,
+      JSON.stringify({
+        schemaVersion: 1,
+        runId: "prior-observation",
+        requirementId: fx.rows[0]!.id,
+        requirementSha256: fx.rows[0]!.requirementSha256,
+        nativeSessionId: null,
+        workingDirectory: fx.files,
+        runtime: { kind: "node", path: process.execPath },
+        scriptPath,
+        environmentLockPath,
+        inputs: envelope.canonicalInputs,
+        outputs: envelope.programs[0]!.outputs,
+        arguments: envelope.programs[0]!.arguments,
+        timeoutSeconds: 30,
+      }),
+    );
+    const oldRun = await must(
+      await cli([
+        "research",
+        "project",
+        "task",
+        "run",
+        "observe",
+        projectId,
+        "--input",
+        oldRunPath,
+        "--confirm-execution",
+        "--workspace",
+        fx.root,
+        "--json",
+      ]),
+    );
+    const acceptancePath = join(fx.files, "acceptance.json");
+    const oldAcceptance = {
+      schemaVersion: 1,
+      requirementId: fx.rows[0]!.id,
+      requirementSha256: fx.rows[0]!.requirementSha256,
+      previousRecordSha256: null,
+      outcome: "satisfied",
+      summary: "A synthetic observation retained before the later investigation",
+      checkKind: "computation",
+      reportedCommand: null,
+      nativeRunSha256: oldRun.record.recordSha256,
+      sourceIds: ["source-1"],
+      evidenceAtomIds: [fx.atom.atomId],
+      analysisFindingIds: [],
+      resultFiles: [],
+      limitations: ["Synthetic protocol observation, never a scientific conclusion."],
+    };
+    const accept = () =>
+      cli([
+        "research",
+        "project",
+        "task",
+        "acceptance",
+        "record",
+        projectId,
+        "--input",
+        acceptancePath,
+        "--workspace",
+        fx.root,
+        "--json",
+      ]);
+    await writeFile(acceptancePath, JSON.stringify(oldAcceptance));
+    const earlierAcceptance = await must(await accept());
     const envelopePlan = await must(await command(["plan"], ["--input", inputPath]));
     await must(
       await command(
@@ -145,6 +213,17 @@ await writeFile(process.argv[3],JSON.stringify({schemaVersion:1,solverReached:tr
       }),
     );
     const candidate = await must(await command(["select"], ["--input", inputPath]));
+    const guardedStatus = JSON.parse((await fx.task(["status"])).stdout);
+    assert.equal(guardedStatus.currentScope.requirements[0].status, "unverified-certification");
+    await writeFile(
+      acceptancePath,
+      JSON.stringify({ ...oldAcceptance, previousRecordSha256: earlierAcceptance.recordSha256 }),
+    );
+    const beforeOldAcceptance = await readFile(workspacePaths(fx.root).journal, "utf8");
+    const rejectedOld = await accept();
+    assert.notEqual(rejectedOld.exitCode, 0);
+    assert.match(rejectedOld.stderr, /RESEARCH_INVESTIGATION_CERTIFICATION_REQUIRED/);
+    assert.equal(await readFile(workspacePaths(fx.root).journal, "utf8"), beforeOldAcceptance);
     const beforeView = await loadScientificFulfillmentView(
       fx.root,
       await loadProject(fx.root, projectId),
@@ -349,7 +428,20 @@ await writeFile(process.argv[3],JSON.stringify({schemaVersion:1,solverReached:tr
     assert.match(duplicate.stderr, /RESEARCH_INVESTIGATION_CERTIFICATION_EXHAUSTED/);
     assert.equal(await readFile(workspacePaths(fx.root).journal, "utf8"), certifiedJournal);
     const taskStatus = JSON.parse((await fx.task(["status"])).stdout);
-    assert.equal(taskStatus.currentScope.requirements[0].status, "unanswered");
+    assert.equal(taskStatus.currentScope.requirements[0].status, "unverified-certification");
+    await writeFile(
+      acceptancePath,
+      JSON.stringify({
+        ...oldAcceptance,
+        previousRecordSha256: earlierAcceptance.recordSha256,
+        nativeRunSha256: certified.record.recordSha256,
+      }),
+    );
+    const certifiedAcceptance = await must(await accept());
+    assert.equal(certifiedAcceptance.nativeRunSha256, certified.record.recordSha256);
+    const pendingReview = JSON.parse((await fx.task(["status"])).stdout);
+    assert.equal(pendingReview.currentScope.status, "incomplete");
+    assert.equal(pendingReview.currentScope.requirements[0].status, "recorded");
   } finally {
     await fx.cleanup();
   }

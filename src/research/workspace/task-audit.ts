@@ -1,3 +1,4 @@
+import { investigatedRequirementHashes } from "./investigation-requirements.js";
 import {
   requirementAmendmentBinding,
   type ScientificAmendmentImpact,
@@ -107,7 +108,15 @@ export async function verifyTaskAudit(
     hashField: string,
   ) => {
     if (
-      !["contracts", "proposals", "acceptance", "request-sources", "runs"].includes(group) ||
+      ![
+        "contracts",
+        "proposals",
+        "acceptance",
+        "request-sources",
+        "runs",
+        "investigations",
+        "investigation-promotions",
+      ].includes(group) ||
       !HASH.test(hash)
     )
       throw invalid("Task audit object address is invalid.");
@@ -308,13 +317,21 @@ export async function verifyTaskAudit(
   }
   const expectedRows = taskRequirementRows(history);
   const results = new Map<string, OutputRecord>();
+  const investigated = await investigatedRequirementHashes(projectId, events, objectReader);
   for (const [hash, row] of expectedRows) {
+    if (investigated.has(hash)) row.requiresInvestigationCertification = true;
     const record = latest.get(hash);
     if (!record) continue;
     row.record = record;
     const amendmentBinding = requirementAmendmentBinding(row, amendmentImpact);
     if (amendmentBinding) row.requiredDesignAmendmentSha256 = amendmentBinding;
-    row.status = taskRecordStatus(record, references, project, amendmentBinding);
+    row.status = taskRecordStatus(
+      record,
+      references,
+      project,
+      amendmentBinding,
+      Boolean(row.requiresInvestigationCertification),
+    );
     for (const result of record.results) results.set(result.sha256, result);
   }
   if (

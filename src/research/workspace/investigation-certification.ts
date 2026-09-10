@@ -1,3 +1,5 @@
+import { investigatedRequirementHashes } from "./investigation-requirements.js";
+import { readTaskObject } from "./task-contract.js";
 import { lstat, readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { CliError } from "../../errors.js";
@@ -31,23 +33,17 @@ export async function assertInvestigationCertificationRequired(
   events: JournalEvent[],
 ) {
   if (input.investigationPromotionSha256) return;
-  for (const event of events) {
-    if (event.scope !== projectId || event.type !== "investigation.approved") continue;
-    const definition = await loadInvestigation(
-      root,
-      projectId,
-      String(event.payload.investigationId),
-      events,
+  const investigated = await investigatedRequirementHashes(
+    projectId,
+    events,
+    <T>(group: string, hash: string, field: string) =>
+      readTaskObject<T>(root, projectId, group, hash, field),
+  );
+  if (investigated.has(input.requirementSha256))
+    throw failure(
+      "This investigated requirement needs an exact approved promotion and a fresh certification run. Diagnostic or ordinary runs cannot bypass that boundary.",
+      "RESEARCH_INVESTIGATION_CERTIFICATION_REQUIRED",
     );
-    if (
-      definition.plan.requirementId === input.requirementId &&
-      definition.plan.requirementSha256 === input.requirementSha256
-    )
-      throw failure(
-        "This investigated requirement needs an exact approved promotion and a fresh certification run. Diagnostic or ordinary runs cannot bypass that boundary.",
-        "RESEARCH_INVESTIGATION_CERTIFICATION_REQUIRED",
-      );
-  }
 }
 export async function frozenPromotionView(
   root: string,
