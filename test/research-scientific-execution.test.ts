@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { runCli } from "../src/cli.js";
 import { openArtifactViews } from "../src/research/workspace/artifact-views.js";
 import { chmod, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -27,6 +28,143 @@ import { scientificDesignInput } from "./helpers/scientific-design.js";
 import { appendJournalEvent, readVerifiedJournal } from "../src/research/workspace/journal.js";
 
 describe("explicit isolated scientific review execution", () => {
+  it("reserves the same affordable turn and cost envelope that the reviewer is allowed to execute", async () => {
+    const fixture = await preparedFixture("execution-affordable-envelope");
+    try {
+      const config = await loadWorkspaceConfig(fixture.root);
+      config.reviewer.pricing = {
+        inputUsdPerMillionTokens: 1,
+        cachedInputUsdPerMillionTokens: 0.1,
+        outputUsdPerMillionTokens: 2,
+      };
+      await writeJsonAtomic(workspacePaths(fixture.root).config, config);
+      const executed = await executeScientificReview(
+        { ...fixture, role: "research-design", confirmCost: true, environment: {} },
+        async (request) => {
+          const event = (await readVerifiedJournal(workspacePaths(fixture.root).journal)).findLast(
+            (x) => x.type === "scientific-review.execution.started",
+          )!;
+          const reserved = Number(event.payload.reservedTokens);
+          const initialPromptTokens = Math.ceil(Buffer.byteLength(request.prompt) / 3);
+          assert.ok(request.maxTurns >= 1 && request.maxTurns <= 64);
+          assert.ok(
+            reserved >= initialPromptTokens * request.maxTurns,
+            "the reservation must cover at least the repeated initial prompt for every allowed turn",
+          );
+          assert.ok(reserved <= config.budget.earlyScientificReviewMaxTokens);
+          assert.ok(
+            request.maxCostUsd <= Number(event.payload.reservedCostUsd) + 0.000001,
+            "the executor must not receive a larger spending envelope than was reserved",
+          );
+          return result(fixture.packet);
+        },
+      );
+      assert.equal(executed.status, "passed", "a smaller affordable envelope should remain usable");
+    } finally {
+      await fixture.cleanup();
+    }
+  });
+
+  it("accounts a numeric-budget review once and does not charge or execute again on replay", async () => {
+    const fixture = await preparedFixture("execution-project-cost-budget");
+    try {
+      const config = await loadWorkspaceConfig(fixture.root);
+      config.reviewer.pricing = {
+        inputUsdPerMillionTokens: 1,
+        cachedInputUsdPerMillionTokens: 0.1,
+        outputUsdPerMillionTokens: 2,
+      };
+      await writeJsonAtomic(workspacePaths(fixture.root).config, config);
+      let stdout = "",
+        stderr = "";
+      const code = await runCli(
+        [
+          "research",
+          "project",
+          "budget",
+          "set",
+          fixture.projectId,
+          "--max-cost-usd",
+          "50",
+          "--confirm-budget",
+          "--workspace",
+          fixture.root,
+          "--json",
+        ],
+        {
+          env: {},
+          stdout: {
+            write: (s: string) => {
+              stdout += s;
+            },
+          },
+          stderr: {
+            write: (s: string) => {
+              stderr += s;
+            },
+          },
+        },
+      );
+      assert.equal(code, 0, stderr);
+      let calls = 0,
+        charged = 0;
+      const executor = async (
+        request: Parameters<NonNullable<Parameters<typeof executeScientificReview>[1]>>[0],
+      ) => {
+        calls++;
+        assert.ok(request.maxCostUsd > 0 && request.maxCostUsd <= 50);
+        charged = Math.min(request.maxCostUsd, 0.02);
+        return { ...result(fixture.packet), costUsd: charged };
+      };
+      const input = {
+        ...fixture,
+        role: "research-design" as const,
+        confirmCost: true,
+        environment: {},
+      };
+      await executeScientificReview(input, executor);
+      const replay = await executeScientificReview(input, executor);
+      assert.equal(replay.replayed, true);
+      assert.equal(calls, 1);
+      stdout = "";
+      stderr = "";
+      assert.equal(
+        await runCli(
+          [
+            "research",
+            "status",
+            "--project",
+            fixture.projectId,
+            "--workspace",
+            fixture.root,
+            "--json",
+          ],
+          {
+            env: {},
+            stdout: {
+              write: (s: string) => {
+                stdout += s;
+              },
+            },
+            stderr: {
+              write: (s: string) => {
+                stderr += s;
+              },
+            },
+          },
+        ),
+        0,
+        stderr,
+      );
+      const budget = JSON.parse(stdout).projects[0].budget;
+      assert.equal(budget.accountedEstimateUsd, charged);
+      assert.equal(budget.outstandingReservationsUsd, 0);
+      assert.equal(budget.providerInvoiceUsd, null);
+    } finally {
+      await fixture.cleanup();
+    }
+  });
+
   it("retains a completed over-budget response without accepting it or spending on recovery", async () => {
     const fixture = await preparedFixture("execution-over-budget-retention");
     try {

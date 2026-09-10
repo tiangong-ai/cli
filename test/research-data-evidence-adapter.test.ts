@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { describe, it } from "node:test";
 
 import { runCli } from "../src/cli.js";
+import { projectBudgetView } from "../src/research/workspace/project-budget.js";
 import { createDataRegistry } from "../src/data/catalog.js";
 import { builtInDataRegistry } from "../src/data/builtins.js";
 import type { DataRunRequest } from "../src/data/contracts.js";
@@ -24,13 +25,21 @@ import {
 } from "../src/research/workspace/credentials.js";
 import { loadProjectEvidenceReceipts } from "../src/research/workspace/evidence.js";
 import { listEvidenceCandidates } from "../src/research/workspace/evidence-ledger.js";
-import { initializeProject } from "../src/research/workspace/projects.js";
+import {
+  initializeProject,
+  loadProject,
+  setProjectBudget,
+} from "../src/research/workspace/projects.js";
 import {
   abortNativeResearchStage,
   prepareNativeResearchStage,
 } from "../src/research/workspace/runtime.js";
-import { workspacePaths } from "../src/research/workspace/storage.js";
-import { initializeResearchWorkspace } from "../src/research/workspace/workspace.js";
+import { workspacePaths, writeJsonAtomic } from "../src/research/workspace/storage.js";
+import {
+  initializeResearchWorkspace,
+  loadWorkspaceConfig,
+  withWorkspaceLock,
+} from "../src/research/workspace/workspace.js";
 import { syntheticConnector } from "./support/data-synthetic-connector.js";
 
 function request(): DataRunRequest {
@@ -57,6 +66,146 @@ async function invokeCli(argv: string[]) {
 }
 
 describe("research data evidence adapter", () => {
+  it("requires a declared provider-operation ceiling and reserves it before any network call", async () => {
+    const root = await mkdtemp(join(tmpdir(), "research-data-money-"));
+    let networkCalls = 0;
+    let failProvider = false;
+    const registry = createDataRegistry([
+      syntheticConnector({
+        execute: async (context) => {
+          const response = await context.http.request({
+            endpointId: "primary",
+            method: "GET",
+            path: "/v1/echo",
+          });
+          return {
+            status: "success",
+            data: { echoed: response.text() },
+            summary: {
+              recordCount: 1,
+              pageCount: 1,
+              chunkCount: 0,
+              truncated: false,
+              completeness: "complete",
+            },
+            warnings: [],
+            errors: [],
+            observations: [response.observation],
+          };
+        },
+      }),
+    ]);
+    try {
+      await initializeResearchWorkspace(root, undefined);
+      const config = await loadWorkspaceConfig(root);
+      config.producer.pricing = {
+        inputUsdPerMillionTokens: 1,
+        cachedInputUsdPerMillionTokens: 1,
+        outputUsdPerMillionTokens: 1,
+      };
+      await writeJsonAtomic(workspacePaths(root).config, config);
+      await initializeProject(root, "priced-data", "Evaluate a bounded provider operation.");
+      await setProjectBudget(root, "priced-data", 50, true);
+      const native = await prepareNativeResearchStage({
+        root,
+        projectId: "priced-data",
+        stage: "discover",
+        hostAgent: "codex",
+      });
+      const execute = () =>
+        withWorkspaceLock(root, "test.research-data-money", () =>
+          executeResearchDataCapability({
+            root,
+            projectId: "priced-data",
+            request: request(),
+            registry,
+            fetchImpl: async () => {
+              networkCalls++;
+              const state = await loadProject(root, "priced-data");
+              assert.ok(
+                state.budget!.entries.some(
+                  (entry) =>
+                    entry.kind === "provider-operation" &&
+                    entry.status === "reserved" &&
+                    entry.maxCostUsd === 4,
+                ),
+              );
+              if (failProvider)
+                return new Response("temporary provider failure", {
+                  status: 500,
+                  headers: { "content-type": "application/json" },
+                });
+              return new Response('"priced fixture"', {
+                status: 200,
+                headers: { "content-type": "application/json" },
+              });
+            },
+          }),
+        );
+      const invalid = await withWorkspaceLock(root, "test.invalid-data-is-not-funded", () =>
+        executeResearchDataCapability({
+          root,
+          projectId: "priced-data",
+          request: { ...request(), input: { value: "" } },
+          registry,
+        }),
+      );
+      assert.equal(invalid.coreResult.status, "blocked");
+      assert.equal(
+        (await loadProject(root, "priced-data")).budget!.entries.filter(
+          (entry) => entry.kind === "provider-operation",
+        ).length,
+        0,
+      );
+      await assert.rejects(execute(), { code: "RESEARCH_PROJECT_BUDGET_PRICE_REQUIRED" });
+      assert.equal(networkCalls, 0);
+      const prices = join(root, "provider-costs.json");
+      await writeJsonAtomic(prices, { "data:test.synthetic:echo": 4 });
+      const args = [
+        "research",
+        "project",
+        "budget",
+        "set",
+        "priced-data",
+        "--max-cost-usd",
+        "50",
+        "--provider-costs",
+        prices,
+        "--workspace",
+        root,
+        "--json",
+      ];
+      const unconfirmed = await invokeCli(args);
+      assert.equal(
+        JSON.parse(unconfirmed.stderr || unconfirmed.stdout).error?.code,
+        "RESEARCH_BUDGET_CONFIRMATION_REQUIRED",
+      );
+      const approved = await invokeCli([...args, "--confirm-budget"]);
+      assert.equal(approved.exitCode, 0, approved.stderr);
+      const result = await execute();
+      assert.equal(result.coreResult.status, "success");
+      assert.equal(networkCalls, 1);
+      const view = projectBudgetView(await loadProject(root, "priced-data"), config);
+      assert.equal(view.accountedEstimateUsd, 4);
+      assert.equal(view.providerInvoiceUsd, null);
+      failProvider = true;
+      const failed = await execute();
+      assert.equal(failed.coreResult.status, "blocked");
+      assert.ok(networkCalls > 1);
+      const callsAfterFailure = networkCalls;
+      assert.equal(
+        projectBudgetView(await loadProject(root, "priced-data"), config).accountedEstimateUsd,
+        8,
+        "bounded retries belong to one declared operation allocation",
+      );
+      await setProjectBudget(root, "priced-data", 11 + native.limits.reservedMaxCostUsd, false);
+      await assert.rejects(execute(), { code: "RESEARCH_BUDGET_RESERVATION_FAILED" });
+      assert.equal(networkCalls, callsAfterFailure);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
   it("projects every registered operation without a per-capability research adapter", () => {
     const projection = projectResearchDataCapabilities(createDataRegistry([syntheticConnector()]));
 
@@ -176,7 +325,32 @@ describe("research data evidence adapter", () => {
     ]);
     try {
       await initializeResearchWorkspace(root, undefined);
+      const costConfig = await loadWorkspaceConfig(root);
+      costConfig.producer.pricing = {
+        inputUsdPerMillionTokens: 1,
+        cachedInputUsdPerMillionTokens: 1,
+        outputUsdPerMillionTokens: 1,
+      };
+      await writeJsonAtomic(workspacePaths(root).config, costConfig);
       await initializeProject(root, "data-view-budget", "Preserve all returned data records.");
+      const prices = join(root, "provider-costs.json");
+      await writeJsonAtomic(prices, { "data:test.synthetic:echo": 4 });
+      const funded = await invokeCli([
+        "research",
+        "project",
+        "budget",
+        "set",
+        "data-view-budget",
+        "--max-cost-usd",
+        "50",
+        "--provider-costs",
+        prices,
+        "--confirm-budget",
+        "--workspace",
+        root,
+        "--json",
+      ]);
+      assert.equal(funded.exitCode, 0, funded.stderr);
       const packet = await prepareNativeResearchStage({
         root,
         projectId: "data-view-budget",
@@ -287,6 +461,12 @@ describe("research data evidence adapter", () => {
 
       const projected = projectResearchDataCapabilities(registry).capabilities[0];
       assert.equal(projected?.resultShape, "record-list");
+      assert.equal(
+        projectBudgetView(await loadProject(root, "data-view-budget"), costConfig)
+          .accountedEstimateUsd,
+        4,
+        "receipt-bound local pages must not be charged as new provider operations",
+      );
       await abortNativeResearchStage({
         root,
         projectId: "data-view-budget",

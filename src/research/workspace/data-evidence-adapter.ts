@@ -1,3 +1,5 @@
+import { reserveProviderOperation, settleProviderOperation } from "./provider-budget.js";
+import { assertProjectAuthority, projectAuthorityIndex } from "./project-authority.js";
 import { randomUUID } from "node:crypto";
 import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -27,7 +29,7 @@ import {
   type DataEvidenceArtifactInput,
 } from "./evidence.js";
 import { registerDataResultCandidate, type EvidenceCandidate } from "./evidence-ledger.js";
-import { appendJournalEvent, readJournal } from "./journal.js";
+import { appendJournalEvent, readJournal, readVerifiedJournal } from "./journal.js";
 import { loadProject } from "./projects.js";
 import { canonicalJson, sha256Bytes, sha256Text, workspacePaths } from "./storage.js";
 import { loadWorkspaceConfig } from "./workspace.js";
@@ -202,6 +204,8 @@ export async function executeResearchDataCapability(
   const request = input.request as DataRunRequest;
   const registry = input.registry ?? builtInDataRegistry;
   const project = await loadProject(input.root, input.projectId);
+  const authorityJournal = await readVerifiedJournal(workspacePaths(input.root).journal);
+  assertProjectAuthority(project, projectAuthorityIndex(authorityJournal));
   const discover = project.packages.find((workPackage) => workPackage.stage === "discover");
   if (discover?.status !== "running" || discover.executor !== "producer") {
     throw researchDataError(
@@ -231,7 +235,7 @@ export async function executeResearchDataCapability(
       config.budget.maxBrokerContextTokens * DATA_CONTEXT_BYTES_PER_TOKEN +
       DATA_AGENT_OUTPUT_ENVELOPE_BYTES,
   };
-  const journal = await readJournal(workspacePaths(input.root).journal);
+  const journal = authorityJournal;
   const startedCalls = journal.filter(
     (event) =>
       event.scope === input.projectId &&
@@ -263,6 +267,8 @@ export async function executeResearchDataCapability(
     },
   );
 
+  let providerReservation: string | null = null;
+  let admissionFailure: unknown;
   const artifactDirectory = operation.manifest.artifactOutput
     ? await mkdtemp(join(tmpdir(), "tiangong-research-data-artifacts-"))
     : undefined;
@@ -290,10 +296,25 @@ export async function executeResearchDataCapability(
     const coreResult = await executeDataRun(effectiveRequest, {
       registry,
       environment,
+      beforeExecute: async () => {
+        try {
+          providerReservation = await reserveProviderOperation(
+            input.root,
+            project,
+            config,
+            researchCapabilityId,
+            attemptId,
+          );
+        } catch (error) {
+          admissionFailure = error;
+          throw error;
+        }
+      },
       ...(input.fetchImpl === undefined ? {} : { fetchImpl: input.fetchImpl }),
       ...(input.clock === undefined ? {} : { clock: input.clock }),
       ...(artifactDirectory === undefined ? {} : { artifactOutputDirectory: artifactDirectory }),
     });
+    if (admissionFailure) throw admissionFailure;
     if (coreResult.status === "blocked") {
       await appendJournalEvent(
         workspacePaths(input.root).journal,
@@ -445,7 +466,13 @@ export async function executeResearchDataCapability(
     );
     throw error;
   } finally {
-    if (artifactDirectory) await rm(artifactDirectory, { recursive: true, force: true });
+    // Persist returned evidence before the accounting write, so a ledger I/O
+    // failure cannot discard already-fetched material. Always clean staging.
+    try {
+      await settleProviderOperation(input.root, input.projectId, providerReservation);
+    } finally {
+      if (artifactDirectory) await rm(artifactDirectory, { recursive: true, force: true });
+    }
   }
 }
 

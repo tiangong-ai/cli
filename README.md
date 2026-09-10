@@ -13,7 +13,7 @@ checkPaths:
   - bin/**
   - src/**
 lastReviewedAt: 2026-09-10
-lastReviewedCommit: 8ce5cd33c960a5176e3a9dd959f5ce6bf5a06343
+lastReviewedCommit: 70c723411b60e7838957f42391efc546e0380f2b
 ---
 
 # Tiangong AI CLI
@@ -1334,7 +1334,8 @@ It does not claim a provider-side turn or output-token cap for the host app.
 
 Independent review uses the pre-call reservation calculator and the reviewer's
 provider-side structured-output/turn controls where available. Claude packet-only
-review has a 64-turn provider guard; Codex uses the existing finite wall-time and
+review chooses the largest affordable turn count up to a 64-turn provider
+guard and uses that same count in its reservation; Codex uses the existing finite wall-time and
 token/cost guards because its CLI has no equivalent turn flag. Planning uses a
 small initial-context estimate and expected reads, not the entire corpus or an
 unbounded legacy context hint. Preflight reports `inputContextTokenLimit=null`.
@@ -1351,6 +1352,55 @@ output tokens; configured pricing fills cost when the provider omits it. Run
 records and JSONL progress preserve sanitized accounting mode, event/item
 counts, provider turns, tool calls, reasoning tokens, and bounded provider
 errors.
+
+Owners can opt into a numeric project authorization with `project init` or
+`project preflight --max-cost-usd`, or adopt it for an existing project:
+
+```bash
+tiangong-ai research project budget set PROJECT --max-cost-usd 50 \
+  --provider-costs /absolute/provider-costs.json --confirm-budget \
+  --workspace /absolute/workspace --json
+```
+
+The JSON file maps selected capability IDs to owner-reviewed USD maxima for one
+logical operation, for example `{ "method.public-source": 0.01 }`. Choose these
+values from your actual provider agreement; the example is synthetic. Each
+allocation includes that operation's bounded redirects, retries, and provider
+pagination. Missing prices block new provider work; they do not mean zero.
+Project and shared HTTP caches, and local reads of stored Data windows, require
+no new monetary allocation. The existing broker call-count budget still counts
+cache/tool invocations. Concurrent provider calls share one durable ledger;
+local ledger writes are serialized while network operations remain parallel.
+
+The project ledger covers project stage/reviewer admissions and the project
+HTTP/Data evidence entrypoints. Workspace setup/Doctor probes, setup companion
+commands, standalone `data run`, and unrelated host-app actions have no project
+budget binding; their charges are unobserved here and must not be counted as
+zero. Native host work is represented by its declared allocation, not trusted
+provider metering.
+
+The project budget response separates accounted estimates, pending reservations,
+remaining authorization, and overruns. It never reports a provider invoice.
+Model actions require declared route prices; native/provider operations use
+conservative allocations where trusted usage is unavailable. Increasing the
+authorization or changing provider maxima requires `--confirm-budget`.
+Tightening cannot exclude already spent or reserved exposure. Legacy projects
+retain their existing workspace controls until explicitly adopted; changing a
+project authorization leaves workspace settings and Doctor bindings intact.
+Fork/addendum recovery carries outstanding obligations to the current project
+without counting them twice. An uncertain operation remains pending until it
+ends or the owner explicitly resolves it with `project budget resolve`, a
+reservation ID, an accounted estimate, a reason, and `--confirm-budget`.
+A native reservation requires its original session to have ended first.
+Settled accounting evidence is immutable, including conservative allocated
+maxima; this interface does not revise historical costs or reconcile provider
+invoices. Choose reviewed per-operation maxima accordingly.
+An owner estimate above the ceiling records an overrun and blocks further
+positive-cost work; it does not silently increase the authorization.
+If a command fails after saving the decision but before writing its journal
+record, retrying the same command reconciles the missing record without changing
+the authorization or charging again. The record is marked as reconciliation;
+contradictory journal evidence stops the replay for inspection.
 
 Every evidence source must resolve to an admitted input, a completed broker
 receipt, or a completed structured data-runtime receipt. Successful broker and

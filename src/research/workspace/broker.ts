@@ -17,6 +17,8 @@ import { registerBrokerCandidates } from "./evidence-ledger.js";
 import { deriveDiscoveryPlan } from "./discovery-planning.js";
 import { appendJournalEvent, readJournal } from "./journal.js";
 import { loadProject } from "./projects.js";
+import { assertProjectAuthority, readProjectAuthorityIndex } from "./project-authority.js";
+import { reserveProviderOperation, settleProviderOperation } from "./provider-budget.js";
 import { sanitizeResearchRecord, sanitizeResearchText } from "./sanitization.js";
 import {
   canonicalJson,
@@ -150,8 +152,9 @@ export async function startCapabilityBroker(
   };
   const routeToken = randomUUID().replaceAll("-", "");
   const route = `/mcp/${routeToken}`;
+  const inFlight = new Set<Promise<void>>();
   const server = createServer((request, response) => {
-    void handleMcpRequest({
+    const operation = handleMcpRequest({
       request,
       response,
       route,
@@ -166,6 +169,11 @@ export async function startCapabilityBroker(
       callBudget,
       requireAcquisitionRoute: Boolean(project?.scientificDesign),
     });
+    inFlight.add(operation);
+    void operation.then(
+      () => inFlight.delete(operation),
+      () => inFlight.delete(operation),
+    );
   });
   await new Promise<void>((resolvePromise, reject) => {
     server.once("error", reject);
@@ -176,6 +184,7 @@ export async function startCapabilityBroker(
     server.close();
     throw new Error("Capability broker did not receive a TCP address.");
   }
+  let stopping: Promise<void> | undefined;
   return {
     url: `http://127.0.0.1:${address.port}${route}`,
     usage: () => ({
@@ -184,9 +193,14 @@ export async function startCapabilityBroker(
       remainingCalls: Math.max(0, callBudget.maxCalls - callBudget.startedCalls),
     }),
     stop: () =>
-      new Promise<void>((resolvePromise, reject) => {
-        server.close((error) => (error ? reject(error) : resolvePromise()));
-      }),
+      (stopping ??= (async () => {
+        await new Promise<void>((resolvePromise, reject) => {
+          server.close((error) => (error ? reject(error) : resolvePromise()));
+        });
+        // A disconnected caller can leave an outbound operation running after its
+        // socket closes. Drain its evidence and accounting writes before returning.
+        await Promise.allSettled([...inFlight]);
+      })()),
   };
 }
 
@@ -448,6 +462,7 @@ async function fetchCandidateSource(input: {
       exitCode: 3,
     });
   }
+  if (project) assertProjectAuthority(project, await readProjectAuthorityIndex(input.root));
   const acquisitionRoute = project
     ? await resolveAgentAcquisitionRoute({
         root: input.root,
@@ -660,6 +675,7 @@ async function fetchCandidateSource(input: {
       cacheKeySha256,
     },
   );
+  let providerReservation: string | null = null;
   try {
     if (cacheMode === "prefer") {
       const cached = await loadBrokerEvidenceCache(input.root, cacheKeySha256);
@@ -743,6 +759,15 @@ async function fetchCandidateSource(input: {
         );
       }
       headers.set(credential.headerName, `${credential.prefix}${value}`);
+    }
+    if (project) {
+      providerReservation = await reserveProviderOperation(
+        input.root,
+        project,
+        await loadWorkspaceConfig(input.root),
+        capabilityId,
+        attemptId,
+      );
     }
     const responseLimit = Math.min(capability.http.maxResponseBytes, input.workspaceResponseBytes);
     let response!: Response;
@@ -935,6 +960,9 @@ async function fetchCandidateSource(input: {
       },
     );
     throw reportedError;
+  } finally {
+    // Preserve paid evidence/failure diagnostics before conservative accounting.
+    await settleProviderOperation(input.root, input.projectId, providerReservation);
   }
 }
 

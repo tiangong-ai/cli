@@ -1,3 +1,12 @@
+import {
+  assertProjectRoutePriced,
+  projectCostLimit,
+  projectCostExposure,
+  remainingProjectCostUsd,
+  reserveProjectCost,
+  settleProjectCost,
+  settleProjectAllocation,
+} from "./project-budget.js";
 import { randomUUID } from "node:crypto";
 import { cp, lstat, readFile, realpath, rm } from "node:fs/promises";
 import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
@@ -577,6 +586,25 @@ export interface NativeStageStatus {
   preparedAt: string | null;
   reasonCode: string | null;
   recommendedAction: string | null;
+}
+
+export async function nativeStageBudgetReservation(root: string, projectId: string) {
+  if (!(await pathExists(nativeStageSessionPath(root, projectId)))) return null;
+  const session = await readNativeStageSession(root, projectId);
+  const maxCostUsd = session.packet.limits.reservedMaxCostUsd;
+  if (!Number.isFinite(maxCostUsd) || maxCostUsd < 0)
+    throw new CliError("Native reservation cost is invalid.", {
+      code: "RESEARCH_NATIVE_STAGE_SESSION_INVALID",
+      exitCode: 3,
+    });
+  return {
+    id: `native:${session.packet.sessionId}`,
+    sourceProjectId: projectId,
+    kind: "native-stage" as const,
+    reference: session.packet.packageId,
+    maxCostUsd,
+    createdAt: session.packet.preparedAt,
+  };
 }
 
 export async function inspectNativeResearchStage(
@@ -1281,6 +1309,12 @@ export async function prepareNativeResearchStage(input: {
         ...sessionCore,
         sessionSha256: sha256Text(canonicalJson(sessionCore)),
       };
+      reserveProjectCost(project, config, {
+        id: `native:${sessionId}`,
+        kind: "native-stage",
+        reference: workPackage.id,
+        maxCostUsd: reservation.costUsd,
+      });
       const now = new Date().toISOString();
       workPackage.status = "running";
       workPackage.attempts += 1;
@@ -1417,6 +1451,7 @@ export async function submitNativeResearchStage(input: {
     }
     await assertNativeStageBinding(input.root, project, session.packet);
     try {
+      settleProjectAllocation(project, `native:${session.packet.sessionId}`);
       await materializeAndValidateStageOutput(
         input.root,
         project,
@@ -1450,7 +1485,7 @@ export async function submitNativeResearchStage(input: {
         result,
         session.packet.limits.maxOutputTokens,
       );
-      assertProjectedBudget(project, config, result);
+      assertProjectedBudget(project, config, result, `native:${session.packet.sessionId}`);
       if (workPackage.stage === "discover") {
         await assertDiscoveryCoverage(
           input.root,
@@ -1637,6 +1672,7 @@ export async function abortNativeResearchStage(input: {
         exitCode: 3,
       });
     }
+    settleProjectAllocation(project, `native:${session.packet.sessionId}`);
     workPackage.status = workPackage.attempts < workPackage.maxAttempts ? "retry" : "failed";
     workPackage.completedAt = new Date().toISOString();
     workPackage.lastError = "Native stage was explicitly aborted before submission.";
@@ -1975,6 +2011,9 @@ async function executeWorkPackage(
 
   const runId = randomUUID();
   const startedAt = new Date().toISOString();
+  const budgetEntryId = `package:${runId}`;
+  let executionUncertain = false;
+  let usageSaved = false;
   let capsuleRoot: string | undefined;
   let capsuleDisposition: NativeCapsuleDisposition | null = null;
   let retainedCapsuleId: string | null = null;
@@ -2098,6 +2137,14 @@ async function executeWorkPackage(
         expectedRuntime: runtimeForRoute(doctorAttestation, route),
       });
       assertPreCallTokenReservation(project, workPackage, config, primaryRequest, 0, true);
+      const budgetEntry = reserveProjectCost(project, config, {
+        id: budgetEntryId,
+        kind: "review",
+        reference: workPackage.id,
+        maxCostUsd: primaryRequest.maxCostUsd,
+      });
+      if (budgetEntry) await saveProject(root, project);
+      executionUncertain = true;
       result = await withHeartbeat(
         selectedPackageExecutor(primaryRequest),
         options,
@@ -2106,6 +2153,7 @@ async function executeWorkPackage(
         workPackage,
         config,
       );
+      executionUncertain = false;
       accountedResult = result;
       if (primaryRequest.artifactViews && result.artifactReads?.length) {
         await persistArtifactReads(
@@ -2173,6 +2221,7 @@ async function executeWorkPackage(
           result.tokens,
           false,
         );
+        executionUncertain = true;
         const repair = await withHeartbeat(
           selectedPackageExecutor(repairRequest),
           options,
@@ -2181,6 +2230,7 @@ async function executeWorkPackage(
           workPackage,
           config,
         );
+        executionUncertain = false;
         accountedResult = combineExecutionResults(result, repair);
         assertExecutorSucceeded(repair);
         assertActualPackageBudget(
@@ -2200,7 +2250,7 @@ async function executeWorkPackage(
           capsule.reviewPacketSha256,
         );
       }
-      assertProjectedBudget(project, config, accountedResult);
+      assertProjectedBudget(project, config, accountedResult, budgetEntryId);
       promotedOutputs = await validateAndImportOutputs(
         root,
         project,
@@ -2250,7 +2300,18 @@ async function executeWorkPackage(
       await commitStageEvidenceBindings(root, project, workPackage);
     }
 
+    if (broker) {
+      await broker.stop();
+      broker = undefined;
+      // HTTP handlers persist provider allocations during the executor await.
+      // Keep the local package transition, but use their latest monetary state.
+      const latest = await loadProject(root, projectId);
+      if (latest.budget) project.budget = latest.budget;
+      else delete project.budget;
+    }
     const completedAt = new Date().toISOString();
+    if (project.budget && workPackage.stage !== "close")
+      settleProjectCost(project, budgetEntryId, accountedResult.costUsd, "reported-usage");
     applyUsage(project, accountedResult);
     workPackage.status = "complete";
     workPackage.completedAt = completedAt;
@@ -2259,6 +2320,7 @@ async function executeWorkPackage(
     workPackage.retryNotBefore = null;
     refreshProject(project);
     await saveProject(root, project);
+    usageSaved = true;
     await writeRunRecord(root, {
       schemaVersion: 1,
       runId,
@@ -2321,6 +2383,10 @@ async function executeWorkPackage(
       capsuleDisposition = "retained-auth-reconciliation";
       retainedCapsuleId = basename(capsuleRoot);
     }
+    if (broker) {
+      await broker.stop();
+      broker = undefined;
+    }
     const failedProject = await loadProject(root, projectId);
     const failedPackage = packageById(failedProject, packageId);
     const secrets = configuredResearchSecrets(options.environment);
@@ -2335,7 +2401,14 @@ async function executeWorkPackage(
       ),
       2000,
     );
-    if (accountedResult) applyUsage(failedProject, accountedResult);
+    if (accountedResult && !usageSaved) {
+      if (
+        !executionUncertain &&
+        failedProject.budget?.entries.some((entry) => entry.id === budgetEntryId)
+      )
+        settleProjectCost(failedProject, budgetEntryId, accountedResult.costUsd, "reported-usage");
+      applyUsage(failedProject, accountedResult);
+    }
     const classification = classifyFailure(error);
     failedPackage.lastError = message;
     failedPackage.lastFailureKind = classification.kind;
@@ -3477,7 +3550,7 @@ function agentRequest(input: {
         : input.brokerUrl
           ? RESEARCH_BROKER_MAX_TURNS
           : researchStructuredOutputMaxTurns(input.route);
-  return {
+  const request: AgentExecutionRequest = {
     route: input.route,
     prompt: input.prompt,
     outputSchema: schemaForStage(
@@ -3512,7 +3585,7 @@ function agentRequest(input: {
     maxTurns,
     ...(packetRead
       ? {
-          reservationTurns: researchStructuredOutputMaxTurns(input.route),
+          reservationTurns: maxTurns,
           artifactViews: {
             index: input.capsule.artifactViews,
             packetSha256: input.capsule.reviewPacketSha256!,
@@ -3532,6 +3605,31 @@ function agentRequest(input: {
     environment: input.options.environment,
     brokerUrl: input.brokerUrl,
   };
+  if (packetRead) {
+    const availableTokens = Math.min(
+      input.config.budget.packageMaxTokens.review,
+      input.config.budget.maxTokens - input.project.usage.tokens,
+    );
+    const reservation = agentCallReservation(request, input.config, 0, true);
+    const fixedTokens = reservation.totalTokens - reservation.estimatedCallInputTokens;
+    for (let turns = maxTurns; turns >= 1; turns--) {
+      const tokens = fixedTokens + reservation.estimatedCallInputTokensPerTurn * turns;
+      if (
+        tokens <= availableTokens &&
+        reservedAgentPackageCost(input.route, tokens, input.config) <= input.maxCostUsd
+      ) {
+        request.maxTurns = turns;
+        request.reservationTurns = turns;
+        return request;
+      }
+    }
+    throw new CliError("No packet-read turn fits the approved review envelope.", {
+      code: "RESEARCH_BUDGET_RESERVATION_FAILED",
+      exitCode: 3,
+      details: { packageId: input.workPackage.id, availableTokens, maxCostUsd: input.maxCostUsd },
+    });
+  }
+  return request;
 }
 
 function runtimeForRoute(
@@ -4590,6 +4688,31 @@ function repairPrompt(workPackage: WorkPackage, raw: string, error: StructuredOu
   ].join("\n\n");
 }
 
+function agentCallReservation(
+  request: AgentExecutionRequest,
+  config: WorkspaceConfig,
+  alreadyUsedTokens: number,
+  reserveRepair: boolean,
+) {
+  const schemaBytes = Buffer.byteLength(JSON.stringify(request.outputSchema), "utf8");
+  const promptBytes = Buffer.byteLength(request.prompt, "utf8");
+  return calculateAgentCallTokenReservation({
+    route: request.route,
+    primaryPayloadTokens: Math.ceil(
+      (schemaBytes + promptBytes) / RESEARCH_ESTIMATED_BYTES_PER_TOKEN,
+    ),
+    repairPayloadTokens: Math.ceil(
+      (schemaBytes + RESEARCH_MAX_REPAIR_SOURCE_BYTES + 2_048) / RESEARCH_ESTIMATED_BYTES_PER_TOKEN,
+    ),
+    maxTurns: request.maxTurns,
+    maxOutputTokens: request.maxOutputTokens,
+    maxToolContextTokens: request.maxToolContextTokens ?? 0,
+    maxRepairTokens: config.budget.maxRepairTokens,
+    reserveRepair,
+    alreadyUsedTokens,
+  });
+}
+
 function assertPreCallTokenReservation(
   project: ProjectState,
   workPackage: WorkPackage,
@@ -4598,23 +4721,7 @@ function assertPreCallTokenReservation(
   alreadyUsedTokens: number,
   reserveRepair: boolean,
 ): void {
-  const schemaBytes = Buffer.byteLength(JSON.stringify(request.outputSchema), "utf8");
-  const promptBytes = Buffer.byteLength(request.prompt, "utf8");
-  const reservation = calculateAgentCallTokenReservation({
-    route: request.route,
-    primaryPayloadTokens: Math.ceil(
-      (schemaBytes + promptBytes) / RESEARCH_ESTIMATED_BYTES_PER_TOKEN,
-    ),
-    repairPayloadTokens: Math.ceil(
-      (schemaBytes + RESEARCH_MAX_REPAIR_SOURCE_BYTES + 2_048) / RESEARCH_ESTIMATED_BYTES_PER_TOKEN,
-    ),
-    maxTurns: request.reservationTurns ?? request.maxTurns,
-    maxOutputTokens: request.maxOutputTokens,
-    maxToolContextTokens: request.maxToolContextTokens ?? 0,
-    maxRepairTokens: config.budget.maxRepairTokens,
-    reserveRepair,
-    alreadyUsedTokens,
-  });
+  const reservation = agentCallReservation(request, config, alreadyUsedTokens, reserveRepair);
   const packageMaxTokens = config.budget.packageMaxTokens[workPackage.stage as AgentPackageStage];
   const projectRemainingTokens = Math.max(0, config.budget.maxTokens - project.usage.tokens);
   if (
@@ -4645,6 +4752,7 @@ function reservePackageBudget(
 ): { tokens: number; costUsd: number } {
   if (workPackage.stage === "close") return { tokens: 0, costUsd: 0 };
   const route = workPackage.executor === "reviewer" ? config.reviewer : config.producer;
+  assertProjectRoutePriced(project, route);
   const packageMaximum = config.budget.packageMaxTokens[workPackage.stage];
   const tokens = Math.min(packageMaximum, requestedTokens ?? packageMaximum);
   const costUsd = roundMoney(reservedAgentPackageCost(route, tokens, config));
@@ -4746,15 +4854,22 @@ function assertProjectedBudget(
   project: ProjectState,
   config: WorkspaceConfig,
   result: ExecutionResult,
+  budgetEntryId?: string,
 ): void {
+  const entry = project.budget?.entries.find((item) => item.id === budgetEntryId);
+  const alreadyReserved = entry
+    ? entry.status === "reserved"
+      ? entry.maxCostUsd
+      : entry.accountedCostUsd!
+    : 0;
   const projected = {
     tokens: project.usage.tokens + result.tokens,
-    costUsd: project.usage.costUsd + result.costUsd,
+    costUsd: projectCostExposure(project) - alreadyReserved + result.costUsd,
     wallSeconds: project.usage.wallSeconds + result.wallSeconds,
   };
   if (
     projected.tokens > config.budget.maxTokens ||
-    projected.costUsd > config.budget.maxCostUsd ||
+    projected.costUsd > projectCostLimit(config, project) ||
     projected.wallSeconds > config.budget.maxWallSeconds
   ) {
     throw new CliError(`Research execution exceeded a hard budget for project ${project.id}.`, {
@@ -4771,7 +4886,7 @@ function remainingBudget(
 ): NonNullable<ResearchProgressEvent["remainingBudget"]> {
   return {
     tokens: Math.max(0, config.budget.maxTokens - project.usage.tokens),
-    costUsd: Math.max(0, roundMoney(config.budget.maxCostUsd - project.usage.costUsd)),
+    costUsd: Math.max(0, roundMoney(remainingProjectCostUsd(project, config))),
     wallSeconds: Math.max(0, config.budget.maxWallSeconds - project.usage.wallSeconds),
   };
 }

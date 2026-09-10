@@ -1,3 +1,4 @@
+import { serializeProviderStateWrite } from "./provider-state.js";
 import { basename, join } from "node:path";
 
 import { CliError } from "../../errors.js";
@@ -200,39 +201,41 @@ export async function registerBrokerCandidates(input: {
   }
   const items = candidateItems(parsed, selectedJsonPointer, itemOffset);
   if (!items.length) return [];
-  const existing = await listEvidenceCandidates(input.root, input.projectId);
-  const byCanonicalKey = new Map(
-    existing.map((candidate) => [candidate.canonicalKeySha256, candidate]),
-  );
-  const registered: EvidenceCandidate[] = [];
-  for (const item of items) {
-    const occurrence: EvidenceCandidateOrigin = {
-      kind: "broker",
-      receiptId: input.receipt.attemptId,
-      inputId: null,
-      capabilityId: input.receipt.capabilityId,
-      locator: input.receipt.locator,
-      jsonPointer: item.jsonPointer,
-      retrievedAt: input.receipt.retrievedAt,
-    };
-    const candidate = candidateFromValue(item.value, occurrence);
-    const duplicate = byCanonicalKey.get(candidate.canonicalKeySha256);
-    if (duplicate) {
-      await appendEvidenceLedgerEvent(input.root, input.projectId, "candidate.duplicate", {
-        candidateId: duplicate.id,
-        canonicalKeySha256: duplicate.canonicalKeySha256,
-        occurrence,
+  return serializeProviderStateWrite(input.root, input.projectId, async () => {
+    const existing = await listEvidenceCandidates(input.root, input.projectId);
+    const byCanonicalKey = new Map(
+      existing.map((candidate) => [candidate.canonicalKeySha256, candidate]),
+    );
+    const registered: EvidenceCandidate[] = [];
+    for (const item of items) {
+      const occurrence: EvidenceCandidateOrigin = {
+        kind: "broker",
+        receiptId: input.receipt.attemptId,
+        inputId: null,
+        capabilityId: input.receipt.capabilityId,
+        locator: input.receipt.locator,
+        jsonPointer: item.jsonPointer,
+        retrievedAt: input.receipt.retrievedAt,
+      };
+      const candidate = candidateFromValue(item.value, occurrence);
+      const duplicate = byCanonicalKey.get(candidate.canonicalKeySha256);
+      if (duplicate) {
+        await appendEvidenceLedgerEvent(input.root, input.projectId, "candidate.duplicate", {
+          candidateId: duplicate.id,
+          canonicalKeySha256: duplicate.canonicalKeySha256,
+          occurrence,
+        });
+        registered.push({ ...duplicate, origin: occurrence });
+        continue;
+      }
+      await appendEvidenceLedgerEvent(input.root, input.projectId, "candidate.discovered", {
+        candidate,
       });
-      registered.push({ ...duplicate, origin: occurrence });
-      continue;
+      byCanonicalKey.set(candidate.canonicalKeySha256, candidate);
+      registered.push(candidate);
     }
-    await appendEvidenceLedgerEvent(input.root, input.projectId, "candidate.discovered", {
-      candidate,
-    });
-    byCanonicalKey.set(candidate.canonicalKeySha256, candidate);
-    registered.push(candidate);
-  }
-  return registered;
+    return registered;
+  });
 }
 
 export async function registerDataResultCandidate(input: {

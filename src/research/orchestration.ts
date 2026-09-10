@@ -1,3 +1,8 @@
+import {
+  projectBudgetAmount,
+  projectBudgetView,
+  providerCostLimits,
+} from "./workspace/project-budget.js";
 import { lstat, readFile } from "node:fs/promises";
 import { isAbsolute, join, resolve } from "node:path";
 
@@ -87,6 +92,8 @@ import {
   addProjectInput,
   createProjectAddendum,
   initializeProject,
+  setProjectBudget,
+  resolveProjectBudgetReservation,
   forkProject,
   listProjects,
   loadProject,
@@ -233,8 +240,10 @@ export function researchOrchestrationHelp(): string {
   tiangong-ai research scientific fulfillment status <project> [--workspace <path>] [--json]
   tiangong-ai research project task run observe <project> --input <json-file> --confirm-execution [--workspace <path>] [--json]
   tiangong-ai research project task run inspect <project> --run <run-id> [--workspace <path>] [--json]
-  tiangong-ai research project init <project-id> --question <question> [--goal evidence-report|top-journal] [--design <absolute-json> --design-producer-agent codex|claude --design-producer-session <opaque-id>] [--requirements <absolute-json>] [--input-plan <absolute-json>] [--confirm-budget] [--workspace <path>] [--json]
-  tiangong-ai research project preflight --question <question> [--goal evidence-report|top-journal] [--policy-project <project-id> --design <absolute-json>] [--requirements <absolute-json>] [--input-plan <absolute-json>] [--workspace <path>] [--json]
+  tiangong-ai research project budget resolve <project-id> --reservation <id> --accounted-cost-usd <estimate> --reason <text> --confirm-budget [--workspace <path>] [--json]
+  tiangong-ai research project budget set <project-id> --max-cost-usd <amount> [--provider-costs <absolute-json>] [--confirm-budget] [--workspace <path>] [--json]
+  tiangong-ai research project init <project-id> --question <question> [--goal evidence-report|top-journal] [--design <absolute-json> --design-producer-agent codex|claude --design-producer-session <opaque-id>] [--requirements <absolute-json>] [--input-plan <absolute-json>] [--max-cost-usd <amount>] [--confirm-budget] [--workspace <path>] [--json]
+  tiangong-ai research project preflight --question <question> [--goal evidence-report|top-journal] [--policy-project <project-id> --design <absolute-json>] [--requirements <absolute-json>] [--input-plan <absolute-json>] [--max-cost-usd <amount>] [--workspace <path>] [--json]
   tiangong-ai research project input add <project-id> --path <absolute-file> [--role primary|reference|replication] [--trust-status verified-owner-input|unverified-owner-input|reference-only|replication-candidate] [--independently-reproduced] [--workspace <path>] [--json]
   tiangong-ai research project retry <project-id> [--package <package-id>] [--workspace <path>] [--json]
   tiangong-ai research project task define <project-id> --input <absolute-json> [--workspace <path>] [--json]
@@ -2016,12 +2025,93 @@ async function runProject(argv: string[], io: CliIO): Promise<number> {
     writeJson(io, result, args);
     return 0;
   }
+  if (action === "budget") {
+    const [budgetAction, ...budgetRest] = rest;
+    if (budgetAction === "resolve") {
+      const args = parseStrictArgs(
+        budgetRest,
+        {
+          ...WORKSPACE_OPTIONS,
+          reservation: "string",
+          "accounted-cost-usd": "string",
+          reason: "string",
+          "confirm-budget": "boolean",
+        },
+        "research project budget resolve",
+      );
+      if (strictBoolean(args, "help")) return writeHelp(io);
+      const projectId = onePositional(args.positionals, "research project budget resolve");
+      const reservation = strictString(args, "reservation"),
+        amount = strictString(args, "accounted-cost-usd"),
+        reason = strictString(args, "reason");
+      if (!reservation || amount === undefined || !reason)
+        throw new CliError(
+          "Budget resolution requires --reservation, --accounted-cost-usd and --reason.",
+          { code: "INVALID_ARGS", exitCode: 2 },
+        );
+      const root = await workspaceFromArgs(args);
+      writeJson(
+        io,
+        await resolveProjectBudgetReservation(
+          root,
+          projectId,
+          reservation,
+          Number(amount),
+          reason,
+          strictBoolean(args, "confirm-budget"),
+        ),
+        args,
+      );
+      return 0;
+    }
+    if (budgetAction !== "set") throw unknownAction("research project budget", budgetAction ?? "");
+    const args = parseStrictArgs(
+      budgetRest,
+      {
+        ...WORKSPACE_OPTIONS,
+        "max-cost-usd": "string",
+        "confirm-budget": "boolean",
+        "provider-costs": "string",
+      },
+      "research project budget set",
+    );
+    if (strictBoolean(args, "help")) return writeHelp(io);
+    const projectId = onePositional(args.positionals, "research project budget set");
+    const amount = projectBudgetAmount(strictString(args, "max-cost-usd"));
+    if (amount === undefined)
+      throw new CliError("project budget set requires --max-cost-usd.", {
+        code: "INVALID_ARGS",
+        exitCode: 2,
+      });
+    const root = await workspaceFromArgs(args);
+    writeJson(
+      io,
+      await setProjectBudget(
+        root,
+        projectId,
+        amount,
+        strictBoolean(args, "confirm-budget"),
+        strictString(args, "provider-costs")
+          ? providerCostLimits(
+              await readBoundedJsonRecord(
+                strictString(args, "provider-costs")!,
+                "--provider-costs",
+                "RESEARCH_BUDGET_INVALID",
+              ),
+            )
+          : undefined,
+      ),
+      args,
+    );
+    return 0;
+  }
   if (action === "init") {
     const args = parseStrictArgs(
       rest,
       {
         ...WORKSPACE_OPTIONS,
         question: "string",
+        "max-cost-usd": "string",
         goal: "string",
         requirements: "string",
         "input-plan": "string",
@@ -2062,6 +2152,7 @@ async function runProject(argv: string[], io: CliIO): Promise<number> {
         exitCode: 2,
       });
     }
+    const projectMaxCostUsd = projectBudgetAmount(strictString(args, "max-cost-usd"));
     const project = await initializeProject(
       root,
       projectId,
@@ -2077,6 +2168,7 @@ async function runProject(argv: string[], io: CliIO): Promise<number> {
             producerSessionId: designProducerSession,
           }
         : undefined,
+      projectMaxCostUsd === undefined ? undefined : { maxCostUsd: projectMaxCostUsd },
     );
     writeJson(io, project, args);
     return 0;
@@ -2087,6 +2179,7 @@ async function runProject(argv: string[], io: CliIO): Promise<number> {
       {
         ...WORKSPACE_OPTIONS,
         question: "string",
+        "max-cost-usd": "string",
         goal: "string",
         "policy-project": "string",
         requirements: "string",
@@ -2142,9 +2235,11 @@ async function runProject(argv: string[], io: CliIO): Promise<number> {
     const scientificDesign = designPath
       ? await readAndVerifyScientificDesign(designPath, policyProject)
       : null;
+    const projectMaxCostUsd = projectBudgetAmount(strictString(args, "max-cost-usd"));
     const result = await evaluateProjectPreflight(root, question, requirements, inputPlan, {
       publicationPolicy,
       scientificDesign,
+      ...(projectMaxCostUsd === undefined ? {} : { projectMaxCostUsd }),
     });
     writeJson(io, result, args);
     return result.readyToInitialize ? 0 : 3;
@@ -2444,6 +2539,7 @@ async function runStatus(argv: string[], io: CliIO): Promise<number> {
                   publication,
                 ),
           usage: current.usage,
+          budget: projectBudgetView(current, config),
           inputs: current.inputs,
           packages: current.packages,
           discovery: await inspectDiscoveryProgress(root, current),

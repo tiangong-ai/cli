@@ -187,6 +187,10 @@ runtime primitive。
 
 ## 工作包 5：Research adapter
 
+数值项目预算的增量使用共享执行器的可选准入回调，在静态校验后、connector 执行前
+登记提供方操作分配；账务继续由 Research 管理。Evidence 持久化先于最终账务写入，
+避免账务 I/O 失败丢掉已返回材料；本地续读不再次分配费用。该分配不充当实际账单。
+
 - 在 CLI 内部直接调用 `src/data/**` 服务，不启动 `tiangong-ai data run` 子进程。
 - 把 `CoreDataReceipt` 映射到 Research capability/evidence receipt，同时保留原始核心
   digest 和 connector 版本。

@@ -1,4 +1,15 @@
+import {
+  createProjectBudget,
+  projectBudgetAmount,
+  projectBudgetView,
+  projectCostExposure,
+  isProjectBudgetState,
+  inheritedProjectBudget,
+  settleProjectCost,
+  providerCostLimits,
+} from "./project-budget.js";
 import { randomUUID } from "node:crypto";
+import { sanitizeResearchRecord } from "./sanitization.js";
 import { cp, lstat, readFile } from "node:fs/promises";
 import { basename, dirname, join, resolve, sep } from "node:path";
 
@@ -91,8 +102,10 @@ export async function initializeProject(
     producerAgent: AgentKind;
     producerSessionId: string;
   },
+  budgetInput?: { maxCostUsd: number },
 ): Promise<ProjectState> {
   validateProjectId(projectId);
+  const requestedProjectCost = projectBudgetAmount(budgetInput?.maxCostUsd);
   const normalizedQuestion = question.trim();
   if (normalizedQuestion.length < 8 || normalizedQuestion.length > 4000) {
     throw new CliError("Research question must contain 8-4000 characters.", {
@@ -120,7 +133,8 @@ export async function initializeProject(
     }
     if (
       config.mode === "production-research" &&
-      config.budget.maxCostUsd > config.budget.confirmationCostUsd &&
+      Math.min(config.budget.maxCostUsd, requestedProjectCost ?? config.budget.maxCostUsd) >
+        config.budget.confirmationCostUsd &&
       !budgetConfirmed
     ) {
       throw new CliError(
@@ -166,6 +180,9 @@ export async function initializeProject(
         {
           publicationPolicy: publicationPolicy ?? null,
           scientificDesign: scientificDesignInput?.design ?? null,
+          ...(requestedProjectCost === undefined
+            ? {}
+            : { projectMaxCostUsd: requestedProjectCost }),
         },
       );
       if (!preflight.readyToInitialize) {
@@ -184,7 +201,10 @@ export async function initializeProject(
       status: "ready",
       createdAt: now,
       updatedAt: now,
-      budgetConfirmedAt: budgetConfirmed ? now : null,
+      budgetConfirmedAt: budgetConfirmed || requestedProjectCost !== undefined ? now : null,
+      ...(requestedProjectCost === undefined
+        ? {}
+        : { budget: createProjectBudget(projectId, requestedProjectCost) }),
       inputs: admittedInputPlan ? projectInputsFromPlan(admittedInputPlan, now) : [],
       evidenceRequirements: requirements,
       publicationPolicy: publicationPolicy ?? null,
@@ -658,6 +678,7 @@ export async function forkProject(
       createdAt: now,
       updatedAt: now,
       budgetConfirmedAt: source.budgetConfirmedAt,
+      ...(source.budget ? { budget: inheritedProjectBudget(source)! } : {}),
       inputs: source.inputs.map((input) => ({ ...input })),
       evidenceRequirements: {
         ...source.evidenceRequirements,
@@ -1076,6 +1097,7 @@ export async function createProjectAddendum(
       createdAt: now,
       updatedAt: now,
       budgetConfirmedAt: source.budgetConfirmedAt,
+      ...(source.budget ? { budget: inheritedProjectBudget(source)! } : {}),
       inputs: source.inputs.map((input) => ({ ...input })),
       evidenceRequirements: {
         ...source.evidenceRequirements,
@@ -1411,6 +1433,7 @@ function validateProjectShape(project: ProjectState, expectedId: string): void {
     !isProjectStatus(project.status) ||
     typeof project.question !== "string" ||
     (project.budgetConfirmedAt !== null && typeof project.budgetConfirmedAt !== "string") ||
+    (project.budget !== undefined && !isProjectBudgetState(project.budget)) ||
     !Array.isArray(project.inputs) ||
     !isEvidenceRequirements(project.evidenceRequirements) ||
     !isScientificDesignBinding(project.scientificDesign, expectedId) ||
@@ -1874,4 +1897,246 @@ function slug(value: string): string {
 async function hashQuestion(question: string): Promise<string> {
   const { createHash } = await import("node:crypto");
   return createHash("sha256").update(question, "utf8").digest("hex");
+}
+
+export async function setProjectBudget(
+  root: string,
+  projectId: string,
+  maxCostUsd: number,
+  confirm: boolean,
+  providerLimits?: Record<string, number>,
+) {
+  projectBudgetAmount(maxCostUsd);
+  const checkedLimits =
+    providerLimits === undefined ? undefined : providerCostLimits(providerLimits);
+  return withWorkspaceLock(root, "project.budget.set", async () => {
+    const authority = await readProjectAuthorityIndex(root);
+    const project = await loadProject(root, projectId);
+    assertProjectAuthority(project, authority);
+    const config = await loadWorkspaceConfig(root);
+    const existing = project.budget;
+    const pricesChanged =
+      checkedLimits !== undefined &&
+      canonicalJson(checkedLimits) !==
+        canonicalJson(existing?.authorization.providerOperationMaxCostUsd ?? {});
+    if (pricesChanged && !confirm)
+      throw new CliError("Changing declared provider cost maxima requires --confirm-budget.", {
+        code: "RESEARCH_BUDGET_CONFIRMATION_REQUIRED",
+        exitCode: 2,
+      });
+    if (existing?.authorization.maxCostUsd === maxCostUsd && !pricesChanged) {
+      await recordBudgetEvent(
+        root,
+        project.id,
+        "project.budget.authorized",
+        budgetAuthorizationPayload(project),
+        true,
+      );
+      return { projectId, budget: projectBudgetView(project, config), replayed: true };
+    }
+    if (existing && maxCostUsd > existing.authorization.maxCostUsd && !confirm)
+      throw new CliError("Increasing the project budget requires --confirm-budget.", {
+        code: "RESEARCH_BUDGET_CONFIRMATION_REQUIRED",
+        exitCode: 2,
+      });
+    if (
+      !existing &&
+      Math.min(config.budget.maxCostUsd, maxCostUsd) > config.budget.confirmationCostUsd &&
+      !confirm
+    )
+      throw new CliError(
+        "The project budget requires --confirm-budget above the configured threshold.",
+        { code: "RESEARCH_BUDGET_CONFIRMATION_REQUIRED", exitCode: 2 },
+      );
+    const proposed = existing
+      ? structuredClone(existing)
+      : createProjectBudget(projectId, maxCostUsd, project.usage.costUsd);
+    proposed.authorization.maxCostUsd = maxCostUsd;
+    if (checkedLimits !== undefined)
+      proposed.authorization.providerOperationMaxCostUsd = checkedLimits;
+    if (!existing) {
+      proposed.openingBasis = "legacy-accounting";
+      // Reuse the validated native packet instead of inventing a zero pending cost.
+      const { nativeStageBudgetReservation } = await import("./runtime.js");
+      const native = await nativeStageBudgetReservation(root, projectId);
+      if (native && !config.producer.pricing)
+        throw new CliError(
+          "The existing native operation has no declared pricing; its cost cannot be adopted as zero.",
+          { code: "RESEARCH_PROJECT_BUDGET_PRICE_REQUIRED", exitCode: 3 },
+        );
+      if (native) {
+        proposed.entries.push({
+          ...native,
+          authorizationRevision: 1,
+          status: "reserved",
+          accountedCostUsd: null,
+          settlementBasis: null,
+          settledAt: null,
+        });
+      }
+    }
+    const candidate = { ...project, budget: proposed };
+    const limit = Math.min(config.budget.maxCostUsd, maxCostUsd);
+    if (projectCostExposure(candidate) > limit + 1e-9)
+      throw new CliError(
+        "The new budget cannot cover existing accounted cost and outstanding reservations.",
+        {
+          code: "RESEARCH_BUDGET_RESERVATION_FAILED",
+          exitCode: 3,
+          details: {
+            proposedMaxCostUsd: maxCostUsd,
+            existingExposureUsd: projectCostExposure(candidate),
+          },
+        },
+      );
+    proposed.authorization.revision = existing ? existing.authorization.revision + 1 : 1;
+    proposed.authorization.authorizedAt = new Date().toISOString();
+    project.budget = proposed;
+    project.budgetConfirmedAt = proposed.authorization.authorizedAt;
+    await saveProject(root, project);
+    await recordBudgetEvent(
+      root,
+      project.id,
+      "project.budget.authorized",
+      budgetAuthorizationPayload(project),
+      false,
+    );
+    return { projectId, budget: projectBudgetView(project, config), replayed: false };
+  });
+}
+
+export async function resolveProjectBudgetReservation(
+  root: string,
+  projectId: string,
+  id: string,
+  amount: number,
+  reason: string,
+  confirm: boolean,
+) {
+  if (!confirm)
+    throw new CliError("Resolving unknown costs requires explicit --confirm-budget.", {
+      code: "RESEARCH_BUDGET_CONFIRMATION_REQUIRED",
+      exitCode: 2,
+    });
+  if (!Number.isFinite(amount) || amount < 0 || reason.trim().length < 8 || reason.length > 1000)
+    throw new CliError(
+      "Supply a nonnegative finite accounting estimate and a bounded explanation.",
+      { code: "RESEARCH_BUDGET_INVALID", exitCode: 2 },
+    );
+  return withWorkspaceLock(root, "project.budget.resolve", async () => {
+    const project = await loadProject(root, projectId);
+    assertProjectAuthority(project, await readProjectAuthorityIndex(root));
+    const entry = project.budget?.entries.find((item) => item.id === id);
+    if (!entry)
+      throw new CliError("The reservation does not exist in this project's budget authority.", {
+        code: "RESEARCH_BUDGET_RESERVATION_MISSING",
+        exitCode: 3,
+      });
+    const config = await loadWorkspaceConfig(root);
+    const resolution = {
+      reservationId: id,
+      sourceProjectId: entry.sourceProjectId,
+      accountedCostUsd: amount,
+      basis: "owner-estimate",
+      reason: reason.trim(),
+      providerInvoiceVerified: false,
+    };
+    if (entry.status === "settled") {
+      if (
+        entry.accountedCostUsd !== amount ||
+        entry.settlementBasis !== "owner-estimate" ||
+        entry.resolutionReason !== reason.trim()
+      )
+        throw new CliError("Settled cost evidence cannot be rewritten.", {
+          code: "RESEARCH_BUDGET_RESERVATION_CONFLICT",
+          exitCode: 3,
+        });
+      await recordBudgetEvent(
+        root,
+        project.id,
+        "project.budget.reservation.resolved",
+        resolution,
+        true,
+      );
+      return { projectId, budget: projectBudgetView(project, config), replayed: true };
+    }
+    if (entry.kind === "native-stage") {
+      validateProjectId(entry.sourceProjectId);
+      const { nativeStageBudgetReservation } = await import("./runtime.js");
+      const active = await nativeStageBudgetReservation(root, entry.sourceProjectId);
+      if (active?.id === id)
+        throw new CliError(
+          "Complete or explicitly abort the native session before resolving its cost estimate.",
+          { code: "RESEARCH_BUDGET_OPERATION_ACTIVE", exitCode: 3 },
+        );
+    }
+    settleProjectCost(project, id, amount, "owner-estimate");
+    entry.resolutionReason = reason.trim();
+    await saveProject(root, project);
+    await recordBudgetEvent(
+      root,
+      project.id,
+      "project.budget.reservation.resolved",
+      resolution,
+      false,
+    );
+    return { projectId, budget: projectBudgetView(project, config), replayed: false };
+  });
+}
+
+function budgetAuthorizationPayload(project: ProjectState): Record<string, unknown> {
+  const budget = project.budget!;
+  return {
+    fundingDecision: budget.authorization,
+    openingEstimateUsd: budget.openingEstimateUsd,
+    outstandingReservationIds: budget.entries
+      .filter((entry) => entry.status === "reserved")
+      .map((entry) => entry.id),
+  };
+}
+
+async function recordBudgetEvent(
+  root: string,
+  projectId: string,
+  type: "project.budget.authorized" | "project.budget.reservation.resolved",
+  payload: Record<string, unknown>,
+  replayed: boolean,
+): Promise<void> {
+  payload = sanitizeResearchRecord(payload);
+  if (replayed) {
+    const authorization = payload.fundingDecision;
+    const matches = (await readVerifiedJournal(workspacePaths(root).journal)).filter(
+      (event) =>
+        event.scope === projectId &&
+        event.type === type &&
+        (type === "project.budget.authorized"
+          ? isObject(event.payload.fundingDecision) &&
+            isObject(authorization) &&
+            event.payload.fundingDecision.revision === authorization.revision
+          : event.payload.reservationId === payload.reservationId),
+    );
+    const fields =
+      type === "project.budget.authorized"
+        ? ["fundingDecision"]
+        : ["reservationId", "sourceProjectId", "accountedCostUsd", "basis", "reason"];
+    if (
+      matches.some((event) =>
+        fields.some(
+          (field) =>
+            canonicalJson(event.payload[field] ?? null) !== canonicalJson(payload[field] ?? null),
+        ),
+      )
+    )
+      throw new CliError("Saved budget state conflicts with its recorded audit evidence.", {
+        code: "RESEARCH_BUDGET_JOURNAL_CONFLICT",
+        exitCode: 3,
+      });
+    if (matches.length) return;
+  }
+  // A retry records the saved decision now, explicitly as reconciliation. Its
+  // pending-reservation list is a current snapshot, never a backdated claim.
+  await appendJournalEvent(workspacePaths(root).journal, type, projectId, {
+    ...payload,
+    reconciled: replayed,
+  });
 }

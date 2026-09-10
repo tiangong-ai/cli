@@ -343,6 +343,38 @@ export interface ScientificDesignBinding {
   >;
 }
 
+export interface ProjectBudgetAuthorization {
+  revision: number;
+  maxCostUsd: number;
+  authorizedAt: string;
+  originProjectId: string;
+  providerOperationMaxCostUsd: Record<string, number>;
+}
+
+export interface ProjectBudgetEntry {
+  id: string;
+  sourceProjectId: string;
+  kind: "native-stage" | "review" | "provider-operation";
+  reference: string;
+  authorizationRevision: number;
+  maxCostUsd: number;
+  status: "reserved" | "settled";
+  accountedCostUsd: number | null;
+  settlementBasis: "reported-usage" | "allocated-upper-bound" | "owner-estimate" | null;
+  resolutionReason?: string;
+  createdAt: string;
+  settledAt: string | null;
+}
+
+export interface ProjectBudgetState {
+  schemaVersion: 1;
+  authorization: ProjectBudgetAuthorization;
+  openingEstimateUsd: number;
+  openingBasis: "new-project" | "legacy-accounting" | "recovery-exposure";
+  openingSourceProjectId: string | null;
+  entries: ProjectBudgetEntry[];
+}
+
 export interface ProjectUsage {
   tokens: number;
   inputTokens: number;
@@ -395,6 +427,7 @@ export interface ProjectState {
   createdAt: string;
   updatedAt: string;
   budgetConfirmedAt: string | null;
+  budget?: ProjectBudgetState;
   inputs: ProjectInput[];
   evidenceRequirements: ProjectEvidenceRequirements;
   publicationPolicy?: ResearchPolicyBinding | null;

@@ -21,6 +21,30 @@ import type {
 } from "../src/research/workspace/types.js";
 
 describe("research evidence ledger", () => {
+  it("deduplicates concurrent broker receipts without losing their occurrences", async () => {
+    const root = await mkdtemp(join(tmpdir(), "tiangong-concurrent-candidates-"));
+    try {
+      await Promise.all(
+        Array.from({ length: 8 }, (_, id) =>
+          registerBrokerCandidates({
+            root,
+            projectId: "ledger-project",
+            receipt: receipt(`parallel-${id}`, "2026-08-11T00:00:00.000Z"),
+            contextBytes: Buffer.from(
+              JSON.stringify([{ title: "Shared paper", url: "https://example.test/paper" }]),
+            ),
+          }),
+        ),
+      );
+      const candidates = await listEvidenceCandidates(root, "ledger-project");
+      assert.equal(candidates.length, 1);
+      assert.equal(candidates[0]!.occurrences.length, 8);
+      assert.equal((await verifyEvidenceLedger(root, "ledger-project")).events, 8);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
   it("records stable broker candidates and deduplicates equivalent URLs across receipts", async () => {
     const root = await mkdtemp(join(tmpdir(), "tiangong-evidence-ledger-"));
     try {

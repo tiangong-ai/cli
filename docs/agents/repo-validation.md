@@ -19,7 +19,7 @@ checkPaths:
   - test/**
   - .github/workflows/**
 lastReviewedAt: 2026-09-10
-lastReviewedCommit: 8ce5cd33c960a5176e3a9dd959f5ce6bf5a06343
+lastReviewedCommit: 70c723411b60e7838957f42391efc546e0380f2b
 ---
 
 # Repo Validation
@@ -545,7 +545,10 @@ capability or setup pin.
 `test/research-runtime-production.test.ts` adds zero-cost
 production evals for permanent evidence and review packets, exact HTTP policy,
 byte/item/offset/estimated-token extraction bounds and raw-object cache reuse,
-sanitized 429/422 handling, bounded broker-level 429 retry, structured-output and provenance repair,
+sanitized 429/422 handling, bounded broker-level 429 retry, explicit provider-cost
+admission, concurrent monetary reservations, free project/shared-cache reuse,
+conservative failed-operation allocations, affordable packet-read turn selection
+with matching reservation and execution envelopes, structured-output and provenance repair,
 audited deterministic Markdown newline-artifact normalization before independent review,
 mechanically normalized dimension/full-text/publication-date coverage,
 bounded local context with full-source review, stage tool isolation, runtime

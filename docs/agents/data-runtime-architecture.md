@@ -484,6 +484,12 @@ URL query、header、环境变量值、本地绝对路径和 provider 原始错�
 Skill 不复制闭合 Schema 或 connector 逻辑。Skills CI 从已发布/候选 CLI 导出 manifest，
 验证这些绑定没有漂移。
 
+启用数值项目预算时，Research 在共享 runtime 完成静态校验、调用 connector 之前，
+通过可选 `beforeExecute` 回调完成费用准入。该回调不把项目、账务或凭证状态下沉到
+Data runtime。提供方单次逻辑 operation 的 USD 上限由用户明确声明，包含该 operation
+自身的有界重试/分页；未知上限不会默认为零。该值是软件核算分配，不是已验证的
+提供方价格或账单。本地 Evidence 续读不重新分配提供方费用。
+
 Research adapter 接受已经通过核心 Schema 校验的 `DataRunResult`，额外施加 capability
 lock、预算、候选/来源准入、永久证据、journal 和 review 规则。相同 connector 输入在
 独立调用与 Research 调用中必须得到相同核心数据和核心回执；Research 只增加上层证据
