@@ -1,3 +1,8 @@
+import {
+  loadInvestigationAudit,
+  type InvestigationProofEvent,
+  type InvestigationAuditSummary,
+} from "./investigation-audit.js";
 import { investigatedRequirementHashes } from "./investigation-requirements.js";
 import {
   requirementAmendmentBinding,
@@ -33,7 +38,7 @@ import {
   sha256Text,
   writeJsonAtomic,
 } from "./storage.js";
-import type { JournalEvent, OutputRecord, ProjectState } from "./types.js";
+import type { OutputRecord, ProjectState } from "./types.js";
 
 const HASH = /^[a-f0-9]{64}$/;
 export interface TaskAuditBinding {
@@ -41,9 +46,7 @@ export interface TaskAuditBinding {
   originalContractSha256: string;
   contextSha256: string;
 }
-type ProofEvent = Pick<JournalEvent, "scope" | "type" | "payload"> & {
-  sourcePayloadSha256: string;
-};
+type ProofEvent = InvestigationProofEvent;
 
 /** Derived export view, not a second mutable task state. */
 export async function writeTaskAuditContext(
@@ -68,7 +71,10 @@ export async function verifyTaskAudit(
   binding: TaskAuditBinding | undefined,
   files: Array<OutputRecord>,
   amendmentImpact?: ScientificAmendmentImpact,
-): Promise<(TaskAuditBinding & { executionCertified: false }) | undefined> {
+): Promise<
+  | (TaskAuditBinding & { executionCertified: false; investigations?: InvestigationAuditSummary })
+  | undefined
+> {
   const indexed = new Map(files.map((file) => [file.path, file]));
   const json = new Map<string, unknown>();
   const read = async <T>(path: string): Promise<T> => {
@@ -90,6 +96,7 @@ export async function verifyTaskAudit(
   const proof = await read<{ events: ProofEvent[] }>("state/journal-event-proofs.json");
   if (!Array.isArray(proof.events)) throw invalid("Task audit requires its journal proof view.");
   const events = proof.events.filter((event) => event.scope === projectId);
+  const investigations = await loadInvestigationAudit(bundle, projectId, files, proof.events);
   const currentBinding = latestTaskBinding(events, projectId);
   if (!currentBinding) {
     if (
@@ -205,6 +212,7 @@ export async function verifyTaskAudit(
             "Native run program, input, environment or output bytes are absent or inconsistent.",
           );
       }
+      await investigations?.verifyRun(run, started);
       nativeRuns.set(hash, run);
       continue;
     }
@@ -368,7 +376,11 @@ export async function verifyTaskAudit(
       throw invalid("Audit review task context is stale.");
     validateTaskReview(review, context);
   }
-  return { ...binding, executionCertified: false };
+  return {
+    ...binding,
+    executionCertified: false,
+    ...(investigations ? { investigations: investigations.report() } : {}),
+  };
 }
 
 function invalid(message: string): CliError {

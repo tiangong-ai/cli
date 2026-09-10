@@ -1,3 +1,4 @@
+import { localInvestigationReadStore, type InvestigationReadStore } from "./investigation-store.js";
 import { Ajv2020 } from "ajv/dist/2020.js";
 import { lstat, mkdir, readFile } from "node:fs/promises";
 import { isAbsolute, join } from "node:path";
@@ -17,12 +18,7 @@ import {
 import { assertResearchPolicyBinding } from "./research-policy.js";
 import { loadScientificFulfillmentView } from "./scientific-fulfillment.js";
 import { storeRunObject } from "./native-run.js";
-import {
-  loadProjectTask,
-  readTaskObject,
-  taskRequirementSha256,
-  writeTaskObject,
-} from "./task-contract.js";
+import { loadProjectTask, taskRequirementSha256, writeTaskObject } from "./task-contract.js";
 import { configuredResearchSecrets, sanitizeResearchValue } from "./sanitization.js";
 import {
   canonicalJson,
@@ -444,6 +440,7 @@ export async function loadInvestigation(
   projectId: string,
   id: string,
   knownEvents?: JournalEvent[],
+  store: InvestigationReadStore = localInvestigationReadStore(root),
 ): Promise<InvestigationDefinition> {
   const events = knownEvents ?? (await readVerifiedJournal(workspacePaths(root).journal));
   const event = events.findLast(
@@ -458,8 +455,7 @@ export async function loadInvestigation(
       "RESEARCH_INVESTIGATION_NOT_AUTHORIZED",
       3,
     );
-  const record = await readTaskObject<InvestigationDefinition>(
-    root,
+  const record = await store.readTask<InvestigationDefinition>(
     projectId,
     "investigations",
     String(event.payload.recordSha256),
@@ -533,10 +529,7 @@ export async function loadInvestigation(
     ...record.programs.flatMap((program) => [program.script, program.environmentLock]),
   ]) {
     if (object.path !== `task/run-objects/${object.sha256}`) throw conflict();
-    const observed = await regularSource(
-      join(workspacePaths(root).projects, projectId, object.path),
-    );
-    if (observed.sha256 !== object.sha256 || observed.bytes !== object.bytes) throw conflict();
+    await store.verifyBlob(projectId, object);
   }
   return record;
 }

@@ -1,3 +1,4 @@
+import { localInvestigationReadStore, type InvestigationReadStore } from "./investigation-store.js";
 import { Ajv2020 } from "ajv/dist/2020.js";
 import { CliError } from "../../errors.js";
 import { loadInvestigation, type InvestigationDefinition } from "./investigation.js";
@@ -9,7 +10,7 @@ import { appendJournalEvent, readVerifiedJournal } from "./journal.js";
 import { loadProject } from "./projects.js";
 import { configuredResearchSecrets, sanitizeResearchValue } from "./sanitization.js";
 import { canonicalJson, sha256Text, workspacePaths } from "./storage.js";
-import { readTaskObject, writeTaskObject } from "./task-contract.js";
+import { writeTaskObject } from "./task-contract.js";
 import type { JournalEvent } from "./types.js";
 import { withWorkspaceLock } from "./workspace.js";
 
@@ -93,6 +94,7 @@ export async function loadInvestigationCandidates(
   definition: InvestigationDefinition,
   events: JournalEvent[],
   attempts: AttemptHistory,
+  store: InvestigationReadStore = localInvestigationReadStore(root),
 ) {
   const selected = events.filter(
     (e) =>
@@ -103,8 +105,7 @@ export async function loadInvestigationCandidates(
   const records: InvestigationCandidate[] = [];
   const ids = new Set<string>();
   for (const event of selected) {
-    const record = await readTaskObject<InvestigationCandidate>(
-      root,
+    const record = await store.readTask<InvestigationCandidate>(
       projectId,
       "investigation-candidates",
       String(event.payload.recordSha256),

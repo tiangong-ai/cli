@@ -1,11 +1,17 @@
 import assert from "node:assert/strict";
-import { readFile, writeFile } from "node:fs/promises";
+import { chmod, readFile, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { it } from "node:test";
 import { acquiredFixture, cli } from "./helpers/task-fixture.js";
 import { loadProject } from "../src/research/workspace/projects.js";
 import { loadScientificFulfillmentView } from "../src/research/workspace/scientific-fulfillment.js";
-import { regularTreeFiles, sha256File, workspacePaths } from "../src/research/workspace/storage.js";
+import {
+  canonicalJson,
+  sha256Text,
+  regularTreeFiles,
+  sha256File,
+  workspacePaths,
+} from "../src/research/workspace/storage.js";
 
 async function exactControl(root: string) {
   return Promise.all(
@@ -442,6 +448,83 @@ await writeFile(process.argv[3],JSON.stringify({schemaVersion:1,solverReached:tr
     const pendingReview = JSON.parse((await fx.task(["status"])).stdout);
     assert.equal(pendingReview.currentScope.status, "incomplete");
     assert.equal(pendingReview.currentScope.requirements[0].status, "recorded");
+    const bundle = join(fx.files, "investigation-audit");
+    await must(
+      await cli([
+        "research",
+        "project",
+        "audit",
+        "export",
+        projectId,
+        "--output",
+        bundle,
+        "--workspace",
+        fx.root,
+        "--json",
+      ]),
+    );
+    await rm(fx.root, { recursive: true, force: true });
+    const verify = () =>
+      cli(["research", "project", "audit", "verify", "--bundle", bundle, "--json"]);
+    const verifiedAudit = await must(await verify());
+    assert.deepEqual(verifiedAudit.task.investigations, {
+      definitions: 1,
+      attempts: 1,
+      candidates: 1,
+      promotions: 1,
+      certifications: 1,
+    });
+    {
+      const statePath = join(bundle, "state/project.json"),
+        manifestFile = join(bundle, "manifest.json");
+      const originalState = await readFile(statePath, "utf8"),
+        originalManifest = await readFile(manifestFile, "utf8");
+      const state = JSON.parse(originalState),
+        modified = JSON.parse(originalManifest);
+      state.budget.authorization.unexpected = { authorization: { value: "fixture-not-a-secret" } };
+      const text = JSON.stringify(state, null, 2) + "\n";
+      await chmod(statePath, 0o600);
+      await writeFile(statePath, text);
+      const entry = modified.files.find((f: { path: string }) => f.path === "state/project.json");
+      entry.sha256 = sha256Text(text);
+      entry.bytes = Buffer.byteLength(text);
+      const { manifestSha256: _old, ...core } = modified;
+      await chmod(manifestFile, 0o600);
+      await writeFile(
+        manifestFile,
+        JSON.stringify({ ...core, manifestSha256: sha256Text(canonicalJson(core)) }, null, 2) +
+          "\n",
+      );
+      const nestedCredential = await verify();
+      assert.notEqual(nestedCredential.exitCode, 0);
+      assert.match(nestedCredential.stderr, /RESEARCH_AUDIT_BUNDLE_SENSITIVE/);
+      await writeFile(statePath, originalState);
+      await chmod(statePath, 0o444);
+      await writeFile(manifestFile, originalManifest);
+      await chmod(manifestFile, 0o444);
+    }
+    const candidatePath = `project/task/investigation-candidates/${candidate.recordSha256}.json`;
+    const manifestPath = join(bundle, "manifest.json");
+    const manifest = JSON.parse(await readFile(manifestPath, "utf8"));
+    assert.ok(manifest.files.some((f: { path: string }) => f.path === candidatePath));
+    await rm(join(bundle, candidatePath));
+    manifest.files = manifest.files.filter((f: { path: string }) => f.path !== candidatePath);
+    const { manifestSha256: _oldManifest, ...manifestCore } = manifest;
+    await chmod(manifestPath, 0o600);
+    await writeFile(
+      manifestPath,
+      JSON.stringify(
+        { ...manifestCore, manifestSha256: sha256Text(canonicalJson(manifestCore)) },
+        null,
+        2,
+      ) + "\n",
+    );
+    const missingCandidate = await verify();
+    assert.notEqual(
+      missingCandidate.exitCode,
+      0,
+      "A recomputed manifest cannot erase the selected candidate behind a certified run",
+    );
   } finally {
     await fx.cleanup();
   }

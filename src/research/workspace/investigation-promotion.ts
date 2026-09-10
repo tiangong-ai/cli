@@ -1,6 +1,7 @@
+import { localInvestigationReadStore, type InvestigationReadStore } from "./investigation-store.js";
 import { Ajv2020 } from "ajv/dist/2020.js";
 import { lstat, readFile } from "node:fs/promises";
-import { isAbsolute, join } from "node:path";
+import { isAbsolute } from "node:path";
 import { CliError } from "../../errors.js";
 import { loadCurrentEvidenceSnapshot } from "./acquisition.js";
 import { investigationAttemptHistory } from "./investigation-attempt.js";
@@ -25,12 +26,7 @@ import {
   type ScientificFulfillmentProjection,
 } from "./scientific-fulfillment.js";
 import { canonicalJson, sha256File, sha256Text, workspacePaths } from "./storage.js";
-import {
-  loadProjectTask,
-  readTaskObject,
-  taskRequirementSha256,
-  writeTaskObject,
-} from "./task-contract.js";
+import { loadProjectTask, taskRequirementSha256, writeTaskObject } from "./task-contract.js";
 import type { JournalEvent, OutputRecord } from "./types.js";
 import { loadWorkspaceConfig, withWorkspaceLock } from "./workspace.js";
 const HASH = /^[a-f0-9]{64}$/;
@@ -322,9 +318,9 @@ export async function loadInvestigationPromotion(
   projectId: string,
   hash: string,
   knownEvents?: JournalEvent[],
+  store: InvestigationReadStore = localInvestigationReadStore(root),
 ): Promise<InvestigationPromotion> {
-  const record = await readTaskObject<InvestigationPromotion>(
-    root,
+  const record = await store.readTask<InvestigationPromotion>(
     projectId,
     "investigation-promotions",
     hash,
@@ -356,19 +352,7 @@ export async function loadInvestigationPromotion(
   const { planSha256, ...core } = record.plan;
   if (planSha256 !== sha256Text(canonicalJson(core)))
     throw failure("Promotion plan bytes changed.");
-  const sourcePath = join(
-    workspacePaths(root).projects,
-    projectId,
-    record.scopeAuthorization.source.path,
-  );
-  const info = await lstat(sourcePath);
-  if (
-    !info.isFile() ||
-    info.isSymbolicLink() ||
-    info.size !== record.scopeAuthorization.source.bytes ||
-    (await sha256File(sourcePath)) !== record.scopeAuthorization.sourceSha256
-  )
-    throw failure("Promotion approval source bytes changed.");
+  await store.verifyBlob(projectId, record.scopeAuthorization.source);
   return record;
 }
 export async function approveInvestigationPromotion(

@@ -1,3 +1,4 @@
+import { isProjectBudgetState } from "./project-budget.js";
 import { isUtf8 } from "node:buffer";
 import { randomUUID } from "node:crypto";
 import { constants as fsConstants } from "node:fs";
@@ -546,17 +547,26 @@ async function assertPortableTextFiles(root: string, forbiddenRoot?: string): Pr
 
     // Decode only for inspection. Evidence and ledger bytes must remain unchanged.
     const pending: unknown[] = [];
-    const enqueueJson = (value: string): boolean => {
+    const financialAuthorizations = new WeakSet<object>();
+    const enqueueJson = (value: string, primaryDocument = false): boolean => {
       if (!/^\s*[[{"]/u.test(value)) return false;
       try {
-        pending.push(JSON.parse(value) as unknown);
+        const decoded: unknown = JSON.parse(value);
+        if (
+          primaryDocument &&
+          relative(root, path).split(sep).join("/") === "state/project.json" &&
+          isObject(decoded) &&
+          isProjectBudgetState(decoded.budget)
+        )
+          financialAuthorizations.add(decoded.budget.authorization);
+        pending.push(decoded);
         return true;
       } catch (error) {
         if (error instanceof SyntaxError) return false;
         throw auditError("Audit JSON could not be inspected safely.");
       }
     };
-    if (!enqueueJson(text)) {
+    if (!enqueueJson(text, true)) {
       for (const line of text.split(/\r?\n/u)) enqueueJson(line);
     }
     const sensitiveStringKeys = new Map<string, boolean>();
@@ -588,7 +598,14 @@ async function assertPortableTextFiles(root: string, forbiddenRoot?: string): Pr
               }
               keyCache.set(key, keyIsSensitive);
             }
-            if (keyIsSensitive) sensitive();
+            // This one typed project-budget container is a spending decision,
+            // not a credential. Its children remain fully inspected; the key
+            // remains sensitive everywhere else, including nested JSON strings.
+            if (
+              keyIsSensitive &&
+              !(key === "authorization" && isObject(item) && financialAuthorizations.has(item))
+            )
+              sensitive();
           }
           pending.push(item);
         }

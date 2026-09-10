@@ -1,3 +1,4 @@
+import { localInvestigationReadStore, type InvestigationReadStore } from "./investigation-store.js";
 import { arch, platform, tmpdir } from "node:os";
 import { Ajv2020 } from "ajv/dist/2020.js";
 import { lstat, mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
@@ -38,12 +39,7 @@ import {
   sha256Text,
   workspacePaths,
 } from "./storage.js";
-import {
-  loadProjectTask,
-  readTaskObject,
-  taskRequirementSha256,
-  writeTaskObject,
-} from "./task-contract.js";
+import { loadProjectTask, taskRequirementSha256, writeTaskObject } from "./task-contract.js";
 import type { JournalEvent, OutputRecord, ProjectState } from "./types.js";
 import { loadWorkspaceConfig, withWorkspaceLock } from "./workspace.js";
 
@@ -167,9 +163,9 @@ async function readStart(
   root: string,
   projectId: string,
   event: JournalEvent,
+  store: InvestigationReadStore = localInvestigationReadStore(root),
 ): Promise<AttemptStart> {
-  const record = await readTaskObject<AttemptStart>(
-    root,
+  const record = await store.readTask<AttemptStart>(
     projectId,
     "investigation-starts",
     String(event.payload.recordSha256),
@@ -195,6 +191,7 @@ export async function investigationAttemptHistory(
   projectId: string,
   definition: InvestigationDefinition,
   events: JournalEvent[],
+  store: InvestigationReadStore = localInvestigationReadStore(root),
 ) {
   const starts = matching(
     events,
@@ -211,7 +208,7 @@ export async function investigationAttemptHistory(
   const attempts: Array<{ start: AttemptStart; record: InvestigationAttempt | null }> = [];
   const seen = new Set<string>();
   for (const event of starts) {
-    const start = await readStart(root, projectId, event);
+    const start = await readStart(root, projectId, event, store);
     if (seen.has(start.attemptId) || start.definitionSha256 !== definition.recordSha256)
       throw invalid("Investigation attempt identity is duplicated or mixed.");
     seen.add(start.attemptId);
@@ -220,8 +217,7 @@ export async function investigationAttemptHistory(
     const done = matches[0];
     let record: InvestigationAttempt | null = null;
     if (done) {
-      record = await readTaskObject<InvestigationAttempt>(
-        root,
+      record = await store.readTask<InvestigationAttempt>(
         projectId,
         "investigation-attempts",
         String(done.payload.recordSha256),
@@ -245,15 +241,7 @@ export async function investigationAttemptHistory(
       for (const object of [...Object.values(record.logs), ...record.outputs]) {
         if (object.path !== `task/run-objects/${object.sha256}` || !HASH.test(object.sha256))
           throw invalid("Investigation object address changed.");
-        const path = join(workspacePaths(root).projects, projectId, object.path);
-        const info = await lstat(path);
-        if (
-          !info.isFile() ||
-          info.isSymbolicLink() ||
-          info.size !== object.bytes ||
-          (await sha256File(path)) !== object.sha256
-        )
-          throw invalid("Investigation result bytes changed.");
+        await store.verifyBlob(projectId, object);
       }
     }
     attempts.push({ start, record });
