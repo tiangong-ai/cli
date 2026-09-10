@@ -2384,6 +2384,52 @@ describe("research setup execution and operator safety", () => {
         },
       );
       assert.equal(normalized.status, "complete");
+      for (const [requestedDoi, canonicalDoi] of [
+        ["https%3A%2F%2Fdoi.org%2F10.1234%2FEXAMPLE", "10.1234/example"],
+        ["10.1234/percent%25", "10.1234/percent%"],
+      ]) {
+        const canonicalIdentity = {
+          ...identity,
+          requested: { ...identity.requested, doi: canonicalDoi },
+        };
+        const manifest = { ...goodManifest, doi: canonicalDoi, identity: canonicalIdentity };
+        const compatible = await runResearchSetupCompanion(
+          {
+            workspace: root,
+            skillId: "tiangong.academic-paper-download",
+            outputDirectory,
+            doi: requestedDoi!,
+          },
+          {
+            environment: { PATH: process.env.PATH },
+            runner: async () => {
+              await writeFile(manifestPath, JSON.stringify(manifest));
+              return {
+                exitCode: 0,
+                stdout: JSON.stringify({
+                  ok: true,
+                  data: {
+                    results: [
+                      {
+                        success: true,
+                        doi: canonicalDoi,
+                        file: artifactPath,
+                        manifest: manifestPath,
+                        size: pdf.length,
+                        sha256: goodManifest.sha256,
+                        identity_status: "matched",
+                        identity: canonicalIdentity,
+                      },
+                    ],
+                  },
+                }),
+                stderr: "",
+              };
+            },
+          },
+        );
+        assert.equal(compatible.status, "complete");
+      }
       for (const variant of [
         "unresolved",
         "wrong-doi",
@@ -2447,7 +2493,7 @@ describe("research setup execution and operator safety", () => {
         .split("\n")
         .map((line) => JSON.parse(line))
         .filter((event) => event.type === "research.setup.companion.paper.completed");
-      assert.equal(completed.length, 2);
+      assert.equal(completed.length, 4);
 
       const privateRuntimePath = join(root, "private-runtime-token");
       await assert.rejects(
