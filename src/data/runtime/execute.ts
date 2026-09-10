@@ -36,6 +36,8 @@ export interface ExecuteDataRunOptions {
   clock?: (() => Date) | undefined;
   cliVersion?: string | undefined;
   artifactOutputDirectory?: string | undefined;
+  /** Optional caller admission after static validation, before connector execution. */
+  beforeExecute?: (() => Promise<void>) | undefined;
 }
 
 export async function executeDataRun(
@@ -239,6 +241,7 @@ export async function executeDataRun(
       fetchImpl,
     });
     try {
+      await options.beforeExecute?.();
       const execution = await operation.definition.execute({
         input: request.input,
         request,

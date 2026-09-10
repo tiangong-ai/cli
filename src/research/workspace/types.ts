@@ -349,7 +349,6 @@ export interface ProjectBudgetAuthorization {
   authorizedAt: string;
   originProjectId: string;
   providerOperationMaxCostUsd: Record<string, number>;
-  allowUnpricedProviderOperations: boolean;
 }
 
 export interface ProjectBudgetEntry {

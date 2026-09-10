@@ -42,7 +42,6 @@ export function createProjectBudget(
       authorizedAt: new Date().toISOString(),
       originProjectId: projectId,
       providerOperationMaxCostUsd: {},
-      allowUnpricedProviderOperations: false,
     },
     openingEstimateUsd,
     openingBasis: openingEstimateUsd ? "legacy-accounting" : "new-project",
@@ -273,8 +272,7 @@ export function isProjectBudgetState(value: unknown): value is ProjectBudgetStat
     typeof auth.authorizedAt !== "string" ||
     typeof auth.originProjectId !== "string" ||
     !isObject(auth.providerOperationMaxCostUsd) ||
-    Object.values(auth.providerOperationMaxCostUsd).some((cost) => !finiteCost(cost)) ||
-    typeof auth.allowUnpricedProviderOperations !== "boolean"
+    Object.values(auth.providerOperationMaxCostUsd).some((cost) => !finiteCost(cost))
   )
     return false;
   const ids = new Set<string>();
@@ -319,4 +317,21 @@ export function isProjectBudgetState(value: unknown): value is ProjectBudgetStat
     ids.add(entry.id);
   }
   return true;
+}
+
+export function providerCostLimits(value: unknown): Record<string, number> {
+  if (
+    !isObject(value) ||
+    Object.keys(value).length > 128 ||
+    Object.entries(value).some(
+      ([id, cost]) => !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,191}$/.test(id) || !finiteCost(cost),
+    )
+  )
+    throw new CliError(
+      "Provider cost limits must map stable capability IDs to nonnegative finite USD maxima.",
+      { code: "RESEARCH_BUDGET_INVALID", exitCode: 2 },
+    );
+  return Object.fromEntries(
+    Object.entries(value).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0)),
+  ) as Record<string, number>;
 }

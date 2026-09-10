@@ -6,6 +6,7 @@ import {
   isProjectBudgetState,
   inheritedProjectBudget,
   settleProjectCost,
+  providerCostLimits,
 } from "./project-budget.js";
 import { randomUUID } from "node:crypto";
 import { cp, lstat, readFile } from "node:fs/promises";
@@ -1902,15 +1903,27 @@ export async function setProjectBudget(
   projectId: string,
   maxCostUsd: number,
   confirm: boolean,
+  providerLimits?: Record<string, number>,
 ) {
   projectBudgetAmount(maxCostUsd);
+  const checkedLimits =
+    providerLimits === undefined ? undefined : providerCostLimits(providerLimits);
   return withWorkspaceLock(root, "project.budget.set", async () => {
     const authority = await readProjectAuthorityIndex(root);
     const project = await loadProject(root, projectId);
     assertProjectAuthority(project, authority);
     const config = await loadWorkspaceConfig(root);
     const existing = project.budget;
-    if (existing?.authorization.maxCostUsd === maxCostUsd)
+    const pricesChanged =
+      checkedLimits !== undefined &&
+      canonicalJson(checkedLimits) !==
+        canonicalJson(existing?.authorization.providerOperationMaxCostUsd ?? {});
+    if (pricesChanged && !confirm)
+      throw new CliError("Changing declared provider cost maxima requires --confirm-budget.", {
+        code: "RESEARCH_BUDGET_CONFIRMATION_REQUIRED",
+        exitCode: 2,
+      });
+    if (existing?.authorization.maxCostUsd === maxCostUsd && !pricesChanged)
       return { projectId, budget: projectBudgetView(project, config), replayed: true };
     if (existing && maxCostUsd > existing.authorization.maxCostUsd && !confirm)
       throw new CliError("Increasing the project budget requires --confirm-budget.", {
@@ -1930,6 +1943,8 @@ export async function setProjectBudget(
       ? structuredClone(existing)
       : createProjectBudget(projectId, maxCostUsd, project.usage.costUsd);
     proposed.authorization.maxCostUsd = maxCostUsd;
+    if (checkedLimits !== undefined)
+      proposed.authorization.providerOperationMaxCostUsd = checkedLimits;
     if (!existing) {
       proposed.openingBasis = "legacy-accounting";
       // Reuse the validated native packet instead of inventing a zero pending cost.
