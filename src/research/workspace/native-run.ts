@@ -599,7 +599,7 @@ async function copyExact(source: string, target: string, sha256: string) {
   if ((await sha256File(target)) !== sha256)
     throw error("Calculation bytes changed during staging.");
 }
-async function storeRunObject(
+export async function storeRunObject(
   root: string,
   projectId: string,
   source: string,

@@ -355,7 +355,7 @@ export interface ProjectBudgetAuthorization {
 export interface ProjectBudgetEntry {
   id: string;
   sourceProjectId: string;
-  kind: "native-stage" | "review" | "provider-operation";
+  kind: "native-stage" | "review" | "provider-operation" | "investigation";
   reference: string;
   authorizationRevision: number;
   maxCostUsd: number;

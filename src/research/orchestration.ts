@@ -1,4 +1,10 @@
 import {
+  planInvestigation,
+  approveInvestigation,
+  inspectInvestigation,
+  investigationInputSchema,
+} from "./workspace/investigation.js";
+import {
   projectBudgetAmount,
   projectBudgetView,
   providerCostLimits,
@@ -249,6 +255,9 @@ export function researchOrchestrationHelp(): string {
   tiangong-ai research scientific fulfillment status <project> [--workspace <path>] [--json]
   tiangong-ai research scientific amendment plan <project> --input <json-file> [--workspace <path>] [--json]
   tiangong-ai research scientific amendment apply <project> --plan <json-file> --confirm <plan-sha256> --authorization-source <text-file> [--workspace <path>] [--json]
+  tiangong-ai research project investigation plan <project> --input <json-file> [--workspace <path>] [--json]
+  tiangong-ai research project investigation approve <project> --input <json-file> --confirm <plan-sha256> --authorization-source <text-file> [--workspace <path>] [--json]
+  tiangong-ai research project investigation status <project> --investigation <id> [--workspace <path>] [--json]
   tiangong-ai research scientific amendment status <project> [--workspace <path>] [--json]
   tiangong-ai research project task run observe <project> --input <json-file> --confirm-execution [--workspace <path>] [--json]
   tiangong-ai research project task run inspect <project> --run <run-id> [--workspace <path>] [--json]
@@ -860,6 +869,8 @@ async function runSchema(argv: string[], io: CliIO): Promise<number> {
     schema = scientificDesignSchema();
   } else if (stage === "scientific-fulfillment") {
     schema = scientificFulfillmentSchema();
+  } else if (stage === "investigation") {
+    schema = investigationInputSchema();
   } else if (stage === "scientific-amendment") {
     schema = scientificAmendmentSchema();
   } else if (stage.startsWith("scientific-assessment-")) {
@@ -1152,6 +1163,61 @@ async function runCapability(argv: string[], io: CliIO): Promise<number> {
 async function runProject(argv: string[], io: CliIO): Promise<number> {
   const [action, ...rest] = argv;
   if (!action || action === "--help" || action === "-h") return writeHelp(io);
+  if (action === "investigation") {
+    const [operation, ...arguments_] = rest;
+    if (!["plan", "approve", "status"].includes(operation ?? ""))
+      throw unknownAction("research project investigation", operation ?? "");
+    const args = parseStrictArgs(
+      arguments_,
+      {
+        ...WORKSPACE_OPTIONS,
+        ...(operation === "status"
+          ? { investigation: "string" as const }
+          : { input: "string" as const }),
+        ...(operation === "approve"
+          ? { confirm: "string" as const, "authorization-source": "string" as const }
+          : {}),
+      },
+      `research project investigation ${operation}`,
+    );
+    if (strictBoolean(args, "help")) return writeHelp(io);
+    const projectId = onePositional(
+      args.positionals,
+      `research project investigation ${operation}`,
+    );
+    const root = await workspaceFromArgs(args);
+    if (operation === "status") {
+      const id = strictString(args, "investigation");
+      if (!id)
+        throw new CliError("Investigation status requires --investigation.", {
+          code: "RESEARCH_INVESTIGATION_INVALID",
+          exitCode: 2,
+        });
+      writeJson(io, await inspectInvestigation(root, projectId, id), args);
+    } else {
+      const path = strictString(args, "input");
+      if (!path)
+        throw new CliError("Investigation plan/approve requires --input.", {
+          code: "RESEARCH_INVESTIGATION_INVALID",
+          exitCode: 2,
+        });
+      const value = await readBoundedJsonRecord(path, "--input", "RESEARCH_INVESTIGATION_INVALID");
+      writeJson(
+        io,
+        operation === "plan"
+          ? await planInvestigation(root, projectId, value)
+          : await approveInvestigation(
+              root,
+              projectId,
+              value,
+              strictString(args, "confirm"),
+              strictString(args, "authorization-source"),
+            ),
+        args,
+      );
+    }
+    return 0;
+  }
   if (action === "audit") {
     const [auditAction, ...auditRest] = rest;
     if (auditAction === "export") {
