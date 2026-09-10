@@ -57,6 +57,7 @@ export interface ScientificAmendmentPlan {
   changes: Array<{ ruleId: string; before: Rule; after: Rule }>;
   proposedEffectiveDesignSha256: string;
   invalidatedScientificRoles: string[];
+  affectedTaskRequirementIds: string[];
   preservedAcquisitionSnapshotSha256: string | null;
   planSha256: string;
   nextAction: string;
@@ -75,6 +76,70 @@ export interface ScientificAmendmentRecord {
   };
   design: { sha256: string; objectLocator: string };
   recordSha256: string;
+}
+export interface ScientificAmendmentImpact {
+  claims: Map<string, { sha256: string; ordinal: number }>;
+  coverage: Map<string, { sha256: string; ordinal: number }>;
+}
+
+/** An operation-local dependency index over the already verified design history. */
+export function scientificAmendmentImpact(
+  records: ScientificAmendmentRecord[],
+  design: ScientificDesignContract,
+): ScientificAmendmentImpact {
+  const impact: ScientificAmendmentImpact = { claims: new Map(), coverage: new Map() };
+  for (const [ordinal, record] of records.entries()) {
+    const binding = { sha256: record.recordSha256, ordinal };
+    const scope = amendmentChangeScope(record.plan.changes, design);
+    for (const id of scope.claims) impact.claims.set(id, binding);
+    for (const id of scope.coverage) impact.coverage.set(id, binding);
+  }
+  return impact;
+}
+
+function amendmentChangeScope(
+  changes: ScientificAmendmentPlan["changes"],
+  design: ScientificDesignContract,
+) {
+  const claims = new Set<string>();
+  const coverage = new Set<string>();
+  const roles = new Map(design.evidenceRoles.map((role) => [role.id, role.coverageDimensionIds]));
+  for (const change of changes)
+    for (const rule of [change.before, change.after]) {
+      for (const id of rule.claimIds) claims.add(id);
+      for (const id of rule.evidenceRoleIds)
+        for (const dimension of roles.get(id) ?? []) coverage.add(dimension);
+    }
+  return { claims, coverage };
+}
+
+export function requirementAmendmentBinding(
+  requirement: { designClaimIds: string[]; coverageDimensionIds: string[] },
+  impact?: ScientificAmendmentImpact,
+): string | null {
+  let latest: { sha256: string; ordinal: number } | undefined;
+  for (const binding of [
+    ...requirement.designClaimIds.map((id) => impact?.claims.get(id)),
+    ...requirement.coverageDimensionIds.map((id) => impact?.coverage.get(id)),
+  ])
+    if (binding && (!latest || binding.ordinal > latest.ordinal)) latest = binding;
+  return latest?.sha256 ?? null;
+}
+
+export async function loadScientificAmendmentImpact(
+  root: string,
+  project: ProjectState,
+  events: JournalEvent[],
+) {
+  if (
+    !project.scientificDesign?.amendmentSha256 &&
+    !events.some(
+      (event) => event.scope === project.id && event.type === "scientific.amendment.recorded",
+    )
+  )
+    return undefined;
+  const view = await loadScientificFulfillmentView(root, project, undefined, events);
+  return scientificAmendmentImpact(view.amendments, view.base);
 }
 const ids = {
   type: "array",
@@ -200,6 +265,17 @@ export async function planScientificAmendment(
       exitCode: 2,
       details: { issueCodes: introducedIssues },
     });
+  const { loadProjectTask } = await import("./task-contract.js");
+  const task = await loadProjectTask(root, projectId, events);
+  const scope = amendmentChangeScope(changes, view.base);
+  const affectedTaskRequirementIds = (task?.current.requirements ?? [])
+    .filter(
+      (requirement) =>
+        requirement.designClaimIds.some((id) => scope.claims.has(id)) ||
+        requirement.coverageDimensionIds.some((id) => scope.coverage.has(id)),
+    )
+    .map((requirement) => requirement.id)
+    .sort();
   const core = {
     schemaVersion: 1 as const,
     kind: "tiangong-scientific-amendment-plan" as const,
@@ -213,6 +289,7 @@ export async function planScientificAmendment(
     changes,
     proposedEffectiveDesignSha256: sha256Text(canonicalJson(effective)),
     invalidatedScientificRoles: ["research-design", "evidence-construct", "pilot-methods"],
+    affectedTaskRequirementIds,
     preservedAcquisitionSnapshotSha256: project.evidenceState.currentSnapshotSha256,
   };
   return {
@@ -248,7 +325,7 @@ function validatePlan(value: unknown): ScientificAmendmentPlan {
   const { planSha256, nextAction, ...core } = value;
   if (
     Object.keys(value).sort().join(",") !==
-      "changes,invalidatedScientificRoles,kind,nextAction,parentAmendmentSha256,parentDesignSha256,parentEffectiveDesignSha256,parentFulfillmentSha256,parentProjectSha256,planSha256,preservedAcquisitionSnapshotSha256,projectId,proposedEffectiveDesignSha256,reason,schemaVersion" ||
+      "affectedTaskRequirementIds,changes,invalidatedScientificRoles,kind,nextAction,parentAmendmentSha256,parentDesignSha256,parentEffectiveDesignSha256,parentFulfillmentSha256,parentProjectSha256,planSha256,preservedAcquisitionSnapshotSha256,projectId,proposedEffectiveDesignSha256,reason,schemaVersion" ||
     value.schemaVersion !== 1 ||
     value.kind !== "tiangong-scientific-amendment-plan" ||
     typeof value.projectId !== "string" ||
@@ -268,6 +345,11 @@ function validatePlan(value: unknown): ScientificAmendmentPlan {
     ].some((hash) => hash !== null && (typeof hash !== "string" || !HASH.test(hash))) ||
     canonicalJson(value.invalidatedScientificRoles) !==
       canonicalJson(["research-design", "evidence-construct", "pilot-methods"]) ||
+    !Array.isArray(value.affectedTaskRequirementIds) ||
+    value.affectedTaskRequirementIds.some(
+      (id) => typeof id !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(id),
+    ) ||
+    new Set(value.affectedTaskRequirementIds).size !== value.affectedTaskRequirementIds.length ||
     !Array.isArray(value.changes) ||
     value.changes.some(
       (change) =>
@@ -623,6 +705,7 @@ export async function inspectScientificAmendment(root: string, projectId: string
       parentAmendmentSha256: record.plan.parentAmendmentSha256,
       design: record.design,
       reason: record.plan.reason,
+      affectedTaskRequirementIds: record.plan.affectedTaskRequirementIds,
     })),
     gates: project.scientificDesign?.gates,
     nextAction:

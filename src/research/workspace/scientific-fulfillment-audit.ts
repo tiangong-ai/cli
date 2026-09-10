@@ -1,5 +1,6 @@
 import {
   validateScientificAmendmentRecord,
+  scientificAmendmentImpact,
   projectScientificAmendments,
   type ScientificAmendmentRecord,
 } from "./scientific-amendment.js";
@@ -224,6 +225,7 @@ export async function verifyScientificFulfillmentAudit(
         throw invalid();
     } else if (canonicalJson(view) !== canonicalJson(base)) throw invalid();
   }
+  return scientificAmendmentImpact(amendments, base);
 }
 function invalid() {
   return new CliError(

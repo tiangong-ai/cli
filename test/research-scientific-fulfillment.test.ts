@@ -340,6 +340,7 @@ describe("predeclared scientific parameter fulfillment", () => {
           },
         ],
       });
+      assert.deepEqual(plan.affectedTaskRequirementIds, ["declaration-check"]);
       const confirmationPath = join(root, "amendment-confirmation.txt");
       await writeFile(
         confirmationPath,

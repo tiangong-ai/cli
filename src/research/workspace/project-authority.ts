@@ -35,6 +35,8 @@ export function projectAuthorityIndex(events: JournalEvent[]): ProjectAuthorityI
   for (const event of events) {
     if (
       event.type.startsWith("project.task.") ||
+      event.type === "scientific.amendment.recorded" ||
+      event.type === "scientific.fulfillment.recorded" ||
       (event.type === "package.completed" && event.payload.packageId === "review") ||
       (["project.forked", "project.addendum.created"].includes(event.type) &&
         isObject(event.payload.taskContract))
