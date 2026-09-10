@@ -681,6 +681,17 @@ validates required manuscript sections and a distinct-file submission manifest,
 then freezes the native artifact, required cover/title/checklist/availability/
 source-data files, inference chain, Claim-Evidence Graph, and reproducibility
 manifest; it does not author them or launch a nested producer. The base research
+lineage reuses `closure.artifacts` and the verified persistent review packet's
+artifact records. `publication-lineage.ts` compares the frozen core to those
+records and validates prepared per-file generation/byte bindings; it adds no
+authority ledger or generic dependency graph. `publication lineage` exposes the
+closed base and an empty preparation template, never stamps existing artifacts.
+Freeze validates sealed copies, derives the analysis generation and material
+manifest hashes, and binds reproducibility to them. Status and review admission
+recheck the current closed lineage; stale or legacy-unbound generations remain
+historical artifacts rather than current readiness evidence. The manifest's
+derivation claims and material completeness still require scientific review.
+The base research
 reviewer remains a CLI-isolated other-family reviewer. Every one of the four
 role-specific final reviewers must use that configured family, a fresh session,
 and the same frozen generation. Base closure and publication closure are

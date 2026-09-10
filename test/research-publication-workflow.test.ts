@@ -26,6 +26,7 @@ import {
 import {
   canonicalJson,
   fileRecord,
+  sha256File,
   sha256Text,
   workspacePaths,
   writeJsonAtomic,
@@ -313,6 +314,94 @@ describe("top-journal publication workflow", () => {
       );
       assert.equal(packet.taskAcceptance.requirements[0].id, "central-outcome");
       assert.equal(packet.taskAcceptance.requirements[0].status, "unanswered");
+    } finally {
+      await rm(fixture.root, { recursive: true, force: true });
+    }
+  });
+
+  it("keeps a legacy generation's objects but does not invent missing material lineage", async () => {
+    const fixture = await publicationFixture("legacy-material-lineage");
+    try {
+      await freezePublicationManuscript({
+        root: fixture.root,
+        projectId: fixture.projectId,
+        manuscriptPath: fixture.manuscript,
+        assessmentPath: fixture.assessment,
+        supplementPaths: [],
+        submissionFiles: fixture.submissionFiles,
+        resultLineage: await fixtureResultLineage(fixture),
+        producerAgent: "codex",
+        producerSessionId: "legacy-fixture-producer",
+      });
+      const directory = join(workspacePaths(fixture.root).projects, fixture.projectId);
+      const pointerPath = join(directory, "publication", "current.json");
+      const pointer = JSON.parse(await readFile(pointerPath, "utf8"));
+      const original = await readFile(join(directory, pointer.manifestLocator), "utf8");
+      const legacy = JSON.parse(original);
+      delete legacy.analysisGenerationId;
+      delete legacy.materialResultsManifest;
+      delete legacy.generationSha256;
+      const generationSha256 = sha256Text(canonicalJson(legacy));
+      const manifestLocator = `publication/generations/${generationSha256}/manifest.json`;
+      await mkdir(join(directory, "publication", "generations", generationSha256), {
+        recursive: true,
+      });
+      await writeJsonAtomic(join(directory, manifestLocator), { ...legacy, generationSha256 });
+      await writeJsonAtomic(pointerPath, { ...pointer, generationSha256, manifestLocator });
+      await assert.rejects(
+        inspectPublicationStatus(fixture.root, fixture.projectId),
+        (error: unknown) => errorCode(error) === "RESEARCH_PUBLICATION_RESULT_LINEAGE_REQUIRED",
+      );
+      assert.equal(await readFile(join(directory, pointer.manifestLocator), "utf8"), original);
+    } finally {
+      await rm(fixture.root, { recursive: true, force: true });
+    }
+  });
+
+  it("binds binary figure bytes and ordered table supplements without decoding them as text", async () => {
+    const fixture = await publicationFixture("binary-material-lineage");
+    try {
+      const figure = join(fixture.root, "figure.png");
+      const bytes = Buffer.from(
+        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+a6u0AAAAASUVORK5CYII=",
+        "base64",
+      );
+      await writeFile(figure, bytes);
+      const supplements = [figure, fixture.supplement];
+      const resultLineage = await fixtureResultLineage(fixture, supplements);
+      const request = {
+        root: fixture.root,
+        projectId: fixture.projectId,
+        manuscriptPath: fixture.manuscript,
+        assessmentPath: fixture.assessment,
+        submissionFiles: fixture.submissionFiles,
+        supplementPaths: supplements,
+        resultLineage,
+        producerAgent: "codex" as const,
+        producerSessionId: "binary-material-producer",
+      };
+      const frozen = await freezePublicationManuscript(request);
+      assert.equal(frozen.supplements[0]!.sha256, await sha256File(figure));
+      assert.notEqual(frozen.supplements[0]!.sha256, sha256Text(bytes.toString("utf8")));
+      const manifest = JSON.parse(
+        await readFile(
+          join(
+            workspacePaths(fixture.root).projects,
+            fixture.projectId,
+            frozen.materialResultsManifest!.objectLocator,
+          ),
+          "utf8",
+        ),
+      );
+      assert.equal(
+        manifest.files.find((file: { role: string }) => file.role === "supplement-2").sha256,
+        await sha256File(fixture.supplement),
+      );
+      await writeFile(figure, Buffer.concat([bytes, Buffer.from([0xff])]));
+      await assert.rejects(
+        freezePublicationManuscript(request),
+        (error: unknown) => errorCode(error) === "RESEARCH_PUBLICATION_RESULT_LINEAGE_MISMATCH",
+      );
     } finally {
       await rm(fixture.root, { recursive: true, force: true });
     }
@@ -1589,7 +1678,7 @@ async function fixtureResultLineage(
         ...supplements.map((path, i) => ({ role: `supplement-${i + 1}`, path })),
       ].map(async (file) => ({
         role: file.role,
-        sha256: sha256Text(await readFile(file.path, "utf8")),
+        sha256: await sha256File(file.path),
         analysisSha256,
       })),
     ),

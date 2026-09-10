@@ -104,6 +104,8 @@ export async function closedAnalysisLineage(input: {
           binding: source,
           expectedSha256: isObject(expected) ? (expected.sha256 ?? null) : null,
           currentSha256: actual?.sha256 ?? null,
+          expectedBytes: isObject(expected) ? (expected.bytes ?? null) : null,
+          currentBytes: actual?.bytes ?? null,
         },
       );
     }

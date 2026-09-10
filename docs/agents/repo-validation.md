@@ -606,6 +606,12 @@ role-specific review schemas, configured other-family producer/reviewer
 separation, append-only reviewer-session reuse rejection, raw-session
 non-persistence, active-base-research status, revision invalidation, package
 status projection, and publication closure language ceilings.
+Result-lineage cases reproduce valid B materials frozen against restored valid A
+core and a report changed after base closure. They verify closure and reviewed
+packet hashes separately, per-file parent/byte conflicts, required manifest
+coverage, qualitative compatibility, and stale status/review admission with an
+explicit object diagnostic. Fixtures include realistic closed artifact records;
+no model request or scientific-truth inference substitutes for these checks.
 `test/research-acquisition.test.ts` additionally covers honest acquisition
 freeze with a separate inference stop, hash-checked input-backed artifact
 materialization without bounded-context expansion, exact decomposition lineage,
