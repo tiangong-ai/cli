@@ -2280,6 +2280,13 @@ describe("research setup execution and operator safety", () => {
       const artifactPath = join(outputDirectory, "bound-paper.pdf");
       const manifestPath = `${artifactPath}.json`;
       const pdf = Buffer.from("%PDF-1.4\nbound-artifact\n%%EOF\n");
+      const identity = {
+        schema_version: "academic-paper-download.identity.v1",
+        status: "matched",
+        method: "doi_document_metadata",
+        confidence: 1,
+        requested: { doi: "10.1234/example", title: null, author: null, year: null },
+      };
       const result = await runResearchSetupCompanion(
         {
           workspace: root,
@@ -2305,7 +2312,9 @@ describe("research setup execution and operator safety", () => {
             await writeFile(artifactPath, pdf);
             const digest = await sha256File(artifactPath);
             const manifest = {
-              schema_version: "academic-paper-download.artifact.v2",
+              schema_version: "academic-paper-download.artifact.v3",
+              identity_status: "matched",
+              identity,
               doi: "10.1234/example",
               source: "semantic_scholar",
               file: artifactPath,
@@ -2321,6 +2330,9 @@ describe("research setup execution and operator safety", () => {
                   results: [
                     {
                       success: true,
+                      doi: "10.1234/example",
+                      identity_status: "matched",
+                      identity,
                       file: artifactPath,
                       manifest: manifestPath,
                       size: pdf.length,
@@ -2338,6 +2350,63 @@ describe("research setup execution and operator safety", () => {
       assert.equal(result.artifact.path, artifactPath);
       assert.notEqual(result.artifact.path, decoyPath);
       assert.equal(result.artifact.sha256, await sha256File(artifactPath));
+      const goodManifest = JSON.parse(await readFile(manifestPath, "utf8"));
+      for (const variant of ["unresolved", "wrong-doi", "legacy", "different-result"] as const) {
+        const manifest = structuredClone(goodManifest);
+        if (variant === "unresolved") manifest.identity.status = "unresolved";
+        if (variant === "wrong-doi") manifest.identity.requested.doi = "10.1234/different";
+        if (variant === "legacy") manifest.schema_version = "academic-paper-download.artifact.v2";
+        await assert.rejects(
+          runResearchSetupCompanion(
+            {
+              workspace: root,
+              skillId: skill.id as "tiangong.academic-paper-download",
+              outputDirectory,
+              doi: "10.1234/example",
+            },
+            {
+              environment: { PATH: process.env.PATH },
+              runner: async () => {
+                await writeFile(manifestPath, JSON.stringify(manifest));
+                return {
+                  exitCode: 0,
+                  stdout: JSON.stringify({
+                    ok: true,
+                    data: {
+                      results: [
+                        {
+                          success: true,
+                          doi: "10.1234/example",
+                          file: artifactPath,
+                          manifest: manifestPath,
+                          size: pdf.length,
+                          sha256: goodManifest.sha256,
+                          identity_status: "matched",
+                          identity:
+                            variant === "different-result"
+                              ? { ...manifest.identity, method: "different" }
+                              : manifest.identity,
+                        },
+                      ],
+                    },
+                  }),
+                  stderr: "",
+                };
+              },
+            },
+          ),
+          (error: unknown) =>
+            error instanceof Error &&
+            "code" in error &&
+            error.code === "RESEARCH_SETUP_COMPANION_ARTIFACT_INVALID",
+        );
+      }
+      const completed = (await readFile(workspacePaths(root).journal, "utf8"))
+        .trim()
+        .split("\n")
+        .map((line) => JSON.parse(line))
+        .filter((event) => event.type === "research.setup.companion.paper.completed");
+      assert.equal(completed.length, 1);
 
       const privateRuntimePath = join(root, "private-runtime-token");
       await assert.rejects(
