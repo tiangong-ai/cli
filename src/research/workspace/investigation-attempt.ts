@@ -112,6 +112,7 @@ interface AttemptStart {
   inputs: Array<OutputRecord & { id: string; artifactId: string }>;
   timeoutSeconds: number;
   maxCostUsd: number;
+  maxOutputBytes: number;
   startedAt: string;
   recordSha256: string;
 }
@@ -126,6 +127,7 @@ type Diagnostic = {
 };
 const outcomes = [
   "harness-failure",
+  "output-limit-exceeded",
   "solver-not-reached",
   "numerical-failure",
   "diagnostic-incomplete",
@@ -236,7 +238,9 @@ async function readStart(
     !Number.isFinite(record.timeoutSeconds) ||
     record.timeoutSeconds <= 0 ||
     !Number.isFinite(record.maxCostUsd) ||
-    record.maxCostUsd < 0
+    record.maxCostUsd < 0 ||
+    !Number.isSafeInteger(record.maxOutputBytes) ||
+    record.maxOutputBytes < 1
   )
     throw invalid("Investigation attempt start binding changed.");
   return record;
@@ -279,7 +283,8 @@ export async function investigationAttemptHistory(
         start.inputs.map((i) => ({ id: i.id, artifactId: i.artifactId, sha256: i.sha256 })),
       ) !== canonicalJson(definition.plan.canonicalInputs) ||
       start.maxCostUsd !== definition.plan.limits.maxRunCostUsd ||
-      start.timeoutSeconds > definition.plan.limits.maxRunSeconds
+      start.timeoutSeconds > definition.plan.limits.maxRunSeconds ||
+      start.maxOutputBytes > definition.plan.limits.maxOutputBytes
     )
       throw invalid("Attempt start differs from its approved inputs, configuration or parent.");
     for (const input of start.inputs) await store.verifyBlob(projectId, input);
@@ -305,6 +310,11 @@ export async function investigationAttemptHistory(
         !outcomes.includes(record.outcome) ||
         !Number.isFinite(record.process.wallSeconds) ||
         record.process.wallSeconds < 0 ||
+        !Number.isSafeInteger(record.process.observedOutputBytes) ||
+        Number(record.process.observedOutputBytes) < 0 ||
+        typeof record.process.outputLimitExceeded !== "boolean" ||
+        (!record.process.outputLimitExceeded &&
+          Number(record.process.observedOutputBytes) > start.maxOutputBytes) ||
         record.programId !== start.programId ||
         canonicalJson(record.configuration) !== canonicalJson(start.configuration) ||
         record.hypothesis !== start.hypothesis ||
@@ -338,6 +348,14 @@ export function investigationRemaining(
       definition.plan.limits.maxWallSeconds -
         attempts.reduce(
           (sum, a) => sum + (a.record?.process.wallSeconds ?? a.start.timeoutSeconds),
+          0,
+        ),
+    ),
+    outputBytes: Math.max(
+      0,
+      definition.plan.limits.maxTotalOutputBytes -
+        attempts.reduce(
+          (sum, a) => sum + (a.record?.process.observedOutputBytes ?? a.start.maxOutputBytes),
           0,
         ),
     ),
@@ -511,7 +529,9 @@ async function observeInvestigationAttemptInternal(
       if (
         remaining.runs < 1 ||
         timeoutSeconds < 1 ||
-        remaining.costUpperBoundUsd + 1e-9 < plan.limits.maxRunCostUsd
+        remaining.costUpperBoundUsd + 1e-9 < plan.limits.maxRunCostUsd ||
+        remaining.outputBytes < 1 ||
+        history.some((a) => a.record?.process.outputLimitExceeded)
       )
         throw invalid(
           "The remaining finite investigation budget cannot admit another attempt.",
@@ -626,6 +646,7 @@ async function observeInvestigationAttemptInternal(
         inputs,
         timeoutSeconds,
         maxCostUsd: plan.limits.maxRunCostUsd,
+        maxOutputBytes: Math.min(plan.limits.maxOutputBytes, remaining.outputBytes),
         startedAt: new Date().toISOString(),
       };
       const start: AttemptStart = { ...core, recordSha256: sha256Text(canonicalJson(core)) };
@@ -674,22 +695,28 @@ async function observeInvestigationAttemptInternal(
     prepared.staging,
     env,
     Math.min(5, start.timeoutSeconds),
+    { maxBytes: start.maxOutputBytes },
   );
   const version = probe.stdout.trim() || probe.stderr.trim();
   const validRuntime =
     probe.exitCode === 0 &&
+    !probe.outputLimitExceeded &&
+    !probe.timedOut &&
+    !probe.cancelled &&
     (program.runtime.kind === "node" ? /^v\d+\.\d+\.\d+$/u : /^Python \d+\.\d+\.\d+$/u).test(
       version,
     );
   const available = start.timeoutSeconds - probe.wallSeconds;
+  const availableOutput = start.maxOutputBytes - (probe.observedOutputBytes ?? 0);
   const observed =
-    validRuntime && available > 0
+    validRuntime && available > 0 && availableOutput > 0
       ? await captureProcess(
           prepared.invocation.binary,
           prepared.invocation.args,
           prepared.staging,
           env,
           available,
+          { maxBytes: availableOutput, paths: [...prepared.outputPaths.values()] },
         )
       : probe;
   return withWorkspaceLock(root, "research.investigation.attempt.commit", async () => {
@@ -712,7 +739,7 @@ async function observeInvestigationAttemptInternal(
       const path = prepared.outputPaths.get(output.id)!;
       try {
         const info = await lstat(path);
-        if (!info.isFile() || info.isSymbolicLink() || info.size > 16 * 1024 * 1024) continue;
+        if (!info.isFile() || info.isSymbolicLink() || info.size > start.maxOutputBytes) continue;
         const object = await storeRunObject(root, projectId, path);
         outputs.push({ ...object, id: output.id, mediaType: output.mediaType });
         if (output.id === program.diagnosticOutputId && info.size <= 65536)
@@ -753,28 +780,36 @@ async function observeInvestigationAttemptInternal(
             .map((id) => `statuses.${id}`),
         ].sort()
       : [];
-    const outcome: InvestigationAttempt["outcome"] = stale
-      ? "stale"
-      : !stable
-        ? "inputs-changed"
-        : !validRuntime
-          ? "harness-failure"
-          : !diagnostic
-            ? observed.exitCode === 0
-              ? "diagnostic-incomplete"
-              : "harness-failure"
-            : !diagnostic.solverReached
-              ? "solver-not-reached"
-              : missingTelemetry.length
+    const outputLimitExceeded = Boolean(
+      probe.outputLimitExceeded || observed.outputLimitExceeded || availableOutput <= 0,
+    );
+    const observedOutputBytes =
+      (observed.observedOutputBytes ?? 0) +
+      (observed === probe ? 0 : (probe.observedOutputBytes ?? 0));
+    const outcome: InvestigationAttempt["outcome"] = outputLimitExceeded
+      ? "output-limit-exceeded"
+      : stale
+        ? "stale"
+        : !stable
+          ? "inputs-changed"
+          : !validRuntime
+            ? "harness-failure"
+            : !diagnostic
+              ? observed.exitCode === 0
                 ? "diagnostic-incomplete"
-                : !diagnostic.feasible
-                  ? "numerical-failure"
-                  : observed.exitCode === 0 &&
-                      !observed.timedOut &&
-                      !observed.cancelled &&
-                      outputs.length === program.outputs.length
-                    ? "feasible-candidate"
-                    : "diagnostic-incomplete";
+                : "harness-failure"
+              : !diagnostic.solverReached
+                ? "solver-not-reached"
+                : missingTelemetry.length
+                  ? "diagnostic-incomplete"
+                  : !diagnostic.feasible
+                    ? "numerical-failure"
+                    : observed.exitCode === 0 &&
+                        !observed.timedOut &&
+                        !observed.cancelled &&
+                        outputs.length === program.outputs.length
+                      ? "feasible-candidate"
+                      : "diagnostic-incomplete";
     const logs = {} as InvestigationAttempt["logs"];
     // Parent-created log storage is outside the child-writable capsule. Never
     // follow a program-created output/symlink while persisting capture bytes.
@@ -815,7 +850,13 @@ async function observeInvestigationAttemptInternal(
       missingTelemetry,
       actualCostUsd: null,
       accountedCostUpperBoundUsd: start.maxCostUsd,
-      process: { ...processRecord, startedAt: probe.startedAt, wallSeconds },
+      process: {
+        ...processRecord,
+        startedAt: probe.startedAt,
+        wallSeconds,
+        outputLimitExceeded,
+        observedOutputBytes,
+      },
       runtimeProbe,
       runtime: {
         kind: program.runtime.kind,

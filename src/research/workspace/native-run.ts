@@ -59,6 +59,7 @@ const statuses = [
   "succeeded",
   "failed",
   "timed-out",
+  "output-limit-exceeded",
   "cancelled",
   "invalid-output",
   "inputs-changed",
@@ -189,6 +190,8 @@ export interface NativeRunRecord {
     stdoutBytes: number;
     stderrBytes: number;
     diagnostic: string;
+    observedOutputBytes?: number;
+    outputLimitExceeded?: boolean;
   };
   investigationCertification?: InvestigationCertification;
   recordSha256: string;
@@ -509,6 +512,7 @@ export async function observeNativeRun(
           prepared.staging,
           environment,
           Math.min(5, prepared.timeoutSeconds),
+          { maxBytes: prepared.certification!.promotion.plan.certification.maxOutputBytes },
         )
       : null;
     const probeVersion = probe
@@ -517,12 +521,17 @@ export async function observeNativeRun(
     const runtimeValid =
       !probe ||
       (probe.exitCode === 0 &&
+        !probe.outputLimitExceeded &&
         !probe.timedOut &&
         !probe.cancelled &&
         probeVersion === prepared.certification!.promotion.plan.recipe.runtime.version);
     const availableSeconds = prepared.timeoutSeconds - (probe?.wallSeconds ?? 0);
+    const availableOutput = prepared.certification
+      ? prepared.certification.promotion.plan.certification.maxOutputBytes -
+        (probe?.observedOutputBytes ?? 0)
+      : Number.POSITIVE_INFINITY;
     const observed =
-      probe && (!runtimeValid || availableSeconds <= 0)
+      probe && (!runtimeValid || availableSeconds <= 0 || availableOutput <= 0)
         ? probe
         : await captureProcess(
             prepared.invocation?.binary ?? input.runtime.path,
@@ -530,9 +539,18 @@ export async function observeNativeRun(
             prepared.staging,
             environment,
             availableSeconds,
+            prepared.certification
+              ? { maxBytes: availableOutput, paths: [...prepared.outputPaths.values()] }
+              : undefined,
           );
     const wallSeconds =
       observed.wallSeconds + (probe && observed !== probe ? probe.wallSeconds : 0);
+    const outputLimitExceeded = Boolean(
+      probe?.outputLimitExceeded || observed.outputLimitExceeded || availableOutput <= 0,
+    );
+    const observedOutputBytes =
+      (observed.observedOutputBytes ?? 0) +
+      (probe && probe !== observed ? (probe.observedOutputBytes ?? 0) : 0);
     return await withWorkspaceLock(root, "research.task.run.commit", async () => {
       const project = await loadProject(root, projectId);
       let status: NativeRunRecord["status"] = observed.cancelled
@@ -543,6 +561,7 @@ export async function observeNativeRun(
             ? "succeeded"
             : "failed";
       if (!runtimeValid) status = "failed";
+      if (outputLimitExceeded) status = "output-limit-exceeded";
       try {
         await assertRunWindow(root, project, input);
         if (
@@ -590,8 +609,13 @@ export async function observeNativeRun(
         const path = prepared.outputPaths.get(output.id)!;
         try {
           const info = await lstat(path);
-          if (!info.isFile() || info.isSymbolicLink())
-            throw error("Calculation output is not a regular file.");
+          if (
+            !info.isFile() ||
+            info.isSymbolicLink() ||
+            (prepared.certification &&
+              info.size > prepared.certification.promotion.plan.certification.maxOutputBytes)
+          )
+            throw error("Calculation output is not a regular file within its approved byte bound.");
           if (output.mediaType === "application/json") JSON.parse(await readFile(path, "utf8"));
           outputs.push({
             id: output.id,
@@ -612,6 +636,7 @@ export async function observeNativeRun(
             probe!,
             prepared.invocation!.isolation,
             prepared.versionInvocation!.isolation,
+            { observedOutputBytes, outputLimitExceeded },
           )
         : undefined;
       const core = {
@@ -653,6 +678,7 @@ export async function observeNativeRun(
           stdoutBytes: observed.stdoutBytes,
           stderrBytes: observed.stderrBytes,
           diagnostic: safeDiagnostic(observed.stderr, observed.truncated),
+          ...(prepared.certification ? { observedOutputBytes, outputLimitExceeded } : {}),
         },
         ...(investigationCertification ? { investigationCertification } : {}),
       };
@@ -983,7 +1009,10 @@ export async function captureProcess(
   cwd: string,
   env: NodeJS.ProcessEnv,
   timeoutSeconds: number,
+  outputLimit?: { maxBytes: number; paths?: string[] },
 ) {
+  if (outputLimit && (!Number.isSafeInteger(outputLimit.maxBytes) || outputLimit.maxBytes < 1))
+    throw error("Observed output budget must be a positive finite byte count.");
   const startedAt = new Date().toISOString();
   const start = process.hrtime.bigint();
   return new Promise<{
@@ -1001,6 +1030,8 @@ export async function captureProcess(
     truncated: boolean;
     timedOut: boolean;
     cancelled: boolean;
+    outputLimitExceeded?: boolean;
+    observedOutputBytes?: number;
   }>((resolvePromise) => {
     const child = spawn(binary, args, {
       cwd,
@@ -1020,14 +1051,46 @@ export async function captureProcess(
       cancelled = false,
       spawnFailed = false;
     const terminate = (signal: NodeJS.Signals) => {
-      if (!child.pid || child.exitCode !== null || child.signalCode !== null) return;
+      if (!child.pid) return;
+      if (!outputLimit && (child.exitCode !== null || child.signalCode !== null)) return;
       try {
         if (platform() === "win32") child.kill(signal);
         else process.kill(-child.pid, signal);
       } catch {
-        child.kill(signal);
+        if (child.exitCode === null && child.signalCode === null) child.kill(signal);
       }
     };
+    if (outputLimit) child.once("exit", () => terminate("SIGKILL"));
+    let outputLimitExceeded = false;
+    const filePeaks = new Map<string, number>();
+    let pendingScan: Promise<void> | null = null;
+    const outputBytes = () =>
+      stdoutBytes + stderrBytes + [...filePeaks.values()].reduce((sum, n) => sum + n, 0);
+    const checkOutput = () => {
+      if (outputLimit && outputBytes() > outputLimit.maxBytes) {
+        outputLimitExceeded = true;
+        terminate("SIGKILL");
+      }
+    };
+    const scanOutputFiles = async () => {
+      if (!outputLimit) return;
+      await Promise.all(
+        (outputLimit.paths ?? []).map(async (path) => {
+          const info = await lstat(path).catch(() => null);
+          if (info?.isFile() && !info.isSymbolicLink())
+            filePeaks.set(path, Math.max(filePeaks.get(path) ?? 0, info.size));
+        }),
+      );
+      checkOutput();
+    };
+    const outputTimer = outputLimit?.paths?.length
+      ? setInterval(() => {
+          if (pendingScan) return;
+          pendingScan = scanOutputFiles().finally(() => {
+            pendingScan = null;
+          });
+        }, 250)
+      : null;
     const cancel = () => {
       cancelled = true;
       terminate("SIGKILL");
@@ -1041,20 +1104,31 @@ export async function captureProcess(
     child.stdout.on("data", (chunk: Buffer) => {
       out.update(chunk);
       stdoutBytes += chunk.length;
-      if (stdoutBytes <= 1024 * 1024) stdout.push(chunk);
+      if (
+        outputLimit ? stdoutBytes + stderrBytes <= outputLimit.maxBytes : stdoutBytes <= 1024 * 1024
+      )
+        stdout.push(chunk);
       else truncated = true;
+      checkOutput();
     });
     child.stderr.on("data", (chunk: Buffer) => {
       err.update(chunk);
       stderrBytes += chunk.length;
-      if (stderrBytes <= 1024 * 1024) stderr.push(chunk);
+      if (
+        outputLimit ? stdoutBytes + stderrBytes <= outputLimit.maxBytes : stderrBytes <= 1024 * 1024
+      )
+        stderr.push(chunk);
       else truncated = true;
+      checkOutput();
     });
     child.on("error", () => {
       spawnFailed = true;
     });
-    child.on("close", (exitCode, signal) => {
+    child.on("close", async (exitCode, signal) => {
       clearTimeout(timer);
+      if (outputTimer) clearInterval(outputTimer);
+      if (pendingScan) await pendingScan;
+      await scanOutputFiles();
       process.off("SIGINT", cancel);
       process.off("SIGTERM", cancel);
       resolvePromise({
@@ -1072,6 +1146,7 @@ export async function captureProcess(
         truncated,
         timedOut,
         cancelled,
+        ...(outputLimit ? { outputLimitExceeded, observedOutputBytes: outputBytes() } : {}),
       });
     });
   });

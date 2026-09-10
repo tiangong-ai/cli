@@ -2,7 +2,7 @@ import { syntheticScientificPolicy } from "./helpers/scientific-policy.js";
 import { scientificDesignInput, passResearchDesignGate } from "./helpers/scientific-design.js";
 import { appendJournalEvent } from "../src/research/workspace/journal.js";
 import assert from "node:assert/strict";
-import { chmod, readFile, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { it } from "node:test";
 import { acquiredFixture, cli } from "./helpers/task-fixture.js";
@@ -65,6 +65,7 @@ it("separately authorizes a selected recipe and freezes only its predeclared sci
       scriptPath,
       `import {readFile,writeFile} from 'node:fs/promises';
 const bytes=await readFile(process.argv[2]);
+console.log(process.cwd().repeat(4));
 await new Promise(resolve=>setTimeout(resolve,2000));
 await writeFile(process.argv[3],JSON.stringify({schemaVersion:1,solverReached:true,feasible:true,metrics:{iterations:1,inputBytes:bytes.length,residual:0},statuses:{runStatus:'completed',modelStatus:'feasible'},conclusion:'Synthetic deterministic candidate only; no scientific qualification is claimed.'}));
 `,
@@ -106,6 +107,8 @@ await writeFile(process.argv[3],JSON.stringify({schemaVersion:1,solverReached:tr
         maxRunSeconds: 30,
         maxCostUsd: 1,
         maxRunCostUsd: 0.2,
+        maxOutputBytes: 1024,
+        maxTotalOutputBytes: 262144,
       },
       deniedEffects: ["network", "dependency-install", "holdout", "external-write"],
     };
@@ -741,6 +744,66 @@ await writeFile(process.argv[3],JSON.stringify({schemaVersion:1,solverReached:tr
       JSON.stringify({ ...targetAcceptance, nativeRunSha256: targetRun.record.recordSha256 }),
     );
     await must(await targetAccept());
+    await writeFile(
+      targetPromotionPath,
+      JSON.stringify({
+        ...promotionInput,
+        promotionId: "output-recertification",
+        requirementId: targetRow.id,
+        requirementSha256: targetRow.requirementSha256,
+        modelId: targetModel.id,
+      }),
+    );
+    const outputPlan = await must(
+      await command(["promotion", "plan"], ["--input", targetPromotionPath], targetId),
+    );
+    const outputApproval = await must(
+      await command(
+        ["promotion", "approve"],
+        [
+          "--input",
+          targetPromotionPath,
+          "--confirm",
+          outputPlan.planSha256,
+          "--authorization-source",
+          source,
+        ],
+        targetId,
+      ),
+    );
+    const longWorkingDirectory = join(fx.files, "long-working-directory-" + "x".repeat(180));
+    await mkdir(longWorkingDirectory);
+    await writeFile(
+      targetRunPath,
+      JSON.stringify({
+        ...certificationInput,
+        runId: "output-limited-certification",
+        workingDirectory: longWorkingDirectory,
+        requirementId: targetRow.id,
+        requirementSha256: targetRow.requirementSha256,
+        investigationPromotionSha256: outputApproval.recordSha256,
+      }),
+    );
+    const limitedCertificationResult = await cli([
+      "research",
+      "project",
+      "task",
+      "run",
+      "observe",
+      targetId,
+      "--input",
+      targetRunPath,
+      "--confirm-execution",
+      "--workspace",
+      fx.root,
+      "--json",
+    ]);
+    assert.notEqual(limitedCertificationResult.exitCode, 0);
+    const limitedCertification = JSON.parse(limitedCertificationResult.stdout);
+    assert.equal(limitedCertification.record.status, "output-limit-exceeded");
+    assert.equal(limitedCertification.record.investigationCertification.status, "failed");
+    assert.equal(limitedCertification.record.investigationCertification.outputLimitExceeded, true);
+    assert.ok(limitedCertification.record.investigationCertification.observedOutputBytes > 1024);
     const targetBundle = join(fx.files, "successor-audit");
     const targetManifest = await must(
       await cli([
@@ -779,8 +842,8 @@ await writeFile(process.argv[3],JSON.stringify({schemaVersion:1,solverReached:tr
       definitions: 1,
       attempts: 1,
       candidates: 1,
-      promotions: 1,
-      certifications: 1,
+      promotions: 2,
+      certifications: 2,
       closures: 1,
     });
     {

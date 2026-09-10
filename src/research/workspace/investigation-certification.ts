@@ -146,6 +146,9 @@ export async function prepareInvestigationCertification(
     throw failure("The approved recipe does not match its original observed candidate.");
   const recipe = plan.recipe;
   if (
+    !Number.isSafeInteger(plan.certification.maxOutputBytes) ||
+    plan.certification.maxOutputBytes < 1 ||
+    plan.certification.maxOutputBytes !== recipe.maxOutputBytes ||
     input.timeoutSeconds > plan.certification.maxRunSeconds ||
     input.runtime.kind !== recipe.runtime.kind ||
     binarySha256 !== recipe.runtime.binarySha256 ||
@@ -192,6 +195,9 @@ export interface InvestigationCertification {
   missingTelemetry: string[];
   actualCostUsd: null;
   accountedCostUpperBoundUsd: number;
+  maxOutputBytes: number;
+  observedOutputBytes: number;
+  outputLimitExceeded: boolean;
   isolation: { provider: string; policySha256: string };
   runtimeProbeIsolation: { provider: string; policySha256: string };
   runtimeProbe: Omit<ProcessObservation, "stdout" | "stderr">;
@@ -205,6 +211,7 @@ export async function certificationAssessment(
   runtimeProbe: ProcessObservation,
   isolation: InvestigationCertification["isolation"],
   runtimeProbeIsolation: InvestigationCertification["isolation"],
+  outputObservation: { observedOutputBytes: number; outputLimitExceeded: boolean },
 ): Promise<InvestigationCertification> {
   const plan = context.promotion.plan;
   const output = outputs.find(
@@ -240,6 +247,7 @@ export async function certificationAssessment(
     effectiveDesignSha256: context.effectiveDesignSha256,
     status:
       status === "succeeded" &&
+      !outputObservation.outputLimitExceeded &&
       diagnostic?.solverReached &&
       diagnostic.feasible &&
       !missingTelemetry.length
@@ -249,6 +257,8 @@ export async function certificationAssessment(
     missingTelemetry,
     actualCostUsd: null,
     accountedCostUpperBoundUsd: plan.certification.maxCostUsd,
+    maxOutputBytes: plan.certification.maxOutputBytes,
+    ...outputObservation,
     isolation,
     runtimeProbeIsolation,
     runtimeProbe: probe,

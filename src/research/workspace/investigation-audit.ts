@@ -226,7 +226,10 @@ export async function loadInvestigationAudit(
       !Number.isSafeInteger(plan.certification.maxRunSeconds) ||
       plan.certification.maxRunSeconds < 1 ||
       !Number.isFinite(plan.certification.maxCostUsd) ||
-      plan.certification.maxCostUsd < 0
+      plan.certification.maxCostUsd < 0 ||
+      !Number.isSafeInteger(plan.certification.maxOutputBytes) ||
+      plan.certification.maxOutputBytes < 1 ||
+      plan.certification.maxOutputBytes !== candidate.recipe.maxOutputBytes
     )
       throw invalid("Investigation promotion has no finite one-run certification envelope.");
     promotions.set(promotion.recordSha256, promotion);
@@ -292,6 +295,13 @@ export async function loadInvestigationAudit(
           ) ||
         canonicalJson(run.expectedOutputIds) !== canonicalJson(recipe.outputs.map((o) => o.id)) ||
         cert.actualCostUsd !== null ||
+        cert.maxOutputBytes !== promotion.plan.certification.maxOutputBytes ||
+        !Number.isSafeInteger(cert.observedOutputBytes) ||
+        cert.observedOutputBytes < 0 ||
+        typeof cert.outputLimitExceeded !== "boolean" ||
+        cert.observedOutputBytes !== run.process.observedOutputBytes ||
+        cert.outputLimitExceeded !== run.process.outputLimitExceeded ||
+        (!cert.outputLimitExceeded && cert.observedOutputBytes > cert.maxOutputBytes) ||
         cert.accountedCostUpperBoundUsd !== promotion.plan.certification.maxCostUsd ||
         !HASH.test(cert.effectiveDesignSha256) ||
         !["passed", "failed"].includes(cert.status)
@@ -322,6 +332,7 @@ export async function loadInvestigationAudit(
         : [];
       const expectedStatus =
         run.status === "succeeded" &&
+        !cert.outputLimitExceeded &&
         diagnostic?.solverReached &&
         diagnostic.feasible &&
         !missing.length

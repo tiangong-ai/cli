@@ -66,6 +66,8 @@ interface InvestigationInput {
     maxRunSeconds: number;
     maxCostUsd: number;
     maxRunCostUsd: number;
+    maxOutputBytes: number;
+    maxTotalOutputBytes: number;
   };
   deniedEffects: string[];
 }
@@ -206,13 +208,23 @@ const inputSchema = {
     limits: {
       type: "object",
       additionalProperties: false,
-      required: ["maxRuns", "maxWallSeconds", "maxRunSeconds", "maxCostUsd", "maxRunCostUsd"],
+      required: [
+        "maxRuns",
+        "maxWallSeconds",
+        "maxRunSeconds",
+        "maxCostUsd",
+        "maxRunCostUsd",
+        "maxOutputBytes",
+        "maxTotalOutputBytes",
+      ],
       properties: {
         maxRuns: { type: "integer", minimum: 1, maximum: 10000 },
         maxWallSeconds: { type: "integer", minimum: 1, maximum: 172800 },
         maxRunSeconds: { type: "integer", minimum: 1, maximum: 172800 },
         maxCostUsd: { type: "number", minimum: 0 },
         maxRunCostUsd: { type: "number", minimum: 0 },
+        maxOutputBytes: { type: "integer", minimum: 1, maximum: 536870912 },
+        maxTotalOutputBytes: { type: "integer", minimum: 1, maximum: Number.MAX_SAFE_INTEGER },
       },
     },
     deniedEffects: {
@@ -254,7 +266,8 @@ function parseInput(value: unknown): InvestigationInput {
   if (
     input.objective.trim().length < 8 ||
     input.limits.maxRunSeconds > input.limits.maxWallSeconds ||
-    input.limits.maxRunCostUsd > input.limits.maxCostUsd
+    input.limits.maxRunCostUsd > input.limits.maxCostUsd ||
+    input.limits.maxOutputBytes > input.limits.maxTotalOutputBytes
   )
     throw failure("The per-run limits must fit the finite investigation envelope.");
   for (const option of input.options)
@@ -789,7 +802,9 @@ export async function inspectInvestigation(root: string, projectId: string, id: 
   const exhausted =
     remaining.runs === 0 ||
     availableRunSeconds < 1 ||
-    remaining.costUpperBoundUsd + 1e-9 < definition.plan.limits.maxRunCostUsd;
+    remaining.costUpperBoundUsd + 1e-9 < definition.plan.limits.maxRunCostUsd ||
+    remaining.outputBytes < 1 ||
+    history.some((a) => a.record?.process.outputLimitExceeded);
   const unresolved = history.some((a) => !a.record);
   const allowedNextAction =
     authority.state !== "authoritative"

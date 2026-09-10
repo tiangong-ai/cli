@@ -80,6 +80,8 @@ await writeFile(process.argv[3],JSON.stringify({schemaVersion:1,solverReached:va
           maxRunSeconds: 30,
           maxCostUsd: 1,
           maxRunCostUsd: 0.2,
+          maxOutputBytes: 65536,
+          maxTotalOutputBytes: 262144,
         },
         deniedEffects: ["network", "dependency-install", "holdout", "external-write"],
       };
@@ -458,6 +460,122 @@ await writeFile(process.argv[3],JSON.stringify({schemaVersion:1,solverReached:va
       assert.notEqual(noNewRun.exitCode, 0);
       assert.match(noNewRun.stderr, /RESEARCH_INVESTIGATION_INCOMPLETE/);
       assert.equal(await readFile(workspacePaths(fx.root).journal, "utf8"), interruptedJournal);
+      for (const mode of ["stdout", "artifact"] as const) {
+        const overflowingScript = join(fx.files, `${mode}-overflow.mjs`);
+        await writeFile(
+          overflowingScript,
+          mode === "stdout"
+            ? "process.stdout.write('x'.repeat(8192)); await new Promise(resolve=>setTimeout(resolve,30000));"
+            : "import {writeFile} from 'node:fs/promises'; await writeFile(process.argv[3],'x'.repeat(8192)); await new Promise(resolve=>setTimeout(resolve,30000));",
+        );
+        const bounded = {
+          ...input,
+          investigationId: `${mode}-budget`,
+          programs: [{ ...input.programs[0]!, scriptPath: overflowingScript }],
+          limits: {
+            ...input.limits,
+            maxRunSeconds: 3,
+            maxOutputBytes: 1024,
+            maxTotalOutputBytes: 1024,
+          },
+        };
+        const boundedPath = join(fx.files, `${mode}-budget.json`);
+        await writeFile(boundedPath, JSON.stringify(bounded));
+        const boundedPlan = await command("plan", ["--input", boundedPath]);
+        assert.equal(boundedPlan.exitCode, 0, boundedPlan.stderr);
+        const boundedApproval = await command("approve", [
+          "--input",
+          boundedPath,
+          "--confirm",
+          JSON.parse(boundedPlan.stdout).planSha256,
+          "--authorization-source",
+          source,
+        ]);
+        assert.equal(boundedApproval.exitCode, 0, boundedApproval.stderr);
+        await writeFile(
+          boundedPath,
+          JSON.stringify({
+            schemaVersion: 1,
+            investigationId: bounded.investigationId,
+            attemptId: "over-limit",
+            programId: "solver-a",
+            hypothesis: "Enforce the approved byte envelope while the process is still running",
+            configuration: { variant: 3 },
+            nativeSessionId: null,
+            workingDirectory: fx.files,
+          }),
+        );
+        const limited = await command("attempt", ["--input", boundedPath]);
+        assert.equal(limited.exitCode, 0, limited.stderr);
+        const observed = JSON.parse(limited.stdout).record;
+        assert.equal(observed.outcome, "output-limit-exceeded");
+        assert.equal(observed.process.outputLimitExceeded, true);
+        assert.equal(
+          observed.process.timedOut,
+          false,
+          "The output guard must terminate before the ordinary timeout",
+        );
+        assert.ok(observed.process.observedOutputBytes >= 8192);
+        const budgetStatus = JSON.parse(
+          (await command("status", ["--investigation", bounded.investigationId])).stdout,
+        );
+        assert.equal(budgetStatus.remaining.outputBytes, 0);
+        const retryInput = JSON.parse(await readFile(boundedPath, "utf8"));
+        retryInput.attemptId = "unapproved-retry";
+        await writeFile(boundedPath, JSON.stringify(retryInput));
+        const stopped = await command("attempt", ["--input", boundedPath]);
+        assert.notEqual(stopped.exitCode, 0);
+      }
+      const aggregatePath = join(fx.files, "aggregate-output.json");
+      const aggregateInput = {
+        ...input,
+        investigationId: "aggregate-output",
+        limits: { ...input.limits, maxOutputBytes: 512, maxTotalOutputBytes: 600 },
+      };
+      await writeFile(aggregatePath, JSON.stringify(aggregateInput));
+      const aggregatePlan = await command("plan", ["--input", aggregatePath]);
+      assert.equal(aggregatePlan.exitCode, 0, aggregatePlan.stderr);
+      const aggregateApproval = await command("approve", [
+        "--input",
+        aggregatePath,
+        "--confirm",
+        JSON.parse(aggregatePlan.stdout).planSha256,
+        "--authorization-source",
+        source,
+      ]);
+      assert.equal(aggregateApproval.exitCode, 0, aggregateApproval.stderr);
+      let aggregateBytes = 0,
+        hitTotalLimit = false;
+      for (let i = 0; i < 5; i++) {
+        await writeFile(
+          aggregatePath,
+          JSON.stringify({
+            schemaVersion: 1,
+            investigationId: "aggregate-output",
+            attemptId: `aggregate-${i}`,
+            programId: "solver-a",
+            hypothesis: "Account cumulative output across individually bounded observations",
+            configuration: { variant: 3 },
+            nativeSessionId: null,
+            workingDirectory: fx.files,
+          }),
+        );
+        const result = await command("attempt", ["--input", aggregatePath]);
+        assert.equal(result.exitCode, 0, result.stderr);
+        const record = JSON.parse(result.stdout).record;
+        aggregateBytes += record.process.observedOutputBytes;
+        if (i === 0) assert.equal(record.process.outputLimitExceeded, false);
+        if (record.process.outputLimitExceeded) {
+          hitTotalLimit = true;
+          break;
+        }
+      }
+      assert.equal(hitTotalLimit, true);
+      assert.ok(aggregateBytes >= 600);
+      const aggregateStatus = JSON.parse(
+        (await command("status", ["--investigation", "aggregate-output"])).stdout,
+      );
+      assert.equal(aggregateStatus.remaining.outputBytes, 0);
     } finally {
       await fx.cleanup();
     }

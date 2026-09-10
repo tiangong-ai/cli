@@ -73,6 +73,7 @@ function recipeFor(definition: InvestigationDefinition, attempt: AttemptHistory[
     outputs: program.outputs,
     diagnosticOutputId: program.diagnosticOutputId,
     telemetry: program.telemetry,
+    maxOutputBytes: definition.plan.limits.maxOutputBytes,
   };
 }
 export interface InvestigationCandidate extends SelectionInput {

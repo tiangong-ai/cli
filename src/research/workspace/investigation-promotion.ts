@@ -292,6 +292,7 @@ export async function planInvestigationPromotion(root: string, projectId: string
       maxRuns: 1 as const,
       maxRunSeconds: input.maxRunSeconds,
       maxCostUsd: input.maxCostUsd,
+      maxOutputBytes: candidate.recipe.maxOutputBytes,
     },
     purpose: "authorize-freezing-and-fresh-certification" as const,
   };
