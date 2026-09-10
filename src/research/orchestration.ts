@@ -1,4 +1,8 @@
 import {
+  closeInvestigation,
+  investigationCloseInputSchema,
+} from "./workspace/investigation-close.js";
+import {
   planInvestigationPromotion,
   approveInvestigationPromotion,
   investigationPromotionInputSchema,
@@ -274,6 +278,7 @@ export function researchOrchestrationHelp(): string {
   tiangong-ai research project investigation select <project> --input <json-file> [--workspace <path>] [--json]
   tiangong-ai research project investigation promotion plan <project> --input <json-file> [--workspace <path>] [--json]
   tiangong-ai research project investigation promotion approve <project> --input <json-file> --confirm <plan-sha256> --authorization-source <text-file> [--workspace <path>] [--json]
+  tiangong-ai research project investigation close <project> --input <json-file> [--workspace <path>] [--json]
   tiangong-ai research project investigation status <project> --investigation <id> [--workspace <path>] [--json]
   tiangong-ai research scientific amendment status <project> [--workspace <path>] [--json]
   tiangong-ai research project task run observe <project> --input <json-file> --confirm-execution [--workspace <path>] [--json]
@@ -886,6 +891,8 @@ async function runSchema(argv: string[], io: CliIO): Promise<number> {
     schema = scientificDesignSchema();
   } else if (stage === "scientific-fulfillment") {
     schema = scientificFulfillmentSchema();
+  } else if (stage === "investigation-close") {
+    schema = investigationCloseInputSchema();
   } else if (stage === "investigation-promotion") {
     schema = investigationPromotionInputSchema();
   } else if (stage === "investigation-candidate") {
@@ -1198,6 +1205,7 @@ async function runProject(argv: string[], io: CliIO): Promise<number> {
         "status",
         "attempt",
         "select",
+        "close",
         "promotion-plan",
         "promotion-approve",
       ].includes(operation ?? "")
@@ -1246,23 +1254,25 @@ async function runProject(argv: string[], io: CliIO): Promise<number> {
             ? await observeInvestigationAttempt(root, projectId, value)
             : operation === "select"
               ? await selectInvestigationCandidate(root, projectId, value)
-              : operation === "promotion-plan"
-                ? await planInvestigationPromotion(root, projectId, value)
-                : operation === "promotion-approve"
-                  ? await approveInvestigationPromotion(
-                      root,
-                      projectId,
-                      value,
-                      strictString(args, "confirm"),
-                      strictString(args, "authorization-source"),
-                    )
-                  : await approveInvestigation(
-                      root,
-                      projectId,
-                      value,
-                      strictString(args, "confirm"),
-                      strictString(args, "authorization-source"),
-                    ),
+              : operation === "close"
+                ? await closeInvestigation(root, projectId, value)
+                : operation === "promotion-plan"
+                  ? await planInvestigationPromotion(root, projectId, value)
+                  : operation === "promotion-approve"
+                    ? await approveInvestigationPromotion(
+                        root,
+                        projectId,
+                        value,
+                        strictString(args, "confirm"),
+                        strictString(args, "authorization-source"),
+                      )
+                    : await approveInvestigation(
+                        root,
+                        projectId,
+                        value,
+                        strictString(args, "confirm"),
+                        strictString(args, "authorization-source"),
+                      ),
         args,
       );
     }

@@ -1,3 +1,4 @@
+import { loadInvestigationClosure } from "./investigation-close.js";
 import { relevantInvestigationEvents } from "./investigation-lineage.js";
 import { readFile } from "node:fs/promises";
 import { CliError } from "../../errors.js";
@@ -30,6 +31,7 @@ export interface InvestigationAuditSummary {
   candidates: number;
   promotions: number;
   certifications: number;
+  closures?: number;
 }
 const HASH = /^[a-f0-9]{64}$/;
 function invalid(message: string) {
@@ -60,7 +62,7 @@ export async function loadInvestigationAudit(
   const store: InvestigationReadStore = {
     readTask: async <T>(id: string, group: string, hash: string, field: string) => {
       if (
-        !/^investigation(?:s|-starts|-attempts|-candidates|-promotions)$/.test(group) ||
+        !/^investigation(?:s|-starts|-attempts|-candidates|-promotions|-closures)$/.test(group) ||
         !HASH.test(hash)
       )
         throw invalid("Investigation audit object address is invalid.");
@@ -155,6 +157,7 @@ export async function loadInvestigationAudit(
   const definitions = new Map<string, InvestigationDefinition>();
   const candidates = new Map<string, InvestigationCandidate>();
   let attemptCount = 0;
+  let closureCount = 0;
   for (const event of events) {
     if (event.type !== "investigation.approved") continue;
     const definition = await loadInvestigation(
@@ -175,6 +178,8 @@ export async function loadInvestigationAudit(
       store,
     );
     attemptCount += history.length;
+    if (await loadInvestigationClosure(bundle, event.scope, definition, history, events, store))
+      closureCount++;
     for (const attempt of history)
       for (const input of attempt.start.inputs) await store.verifyBlob(event.scope, input);
     for (const candidate of await loadInvestigationCandidates(
@@ -350,6 +355,7 @@ export async function loadInvestigationAudit(
       candidates: candidates.size,
       promotions: promotions.size,
       certifications,
+      ...(closureCount ? { closures: closureCount } : {}),
     }),
   };
 }

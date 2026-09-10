@@ -234,6 +234,18 @@ await writeFile(process.argv[3],JSON.stringify({schemaVersion:1,solverReached:tr
     assert.notEqual(rejectedOld.exitCode, 0);
     assert.match(rejectedOld.stderr, /RESEARCH_INVESTIGATION_CERTIFICATION_REQUIRED/);
     assert.equal(await readFile(workspacePaths(fx.root).journal, "utf8"), beforeOldAcceptance);
+    const closurePath = join(fx.files, "close-source-investigation.json");
+    await writeFile(
+      closurePath,
+      JSON.stringify({
+        schemaVersion: 1,
+        investigationId: envelope.investigationId,
+        reason:
+          "Stop exploratory attempts after selection; preserve the candidate for separate promotion.",
+      }),
+    );
+    const sourceClosure = await must(await command(["close"], ["--input", closurePath]));
+    assert.equal(sourceClosure.releasedCostUpperBoundUsd, 0.8);
     const beforeView = await loadScientificFulfillmentView(
       fx.root,
       await loadProject(fx.root, projectId),
@@ -532,6 +544,12 @@ await writeFile(process.argv[3],JSON.stringify({schemaVersion:1,solverReached:tr
     )!;
     assert.equal(allocation.status, "settled");
     assert.equal(allocation.settlementBasis, "allocated-upper-bound");
+    const completedInvestigation = await must(
+      await command(["status"], ["--investigation", envelope.investigationId]),
+    );
+    assert.equal(completedInvestigation.candidate.certification, "passed");
+    assert.equal(completedInvestigation.allowedNextAction, "independent-review");
+
     const certifiedJournal = await readFile(workspacePaths(fx.root).journal, "utf8");
     const replay = await must(await observe());
     assert.equal(replay.replayed, true);
@@ -763,6 +781,7 @@ await writeFile(process.argv[3],JSON.stringify({schemaVersion:1,solverReached:tr
       candidates: 1,
       promotions: 1,
       certifications: 1,
+      closures: 1,
     });
     {
       const targetManifestPath = join(targetBundle, "manifest.json");
@@ -799,6 +818,7 @@ await writeFile(process.argv[3],JSON.stringify({schemaVersion:1,solverReached:tr
       candidates: 1,
       promotions: 2,
       certifications: 1,
+      closures: 1,
     });
     {
       const statePath = join(bundle, "state/project.json"),

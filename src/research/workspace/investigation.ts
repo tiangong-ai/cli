@@ -6,7 +6,11 @@ import { realpath } from "node:fs/promises";
 import { CliError } from "../../errors.js";
 import { loadCurrentEvidenceSnapshot } from "./acquisition.js";
 import { appendJournalEvent, readVerifiedJournal } from "./journal.js";
-import { assertProjectAuthority, projectAuthorityIndex } from "./project-authority.js";
+import {
+  assertProjectAuthority,
+  projectAuthorityIndex,
+  projectAuthority,
+} from "./project-authority.js";
 import { loadProject } from "./projects.js";
 import { reserveProjectCost, remainingProjectCostUsd } from "./project-budget.js";
 import {
@@ -669,13 +673,19 @@ export async function approveInvestigation(
 export async function inspectInvestigation(root: string, projectId: string, id: string) {
   const project = await loadProject(root, projectId);
   const events = await readVerifiedJournal(workspacePaths(root).journal);
-  assertProjectAuthority(project, projectAuthorityIndex(events));
+  const authority = projectAuthority(project, projectAuthorityIndex(events));
+  if (authority.state === "invalid") throw conflict();
   const definition = await loadInvestigation(root, projectId, id, events);
-  const { investigationAttemptHistory, investigationRemaining } =
+  const { investigationAttemptHistory, investigationRemaining, assertInvestigationCurrent } =
     await import("./investigation-attempt.js");
+  const { loadInvestigationClosure } = await import("./investigation-close.js");
+  const { loadInvestigationCandidates } = await import("./investigation-candidate.js");
+  const { loadInvestigationPromotion } = await import("./investigation-promotion.js");
+  const { frozenPromotionView } = await import("./investigation-certification.js");
+  const { readNativeRun } = await import("./native-run.js");
+  const { investigationWallReservations } = await import("./investigation-resources.js");
   const history = await investigationAttemptHistory(root, projectId, definition, events);
   const remaining = investigationRemaining(definition, history);
-  const { loadInvestigationCandidates } = await import("./investigation-candidate.js");
   const candidates = await loadInvestigationCandidates(
     root,
     projectId,
@@ -684,30 +694,167 @@ export async function inspectInvestigation(root: string, projectId: string, id: 
     history,
   );
   const candidate = candidates.at(-1);
+  const closure = await loadInvestigationClosure(root, projectId, definition, history, events);
+  const promotions: Array<{
+    projectId: string;
+    recordSha256: string;
+    runId: string | null;
+    runSha256: string | null;
+    certification: "not-started" | "incomplete" | "failed" | "passed";
+    scopeCurrent: boolean;
+    frozen: boolean;
+  }> = [];
+  for (const event of events) {
+    if (
+      event.type !== "investigation.promotion.approved" ||
+      event.payload.sourceProjectId !== projectId ||
+      event.payload.investigationId !== id
+    )
+      continue;
+    const promotion = await loadInvestigationPromotion(
+      root,
+      event.scope,
+      String(event.payload.recordSha256),
+      events,
+    );
+    if (promotion.plan.candidateSha256 !== candidate?.recordSha256) continue;
+    const started = events.find(
+      (e) =>
+        e.scope === event.scope &&
+        e.type === "project.task.run.started" &&
+        e.payload.investigationPromotionSha256 === promotion.recordSha256,
+    );
+    const completed = started
+      ? events.find(
+          (e) =>
+            e.scope === event.scope &&
+            e.type === "project.task.run.completed" &&
+            e.payload.runId === started.payload.runId,
+        )
+      : undefined;
+    const run = completed
+      ? await readNativeRun(root, event.scope, String(completed.payload.recordSha256), events)
+      : null;
+    let frozen = false,
+      scopeCurrent = false;
+    const target = event.scope === projectId ? project : await loadProject(root, event.scope);
+    try {
+      await frozenPromotionView(root, target, promotion, events);
+      frozen = true;
+      scopeCurrent =
+        projectAuthority(target, projectAuthorityIndex(events)).state === "authoritative";
+    } catch {
+      /* The verified historical approval remains visible even when its live scope moved. */
+    }
+    promotions.push({
+      projectId: event.scope,
+      recordSha256: promotion.recordSha256,
+      runId: started ? String(started.payload.runId) : null,
+      runSha256: run?.recordSha256 ?? null,
+      certification: run
+        ? (run.investigationCertification?.status ?? "failed")
+        : started
+          ? "incomplete"
+          : "not-started",
+      scopeCurrent,
+      frozen,
+    });
+  }
+  const passed = promotions.findLast((p) => p.certification === "passed" && p.scopeCurrent);
+  const pending = promotions.findLast((p) => p.certification === "incomplete");
+  const lastPromotion = promotions.at(-1);
+  const reservations = await investigationWallReservations(root, projectId, events);
+  const config = await loadWorkspaceConfig(root);
+  const availableRunSeconds = Math.max(
+    0,
+    Math.floor(
+      Math.min(
+        definition.plan.limits.maxRunSeconds,
+        remaining.wallSeconds,
+        config.budget.packageMaxWallSeconds.analyze,
+        config.budget.maxWallSeconds - project.usage.wallSeconds - reservations.wallSeconds,
+      ),
+    ),
+  );
+  let authorizationValid = false,
+    scopeReason: string | null = null;
+  if (!closure && authority.state === "authoritative") {
+    try {
+      await assertInvestigationCurrent(root, project, definition, events);
+      authorizationValid = true;
+    } catch (error) {
+      scopeReason = error instanceof CliError ? error.code : "RESEARCH_INVESTIGATION_UNAVAILABLE";
+    }
+  }
+  const exhausted =
+    remaining.runs === 0 ||
+    availableRunSeconds < 1 ||
+    remaining.costUpperBoundUsd + 1e-9 < definition.plan.limits.maxRunCostUsd;
+  const unresolved = history.some((a) => !a.record);
+  const allowedNextAction =
+    authority.state !== "authoritative"
+      ? "inspect-authoritative-project"
+      : unresolved
+        ? "inspect-unresolved-attempt"
+        : pending
+          ? "inspect-unresolved-certification"
+          : passed
+            ? project.packages.find((p) => p.stage === "review")?.status === "complete"
+              ? "inspect-task-acceptance"
+              : "independent-review"
+            : lastPromotion?.certification === "failed"
+              ? "new-promotion-approval"
+              : lastPromotion?.certification === "not-started"
+                ? lastPromotion.frozen
+                  ? "certification"
+                  : "scientific-fulfillment"
+                : candidate
+                  ? "promotion-approval"
+                  : closure
+                    ? "new-investigation-approval"
+                    : !authorizationValid
+                      ? "new-investigation-approval"
+                      : exhausted
+                        ? "close-investigation"
+                        : "attempt";
   return {
     projectId,
     investigationId: id,
     definitionSha256: definition.recordSha256,
-    status: history.some((a) => !a.record)
-      ? "incomplete"
-      : candidate
-        ? "candidate-ready"
-        : remaining.runs === 0 ||
-            remaining.wallSeconds < 1 ||
-            remaining.costUpperBoundUsd + 1e-9 < definition.plan.limits.maxRunCostUsd
-          ? "exhausted"
-          : history.length
-            ? "investigating"
-            : "authorized",
+    authority,
+    status: closure
+      ? "closed"
+      : unresolved
+        ? "incomplete"
+        : candidate
+          ? "candidate-ready"
+          : exhausted
+            ? "exhausted"
+            : history.length
+              ? "investigating"
+              : "authorized",
     remaining,
+    availableRunSeconds: authorizationValid && !closure ? availableRunSeconds : 0,
+    projectWallReservations: reservations,
+    authorizationValid,
+    scopeReason,
+    allowedNextAction,
     candidate: candidate
       ? {
           recordSha256: candidate.recordSha256,
           attemptSha256: candidate.attemptSha256,
           recipeSha256: candidate.recipeSha256,
-          certification: "not-certified",
+          certification: passed
+            ? "passed"
+            : pending
+              ? "incomplete"
+              : lastPromotion?.certification === "failed"
+                ? "failed"
+                : "not-certified",
         }
       : null,
+    promotions,
+    closure,
     actualCostUsd: null,
     attempts: history.map((a) => ({
       attemptId: a.start.attemptId,
@@ -716,8 +863,11 @@ export async function inspectInvestigation(root: string, projectId: string, id: 
       outcome: a.record?.outcome ?? "incomplete",
       hypothesis: a.start.hypothesis,
       configuration: a.start.configuration,
+      parentAttemptSha256: a.start.parentAttemptSha256,
+      changes: a.start.changes,
+      conclusion: a.record?.diagnostic?.conclusion ?? a.record?.outcome ?? "unresolved",
     })),
-    executionBoundary: "required-before-observation",
+    executionBoundary: "calculation-sandbox-required",
     purpose: definition.plan.purpose,
   };
 }

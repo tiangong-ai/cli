@@ -1,3 +1,4 @@
+import { loadInvestigationClosure } from "./investigation-close.js";
 import { join } from "node:path";
 import { loadInvestigation } from "./investigation.js";
 import { investigationAttemptHistory } from "./investigation-attempt.js";
@@ -69,6 +70,15 @@ export async function stageInvestigationSources(
     const blobs = new Map<string, OutputRecord>();
     const collect = (object: OutputRecord) => blobs.set(object.path, object);
     await stageRecord("investigations", definition.recordSha256);
+    const closure = await loadInvestigationClosure(
+      root,
+      source.projectId,
+      definition,
+      attempts,
+      events,
+      store,
+    );
+    if (closure) await stageRecord("investigation-closures", closure.recordSha256);
     collect(definition.scopeAuthorization.source);
     for (const program of definition.programs) {
       collect(program.script);

@@ -55,6 +55,7 @@ interface AttemptInput {
   configuration: Record<string, string | number>;
   nativeSessionId: string | null;
   workingDirectory: string;
+  parentAttemptId?: string;
 }
 const inputSchema = {
   type: "object",
@@ -73,6 +74,7 @@ const inputSchema = {
     schemaVersion: { const: 1 },
     investigationId: idSchema,
     attemptId: idSchema,
+    parentAttemptId: idSchema,
     programId: idSchema,
     hypothesis: { type: "string", minLength: 8, maxLength: 4000 },
     configuration: {
@@ -104,6 +106,8 @@ interface AttemptStart {
   programId: string;
   hypothesis: string;
   configuration: Record<string, string | number>;
+  parentAttemptSha256: string | null;
+  changes: InvestigationChanges;
   nativePacketSha256: string | null;
   inputs: Array<OutputRecord & { id: string; artifactId: string }>;
   timeoutSeconds: number;
@@ -141,6 +145,8 @@ export interface InvestigationAttempt {
   configuration: Record<string, string | number>;
   hypothesis: string;
   purpose: "diagnostic-candidate-only";
+  parentAttemptSha256: string | null;
+  changes: InvestigationChanges;
   outcome: (typeof outcomes)[number];
   diagnostic: Diagnostic | null;
   diagnosticTrust: "program-reported";
@@ -154,6 +160,54 @@ export interface InvestigationAttempt {
   logs: { stdout: OutputRecord; stderr: OutputRecord };
   outputs: Array<OutputRecord & { id: string; mediaType: string }>;
   recordSha256: string;
+}
+export interface InvestigationChanges {
+  program: { before: string | null; after: string };
+  configuration: Array<{ id: string; before: string | number | null; after: string | number }>;
+}
+function attemptChanges(
+  programId: string,
+  configuration: Record<string, string | number>,
+  parent: InvestigationAttempt | null,
+): InvestigationChanges {
+  return {
+    program: { before: parent?.programId ?? null, after: programId },
+    configuration: Object.keys(configuration)
+      .sort()
+      .filter((id) => !parent || parent.configuration[id] !== configuration[id])
+      .map((id) => ({ id, before: parent?.configuration[id] ?? null, after: configuration[id]! })),
+  };
+}
+function configuredProgram(
+  definition: InvestigationDefinition,
+  programId: string,
+  configuration: Record<string, string | number>,
+) {
+  const program = definition.plan.programs.find((p) => p.id === programId);
+  if (
+    !program ||
+    !isObject(configuration) ||
+    Object.keys(configuration).sort().join("\0") !==
+      definition.plan.options
+        .map((o) => o.id)
+        .sort()
+        .join("\0")
+  )
+    throw invalid("Attempt does not match approved program/options.");
+  for (const option of definition.plan.options) {
+    const setting = configuration[option.id];
+    if (
+      option.kind === "enum"
+        ? typeof setting !== "string" || !option.values.includes(setting)
+        : typeof setting !== "number" ||
+          !Number.isFinite(setting) ||
+          setting < option.minimum ||
+          setting > option.maximum ||
+          (option.kind === "integer" && !Number.isSafeInteger(setting))
+    )
+      throw invalid("Attempt option is outside the approved numerical scope.");
+  }
+  return program;
 }
 function matching(events: JournalEvent[], projectId: string, id: string, type: string) {
   return events.filter(
@@ -208,11 +262,27 @@ export async function investigationAttemptHistory(
   );
   const attempts: Array<{ start: AttemptStart; record: InvestigationAttempt | null }> = [];
   const seen = new Set<string>();
+  const previous = new Map<string, InvestigationAttempt>();
   for (const event of starts) {
     const start = await readStart(root, projectId, event, store);
     if (seen.has(start.attemptId) || start.definitionSha256 !== definition.recordSha256)
       throw invalid("Investigation attempt identity is duplicated or mixed.");
     seen.add(start.attemptId);
+    configuredProgram(definition, start.programId, start.configuration);
+    const parent =
+      start.parentAttemptSha256 === null ? null : previous.get(start.parentAttemptSha256);
+    if (
+      parent === undefined ||
+      canonicalJson(start.changes) !==
+        canonicalJson(attemptChanges(start.programId, start.configuration, parent)) ||
+      canonicalJson(
+        start.inputs.map((i) => ({ id: i.id, artifactId: i.artifactId, sha256: i.sha256 })),
+      ) !== canonicalJson(definition.plan.canonicalInputs) ||
+      start.maxCostUsd !== definition.plan.limits.maxRunCostUsd ||
+      start.timeoutSeconds > definition.plan.limits.maxRunSeconds
+    )
+      throw invalid("Attempt start differs from its approved inputs, configuration or parent.");
+    for (const input of start.inputs) await store.verifyBlob(projectId, input);
     const matches = completed.filter((e) => e.payload.attemptId === start.attemptId);
     if (matches.length > 1) throw invalid("Investigation has duplicate committed results.");
     const done = matches[0];
@@ -235,6 +305,11 @@ export async function investigationAttemptHistory(
         !outcomes.includes(record.outcome) ||
         !Number.isFinite(record.process.wallSeconds) ||
         record.process.wallSeconds < 0 ||
+        record.programId !== start.programId ||
+        canonicalJson(record.configuration) !== canonicalJson(start.configuration) ||
+        record.hypothesis !== start.hypothesis ||
+        record.parentAttemptSha256 !== start.parentAttemptSha256 ||
+        canonicalJson(record.changes) !== canonicalJson(start.changes) ||
         record.actualCostUsd !== null ||
         record.accountedCostUpperBoundUsd !== start.maxCostUsd
       )
@@ -245,6 +320,7 @@ export async function investigationAttemptHistory(
         await store.verifyBlob(projectId, object);
       }
     }
+    if (record) previous.set(record.recordSha256, record);
     attempts.push({ start, record });
   }
   if (completed.some((e) => !seen.has(String(e.payload.attemptId))))
@@ -278,6 +354,18 @@ export async function assertInvestigationCurrent(
   events: JournalEvent[],
 ) {
   assertProjectAuthority(project, projectAuthorityIndex(events));
+  if (
+    events.some(
+      (e) =>
+        e.scope === project.id &&
+        e.type === "investigation.closed" &&
+        e.payload.investigationId === definition.investigationId,
+    )
+  )
+    throw invalid(
+      "This investigation is closed. Preserve its history and approve a new envelope for new work.",
+      "RESEARCH_INVESTIGATION_CLOSED",
+    );
   const plan = definition.plan;
   const task = await loadProjectTask(root, project.id, events);
   if (
@@ -395,31 +483,16 @@ async function observeInvestigationAttemptInternal(
           "RESEARCH_INVESTIGATION_INCOMPLETE",
         );
       const plan = definition.plan;
-      const program = plan.programs.find((p) => p.id === input.programId);
+      const program = configuredProgram(definition, input.programId, input.configuration);
       const programObjects = definition.programs.find((p) => p.id === input.programId);
-      if (
-        !program ||
-        !programObjects ||
-        Object.keys(input.configuration).sort().join("\0") !==
-          plan.options
-            .map((o) => o.id)
-            .sort()
-            .join("\0")
-      )
-        throw invalid("Attempt does not match approved program/options.");
-      for (const option of plan.options) {
-        const setting = input.configuration[option.id];
-        if (
-          option.kind === "enum"
-            ? typeof setting !== "string" || !option.values.includes(setting)
-            : typeof setting !== "number" ||
-              !Number.isFinite(setting) ||
-              setting < option.minimum ||
-              setting > option.maximum ||
-              (option.kind === "integer" && !Number.isSafeInteger(setting))
-        )
-          throw invalid("Attempt option is outside the approved numerical scope.");
-      }
+      if (!programObjects) throw invalid("Approved program objects are missing.");
+      const parent = input.parentAttemptId
+        ? history.find((a) => a.start.attemptId === input.parentAttemptId)?.record
+        : (history.at(-1)?.record ?? null);
+      if (parent === undefined)
+        throw invalid("The requested parent must be a committed attempt in this investigation.");
+      const parentAttemptSha256 = parent?.recordSha256 ?? null;
+      const changes = attemptChanges(input.programId, input.configuration, parent);
       const remaining = investigationRemaining(definition, history);
       const config = await loadWorkspaceConfig(root);
       const { wallSeconds: reservedWall } = await investigationWallReservations(
@@ -547,6 +620,8 @@ async function observeInvestigationAttemptInternal(
         programId: input.programId,
         hypothesis: input.hypothesis,
         configuration: input.configuration,
+        parentAttemptSha256,
+        changes,
         nativePacketSha256,
         inputs,
         timeoutSeconds,
@@ -732,6 +807,8 @@ async function observeInvestigationAttemptInternal(
       configuration: input.configuration,
       hypothesis: input.hypothesis,
       purpose: "diagnostic-candidate-only" as const,
+      parentAttemptSha256: start.parentAttemptSha256,
+      changes: start.changes,
       outcome,
       diagnostic,
       diagnosticTrust: "program-reported" as const,

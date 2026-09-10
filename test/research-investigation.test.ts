@@ -177,6 +177,7 @@ await writeFile(process.argv[3],JSON.stringify({schemaVersion:1,solverReached:va
         "feasible-candidate",
       ];
       let observedWall = 0;
+      let previousAttemptHash: string | null = null;
       for (const [variant, outcome] of outcomes.entries()) {
         const attemptPath = join(fx.files, `attempt-${variant}.json`);
         await writeFile(
@@ -199,6 +200,12 @@ await writeFile(process.argv[3],JSON.stringify({schemaVersion:1,solverReached:va
         assert.equal(result.record.purpose, "diagnostic-candidate-only");
         assert.equal(result.record.actualCostUsd, null);
         assert.equal(result.record.runtime.version, process.version);
+        assert.equal(result.record.parentAttemptSha256, previousAttemptHash);
+        assert.deepEqual(result.record.changes.configuration, [
+          { id: "variant", before: variant === 0 ? null : variant - 1, after: variant },
+        ]);
+        previousAttemptHash = result.record.recordSha256;
+
         assert.ok(result.record.process.wallSeconds >= 0);
         observedWall += result.record.process.wallSeconds;
         if (variant === 0) {
@@ -342,6 +349,40 @@ await writeFile(process.argv[3],JSON.stringify({schemaVersion:1,solverReached:va
         "statuses.modelStatus",
         "statuses.runStatus",
       ]);
+      const closePath = join(fx.files, "close-investigation.json");
+      await writeFile(
+        closePath,
+        JSON.stringify({
+          schemaVersion: 1,
+          investigationId: "diagnostic-contract",
+          reason: "Stop this diagnostic envelope after identifying the missing required telemetry.",
+        }),
+      );
+      const closed = await command("close", ["--input", closePath]);
+      assert.equal(closed.exitCode, 0, closed.stderr);
+      const closure = JSON.parse(closed.stdout);
+      assert.equal(closure.accountedCostUsd, 0.2);
+      assert.equal(closure.releasedCostUpperBoundUsd, 0.8);
+      const closeJournal = await readFile(workspacePaths(fx.root).journal, "utf8");
+      assert.deepEqual(
+        JSON.parse((await command("close", ["--input", closePath])).stdout),
+        closure,
+      );
+      assert.equal(await readFile(workspacePaths(fx.root).journal, "utf8"), closeJournal);
+      const closedStatus = JSON.parse(
+        (await command("status", ["--investigation", "diagnostic-contract"])).stdout,
+      );
+      assert.equal(closedStatus.status, "closed");
+      assert.equal(closedStatus.allowedNextAction, "new-investigation-approval");
+      const noRestart = await command("attempt", ["--input", diagnosticPath]);
+      assert.equal(noRestart.exitCode, 0, "A committed old attempt remains replayable after close");
+      const newAttempt = JSON.parse(await readFile(diagnosticPath, "utf8"));
+      newAttempt.attemptId = "after-close";
+      await writeFile(diagnosticPath, JSON.stringify(newAttempt));
+      const deniedRestart = await command("attempt", ["--input", diagnosticPath]);
+      assert.notEqual(deniedRestart.exitCode, 0);
+      assert.match(deniedRestart.stderr, /RESEARCH_INVESTIGATION_CLOSED/);
+
       const interruptedInput = { ...input, investigationId: "interrupted-diagnosis" };
       await writeFile(inputPath, JSON.stringify(interruptedInput));
       const interruptedPlan = JSON.parse((await command("plan", ["--input", inputPath])).stdout);
@@ -393,6 +434,18 @@ await writeFile(process.argv[3],JSON.stringify({schemaVersion:1,solverReached:va
       assert.equal(interruptedStatus.remaining.runs, 4);
       assert.equal(interruptedStatus.remaining.wallSeconds, 7170);
       assert.equal(interruptedStatus.attempts[0].recordSha256, null);
+      await writeFile(
+        closePath,
+        JSON.stringify({
+          schemaVersion: 1,
+          investigationId: "interrupted-diagnosis",
+          reason: "Attempt to release an unresolved process reservation must be rejected.",
+        }),
+      );
+      const unresolvedClose = await command("close", ["--input", closePath]);
+      assert.notEqual(unresolvedClose.exitCode, 0);
+      assert.match(unresolvedClose.stderr, /RESEARCH_INVESTIGATION_INCOMPLETE/);
+
       const interruptedJournal = await readFile(workspacePaths(fx.root).journal, "utf8");
       const noReplay = await command("attempt", ["--input", interruptedPath]);
       assert.notEqual(noReplay.exitCode, 0);
