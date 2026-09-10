@@ -1,3 +1,10 @@
+import {
+  cli,
+  contractInput,
+  fixture,
+  acquiredFixture,
+  submitFixtureStage,
+} from "./helpers/task-fixture.js";
 import assert from "node:assert/strict";
 import { chmod, cp, mkdtemp, readFile, readdir, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -10,7 +17,7 @@ import { runResearchCrashWorker } from "./helpers/research-crash-worker.js";
 import { runCli } from "../src/cli.js";
 import { openArtifactViews } from "../src/research/workspace/artifact-views.js";
 import { lockCapabilities } from "../src/research/workspace/capabilities.js";
-import { readVerifiedJournal } from "../src/research/workspace/journal.js";
+import { appendJournalEvent, readVerifiedJournal } from "../src/research/workspace/journal.js";
 import {
   addProjectInput,
   initializeProject,
@@ -43,89 +50,163 @@ import { passResearchDesignGate, scientificDesignInput } from "./helpers/scienti
 import type { ResearchPolicyBinding } from "../src/research/workspace/types.js";
 import { inspectScientificReviewStatus } from "../src/research/workspace/scientific-review.js";
 
-async function cli(argv: string[]) {
-  let stdout = "";
-  let stderr = "";
-  const exitCode = await runCli(argv, {
-    env: {},
-    stdout: {
-      write: (value: string) => {
-        stdout += value;
-      },
-    },
-    stderr: {
-      write: (value: string) => {
-        stderr += value;
-      },
-    },
-  });
-  return { exitCode, stdout, stderr };
-}
-
-function contractInput() {
-  return {
-    schemaVersion: 1,
-    originalRequest:
-      "Compare electricity and water evidence, retaining uncertainty and counterevidence.",
-    requirements: [
-      {
-        id: "electricity",
-        text: "Assess the available electricity evidence.",
-        acceptance: "Provide a traceable comparison and explicit uncertainty.",
-        checkKind: "evidence",
-        designClaimIds: [],
-        coverageDimensionIds: ["research-question"],
-      },
-      {
-        id: "water",
-        text: "Assess water evidence independently from electricity.",
-        acceptance: "Provide water evidence or identify the exact unresolved data requirement.",
-        checkKind: "evidence",
-        designClaimIds: [],
-        coverageDimensionIds: ["research-question"],
-      },
-    ],
-  };
-}
-
-async function fixture() {
-  const root = await mkdtemp(join(tmpdir(), "tiangong-task-contract-"));
-  const files = await mkdtemp(join(tmpdir(), "tiangong-task-contract-files-"));
-  await initializeResearchWorkspace(root, undefined);
-  await lockCapabilities(root);
-  await initializeProject(
-    root,
-    "task-project",
-    "Compare electricity and water evidence without presupposing a result.",
-  );
-  const task = async (args: string[], projectId = "task-project") =>
-    cli([
-      "research",
-      "project",
-      "task",
-      ...args.slice(0, 1),
-      projectId,
-      ...args.slice(1),
-      "--workspace",
-      root,
-      "--json",
-    ]);
-  const inputPath = join(files, "requirements.json");
-  await writeFile(inputPath, JSON.stringify(contractInput()));
-  return {
-    root,
-    files,
-    inputPath,
-    task,
-    cleanup: () =>
-      Promise.all([
-        rm(root, { recursive: true, force: true }),
-        rm(files, { recursive: true, force: true }),
-      ]),
-  };
-}
-
 describe("lightweight original task and authorized scope", () => {
+  it("ignores unrelated investigation IDs that merely equal the exported project name", async () => {
+    const fx = await acquiredFixture("computation");
+    try {
+      await initializeProject(
+        fx.root,
+        "unrelated-project",
+        "An unrelated corrupted investigation must not govern another project audit.",
+      );
+      await appendJournalEvent(
+        workspacePaths(fx.root).journal,
+        "investigation.approved",
+        "unrelated-project",
+        {
+          investigationId: "task-project",
+          recordSha256: "a".repeat(64),
+          planSha256: "b".repeat(64),
+        },
+      );
+      const bundle = join(fx.files, "scoped-audit");
+      const exported = await cli([
+        "research",
+        "project",
+        "audit",
+        "export",
+        "task-project",
+        "--output",
+        bundle,
+        "--workspace",
+        fx.root,
+        "--json",
+      ]);
+      assert.equal(exported.exitCode, 0, exported.stderr);
+      const verified = await cli([
+        "research",
+        "project",
+        "audit",
+        "verify",
+        "--bundle",
+        bundle,
+        "--json",
+      ]);
+      assert.equal(verified.exitCode, 0, verified.stderr);
+      assert.equal(JSON.parse(verified.stdout).task.investigations, undefined);
+    } finally {
+      await fx.cleanup();
+    }
+  });
+
+  for (const example of [
+    { label: "a promotion hash", value: { promotionSha256: "a".repeat(64) } },
+    { label: "no promotion hash", value: { status: "passed" } },
+  ]) {
+    it(`rejects grafted certification with ${example.label} in an ordinary portable run`, async () => {
+      const fx = await acquiredFixture("computation");
+      try {
+        const request = await nativeRunTestRequest(
+          fx,
+          "ghost-certification",
+          `import {writeFile} from 'node:fs/promises'; await writeFile(process.argv[3],JSON.stringify({value:1}));`,
+        );
+        const observed = await cli(request.argv);
+        assert.equal(observed.exitCode, 0, observed.stderr);
+        const run = JSON.parse(observed.stdout).record;
+        const bundle = join(fx.files, "ghost-certification-audit");
+        const exported = await cli([
+          "research",
+          "project",
+          "audit",
+          "export",
+          "task-project",
+          "--output",
+          bundle,
+          "--workspace",
+          fx.root,
+          "--json",
+        ]);
+        assert.equal(exported.exitCode, 0, exported.stderr);
+        const manifestPath = join(bundle, "manifest.json"),
+          proofPath = join(bundle, "state/journal-event-proofs.json");
+        const manifest = JSON.parse(await readFile(manifestPath, "utf8")),
+          proof = JSON.parse(await readFile(proofPath, "utf8"));
+        const { recordSha256: oldHash, ...core } = run;
+        core.investigationCertification = example.value;
+        const newHash = sha256Text(canonicalJson(core)),
+          changedRun = { ...core, recordSha256: newHash };
+        const oldPath = `project/task/runs/${oldHash}.json`,
+          newPath = `project/task/runs/${newHash}.json`;
+        const runText = JSON.stringify(changedRun, null, 2) + "\n";
+        await rm(join(bundle, oldPath));
+        await writeFile(join(bundle, newPath), runText);
+        const entry = manifest.files.find((f: { path: string }) => f.path === oldPath);
+        Object.assign(entry, {
+          path: newPath,
+          sha256: sha256Text(runText),
+          bytes: Buffer.byteLength(runText),
+        });
+        const completed = proof.events.find(
+          (e: { type: string; payload: { recordSha256?: string } }) =>
+            e.type === "project.task.run.completed" && e.payload.recordSha256 === oldHash,
+        );
+        completed.payload.recordSha256 = newHash;
+        completed.sourcePayloadSha256 = sha256Text(canonicalJson(completed.payload));
+        completed.sourceEventHash = sha256Text(
+          canonicalJson({
+            schemaVersion: 1,
+            sequence: completed.sequence,
+            timestamp: completed.timestamp,
+            type: completed.type,
+            scope: completed.scope,
+            payload: completed.payload,
+            previousHash: completed.sourcePreviousHash,
+          }),
+        );
+        proof.workspaceJournalHead = completed.sourceEventHash;
+        manifest.sourceBindings.workspaceJournalHead = completed.sourceEventHash;
+        const proofText = JSON.stringify(proof, null, 2) + "\n";
+        await chmod(proofPath, 0o600);
+        await writeFile(proofPath, proofText);
+        const proofEntry = manifest.files.find(
+          (f: { path: string }) => f.path === "state/journal-event-proofs.json",
+        );
+        proofEntry.sha256 = sha256Text(proofText);
+        proofEntry.bytes = Buffer.byteLength(proofText);
+        manifest.files.sort((a: { path: string }, b: { path: string }) =>
+          a.path < b.path ? -1 : a.path > b.path ? 1 : 0,
+        );
+        const { manifestSha256: _old, ...manifestCore } = manifest;
+        await chmod(manifestPath, 0o600);
+        await writeFile(
+          manifestPath,
+          JSON.stringify(
+            { ...manifestCore, manifestSha256: sha256Text(canonicalJson(manifestCore)) },
+            null,
+            2,
+          ) + "\n",
+        );
+        const checked = await cli([
+          "research",
+          "project",
+          "audit",
+          "verify",
+          "--bundle",
+          bundle,
+          "--json",
+        ]);
+        assert.notEqual(
+          checked.exitCode,
+          0,
+          "Certification claims cannot be added without a matching authorized start",
+        );
+        assert.match(checked.stderr, /Native run.*committed start/);
+      } finally {
+        await fx.cleanup();
+      }
+    });
+  }
   it("binds acceptance to one observed native calculation and replays without running it again", async () => {
     const fx = await acquiredFixture("computation");
     try {
@@ -1607,106 +1688,6 @@ async function nativeRunTestRequest(
   };
 }
 
-async function acquiredFixture(
-  checkKind: "evidence" | "computation" = "evidence",
-  inputPaddingBytes = 0,
-) {
-  const fx = await fixture();
-  const declaration = contractInput();
-  declaration.requirements[0]!.checkKind = checkKind;
-  await writeFile(fx.inputPath, JSON.stringify(declaration));
-  const defined = await fx.task(["define", "--input", fx.inputPath]);
-  assert.equal(defined.exitCode, 0, defined.stderr);
-  const inputPath = join(fx.files, "evidence.txt");
-  await writeFile(
-    inputPath,
-    "Synthetic electricity and water comparison: no measured difference in this fixture.\n" +
-      "non-embedded-input-padding\n".repeat(Math.ceil(inputPaddingBytes / 27)),
-  );
-  await addProjectInput(fx.root, "task-project", inputPath, "primary");
-  const discover = await prepareNativeResearchStage({
-    root: fx.root,
-    projectId: "task-project",
-    stage: "discover",
-    hostAgent: "codex",
-  });
-  const [candidate] = await listEvidenceCandidates(fx.root, "task-project");
-  assert.ok(candidate);
-  await recordDiscoveryAssessmentBatch({
-    root: fx.root,
-    projectId: "task-project",
-    value: {
-      schemaVersion: 1,
-      assessments: [
-        {
-          decision: "admit",
-          candidateId: candidate.id,
-          sourceId: "source-1",
-          sourceType: "primary",
-          relevance: "Direct fixture data.",
-          quality: { level: "primary", rationale: "Exact synthetic input." },
-          applicability: "Fixture only.",
-          coverageDimensions: ["research-question"],
-          limitations: [],
-        },
-      ],
-    },
-  });
-  await submitFixtureStage(fx, discover, {
-    schemaVersion: 2,
-    limitations: [],
-    dimensionJudgments: [{ id: "research-question", status: "covered" }],
-    gaps: [],
-  });
-  const acquire = await prepareNativeResearchStage({
-    root: fx.root,
-    projectId: "task-project",
-    stage: "acquire",
-    hostAgent: "codex",
-  });
-  await submitFixtureStage(fx, acquire, {
-    schemaVersion: 1,
-    decisions: [
-      {
-        sourceId: "source-1",
-        candidateId: candidate.id,
-        artifactIds: [],
-        status: "accepted",
-        rationale: "Exact readable input.",
-        limitations: [],
-      },
-    ],
-    limitations: [],
-    gaps: [],
-  });
-  const snapshot = await loadCurrentEvidenceSnapshot(fx.root, "task-project");
-  const artifact = snapshot.artifacts[0]!;
-  const atom = await registerEvidenceAtom({
-    root: fx.root,
-    projectId: "task-project",
-    value: {
-      schemaVersion: 1,
-      atomId: "task-fixture-atom",
-      sourceId: "source-1",
-      candidateId: candidate.id,
-      artifactId: artifact.artifactId,
-      locator: { kind: "line-range", startLine: 1, endLine: 1 },
-      statement: "The fixture records a null comparison.",
-      evidenceRoleIds: [],
-      coverageDimensionIds: ["research-question"],
-      evidenceFunction: "support",
-      scope: "Deterministic protocol fixture only.",
-      limitations: [],
-    },
-  });
-  await freezeEvidenceContentSnapshot(fx.root, "task-project");
-  const rows = JSON.parse((await fx.task(["status"])).stdout).currentScope.requirements as Array<{
-    id: string;
-    requirementSha256: string;
-  }>;
-  return { ...fx, artifact, atom, rows };
-}
-
 function acceptanceInput(
   row: { id: string; requirementSha256: string },
   atomId: string,
@@ -1746,22 +1727,6 @@ async function recordAcceptance(fx: Awaited<ReturnType<typeof fixture>>, value: 
     fx.root,
     "--json",
   ]);
-}
-
-async function submitFixtureStage(
-  fx: Awaited<ReturnType<typeof fixture>>,
-  packet: Awaited<ReturnType<typeof prepareNativeResearchStage>>,
-  value: object,
-) {
-  const outputPath = join(fx.files, `${packet.stage}.json`);
-  await writeFile(outputPath, JSON.stringify(value));
-  return submitNativeResearchStage({
-    root: fx.root,
-    projectId: "task-project",
-    sessionId: packet.sessionId,
-    outputPath,
-    confirmedModel: packet.expectedModel,
-  });
 }
 
 async function finishProducer(fx: Awaited<ReturnType<typeof acquiredFixture>>) {

@@ -17,8 +17,8 @@ checkPaths:
   - .docpact/config.yaml
   - docs/agents/**
   - src/**
-lastReviewedAt: 2026-09-10
-lastReviewedCommit: 8fa13b4e4428d7b8d75ea3f193998cb789daff3a
+lastReviewedAt: 2026-09-11
+lastReviewedCommit: 29a8ed0
 ---
 
 # Tiangong AI CLI Contract
@@ -64,6 +64,15 @@ This repository owns the Tiangong AI command-line interface.
 - `tiangong-ai research run`
 - `tiangong-ai research search`
 - `tiangong-ai education search`
+
+Bounded computational investigations share an exact operator-approved envelope
+across immutable native attempts. The current host owns hypotheses and candidate
+selection; the CLI owns scope/resource admission, observation, closure and audit.
+A selected candidate requires separate promotion, existing scientific fulfillment
+or successor approval, and a fresh certification before task-check intake. Existing
+independent review remains required. Calculation output bounds include observed
+streams and declared-file peaks; they do not establish a scratch-filesystem quota,
+hermetic dependencies or scientific correctness.
 
 The built-in atomic data catalog currently contains 20 independently
 discoverable capabilities, 15 available and 5 suspended, for environmental,

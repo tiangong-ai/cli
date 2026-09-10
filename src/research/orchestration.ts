@@ -1,4 +1,27 @@
 import {
+  closeInvestigation,
+  investigationCloseInputSchema,
+} from "./workspace/investigation-close.js";
+import {
+  planInvestigationPromotion,
+  approveInvestigationPromotion,
+  investigationPromotionInputSchema,
+} from "./workspace/investigation-promotion.js";
+import {
+  selectInvestigationCandidate,
+  investigationCandidateInputSchema,
+} from "./workspace/investigation-candidate.js";
+import {
+  observeInvestigationAttempt,
+  investigationAttemptInputSchema,
+} from "./workspace/investigation-attempt.js";
+import {
+  planInvestigation,
+  approveInvestigation,
+  inspectInvestigation,
+  investigationInputSchema,
+} from "./workspace/investigation.js";
+import {
   projectBudgetAmount,
   projectBudgetView,
   providerCostLimits,
@@ -249,6 +272,14 @@ export function researchOrchestrationHelp(): string {
   tiangong-ai research scientific fulfillment status <project> [--workspace <path>] [--json]
   tiangong-ai research scientific amendment plan <project> --input <json-file> [--workspace <path>] [--json]
   tiangong-ai research scientific amendment apply <project> --plan <json-file> --confirm <plan-sha256> --authorization-source <text-file> [--workspace <path>] [--json]
+  tiangong-ai research project investigation plan <project> --input <json-file> [--workspace <path>] [--json]
+  tiangong-ai research project investigation approve <project> --input <json-file> --confirm <plan-sha256> --authorization-source <text-file> [--workspace <path>] [--json]
+  tiangong-ai research project investigation attempt <project> --input <json-file> [--workspace <path>] [--json]
+  tiangong-ai research project investigation select <project> --input <json-file> [--workspace <path>] [--json]
+  tiangong-ai research project investigation promotion plan <project> --input <json-file> [--workspace <path>] [--json]
+  tiangong-ai research project investigation promotion approve <project> --input <json-file> --confirm <plan-sha256> --authorization-source <text-file> [--workspace <path>] [--json]
+  tiangong-ai research project investigation close <project> --input <json-file> [--workspace <path>] [--json]
+  tiangong-ai research project investigation status <project> --investigation <id> [--workspace <path>] [--json]
   tiangong-ai research scientific amendment status <project> [--workspace <path>] [--json]
   tiangong-ai research project task run observe <project> --input <json-file> --confirm-execution [--workspace <path>] [--json]
   tiangong-ai research project task run inspect <project> --run <run-id> [--workspace <path>] [--json]
@@ -860,6 +891,16 @@ async function runSchema(argv: string[], io: CliIO): Promise<number> {
     schema = scientificDesignSchema();
   } else if (stage === "scientific-fulfillment") {
     schema = scientificFulfillmentSchema();
+  } else if (stage === "investigation-close") {
+    schema = investigationCloseInputSchema();
+  } else if (stage === "investigation-promotion") {
+    schema = investigationPromotionInputSchema();
+  } else if (stage === "investigation-candidate") {
+    schema = investigationCandidateInputSchema();
+  } else if (stage === "investigation-attempt") {
+    schema = investigationAttemptInputSchema();
+  } else if (stage === "investigation") {
+    schema = investigationInputSchema();
   } else if (stage === "scientific-amendment") {
     schema = scientificAmendmentSchema();
   } else if (stage.startsWith("scientific-assessment-")) {
@@ -1152,6 +1193,91 @@ async function runCapability(argv: string[], io: CliIO): Promise<number> {
 async function runProject(argv: string[], io: CliIO): Promise<number> {
   const [action, ...rest] = argv;
   if (!action || action === "--help" || action === "-h") return writeHelp(io);
+  if (action === "investigation") {
+    const [firstOperation, ...firstArguments] = rest;
+    const operation =
+      firstOperation === "promotion" ? `promotion-${firstArguments[0] ?? ""}` : firstOperation;
+    const arguments_ = firstOperation === "promotion" ? firstArguments.slice(1) : firstArguments;
+    if (
+      ![
+        "plan",
+        "approve",
+        "status",
+        "attempt",
+        "select",
+        "close",
+        "promotion-plan",
+        "promotion-approve",
+      ].includes(operation ?? "")
+    )
+      throw unknownAction("research project investigation", operation ?? "");
+    const args = parseStrictArgs(
+      arguments_,
+      {
+        ...WORKSPACE_OPTIONS,
+        ...(operation === "status"
+          ? { investigation: "string" as const }
+          : { input: "string" as const }),
+        ...(["approve", "promotion-approve"].includes(operation!)
+          ? { confirm: "string" as const, "authorization-source": "string" as const }
+          : {}),
+      },
+      `research project investigation ${operation}`,
+    );
+    if (strictBoolean(args, "help")) return writeHelp(io);
+    const projectId = onePositional(
+      args.positionals,
+      `research project investigation ${operation}`,
+    );
+    const root = await workspaceFromArgs(args);
+    if (operation === "status") {
+      const id = strictString(args, "investigation");
+      if (!id)
+        throw new CliError("Investigation status requires --investigation.", {
+          code: "RESEARCH_INVESTIGATION_INVALID",
+          exitCode: 2,
+        });
+      writeJson(io, await inspectInvestigation(root, projectId, id), args);
+    } else {
+      const path = strictString(args, "input");
+      if (!path)
+        throw new CliError("Investigation plan/approve requires --input.", {
+          code: "RESEARCH_INVESTIGATION_INVALID",
+          exitCode: 2,
+        });
+      const value = await readBoundedJsonRecord(path, "--input", "RESEARCH_INVESTIGATION_INVALID");
+      writeJson(
+        io,
+        operation === "plan"
+          ? await planInvestigation(root, projectId, value)
+          : operation === "attempt"
+            ? await observeInvestigationAttempt(root, projectId, value)
+            : operation === "select"
+              ? await selectInvestigationCandidate(root, projectId, value)
+              : operation === "close"
+                ? await closeInvestigation(root, projectId, value)
+                : operation === "promotion-plan"
+                  ? await planInvestigationPromotion(root, projectId, value)
+                  : operation === "promotion-approve"
+                    ? await approveInvestigationPromotion(
+                        root,
+                        projectId,
+                        value,
+                        strictString(args, "confirm"),
+                        strictString(args, "authorization-source"),
+                      )
+                    : await approveInvestigation(
+                        root,
+                        projectId,
+                        value,
+                        strictString(args, "confirm"),
+                        strictString(args, "authorization-source"),
+                      ),
+        args,
+      );
+    }
+    return 0;
+  }
   if (action === "audit") {
     const [auditAction, ...auditRest] = rest;
     if (auditAction === "export") {

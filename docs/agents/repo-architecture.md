@@ -12,8 +12,8 @@ checkPaths:
   - README.md
   - src/**
   - bin/**
-lastReviewedAt: 2026-09-10
-lastReviewedCommit: 8fa13b4e4428d7b8d75ea3f193998cb789daff3a
+lastReviewedAt: 2026-09-11
+lastReviewedCommit: 29a8ed0
 ---
 
 # Repo Architecture
@@ -612,6 +612,37 @@ attestation. Failed/incomplete runs cannot grant positive acceptance; identical
 committed replay does not execute again. Packets and task audit retain the exact
 program, lock, inputs, outputs and event relationships. Unobserved computational
 reports remain `unverified-execution`; evidence/proof checks are not forced to run.
+
+`investigation*.ts` coordinates fixed-input diagnostic calculations using the
+existing native process observer, immutable task objects, verified journal and
+project budget/mutation recovery. Exact approval reserves an envelope; attempts
+record hypotheses, parents, changed options, declared telemetry and resource use.
+The shared resource view reserves unresolved investigation and certification wall
+time without a persistent cache. Closing preserves records and settles unused
+allocation; it does not certify a result.
+
+Selected recipes require separate promotion authority. Existing fulfillment or a
+reviewed successor freezes the scientific objects, then the native observer runs
+one exact certification with calculation confinement for both probe and program.
+Task intake/context requires that certification for investigated requirements and
+still delegates scientific acceptance to the existing review. Indexed portable
+read stores reuse investigation validators, while source closure follows explicit
+incoming promotion references rather than coincidental project-name strings.
+Output guards count streams and observed declared-file peaks, stop over-budget
+calculations, retain observed overshoot and reject their result artifacts. They
+are not a scratch-disk quota or dependency attestation. Bounded process capture
+uses `native-process-supervisor.ts`, a private one-shot Node helper with its own
+monotonic deadline and IPC-disconnect cleanup. Only the already admitted binary,
+arguments and filtered environment are forwarded. Program streams cannot forge
+its separate status channel, and stop is terminal before or after spawn. The
+helper has no project mutation or retry protocol; an observer lost before commit
+leaves a conservative unresolved reservation. Private local observer routing is
+written before execution starts; read-only inspection checks the actual process
+title and phase. A missing or mismatched process cannot release that reservation,
+prove completion or authorize another run. These routes are excluded from export.
+Scientific audit reuses the validated amendment/fulfillment projection at the
+promotion and certification-start event, so later freezes cannot certify earlier
+runs.
 
 `artifact-read-audit.ts` validates persisted read directories, intrinsic receipt
 identity, packet/delivery authority and exact byte selectors. It groups pages by

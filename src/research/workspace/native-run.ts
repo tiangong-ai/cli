@@ -1,5 +1,26 @@
+import {
+  investigationObserverRoute,
+  inspectInvestigationObserver,
+} from "./investigation-observer.js";
+import { investigationWallReservations } from "./investigation-resources.js";
+import { createCalculationSandboxInvocation } from "./executor.js";
+import {
+  assertInvestigationCertificationRequired,
+  prepareInvestigationCertification,
+  frozenPromotionView,
+  certificationAssessment,
+  type InvestigationCertification,
+} from "./investigation-certification.js";
+import {
+  beginProjectMutation,
+  prepareProjectMutation,
+  projectMutationBinding,
+  settleProjectMutation,
+} from "./project-mutations.js";
+import { settleProjectCost } from "./project-budget.js";
 import { Ajv2020 } from "ajv/dist/2020.js";
-import { spawn } from "node:child_process";
+import { fork, spawn } from "node:child_process";
+import { fileURLToPath } from "node:url";
 import { createHash } from "node:crypto";
 import { constants } from "node:fs";
 import { chmod, copyFile, lstat, mkdir, mkdtemp, readFile, realpath } from "node:fs/promises";
@@ -43,6 +64,7 @@ const statuses = [
   "succeeded",
   "failed",
   "timed-out",
+  "output-limit-exceeded",
   "cancelled",
   "invalid-output",
   "inputs-changed",
@@ -113,10 +135,11 @@ const inputSchema = {
     },
     arguments: { type: "array", maxItems: 256, items: { type: "string", maxLength: 4000 } },
     timeoutSeconds: { type: "integer", minimum: 1, maximum: 172800 },
+    investigationPromotionSha256: { type: "string", pattern: HASH.source },
   },
 };
 const validateInput = new Ajv2020({ strict: false, allErrors: true }).compile(inputSchema);
-interface NativeRunInput {
+export interface NativeRunInput {
   schemaVersion: 1;
   runId: string;
   requirementId: string;
@@ -130,6 +153,7 @@ interface NativeRunInput {
   outputs: Array<{ id: string; fileName: string; mediaType: string }>;
   arguments: string[];
   timeoutSeconds: number;
+  investigationPromotionSha256?: string;
 }
 type RunObject = OutputRecord & { id: string };
 export interface NativeRunRecord {
@@ -171,7 +195,10 @@ export interface NativeRunRecord {
     stdoutBytes: number;
     stderrBytes: number;
     diagnostic: string;
+    observedOutputBytes?: number;
+    outputLimitExceeded?: boolean;
   };
+  investigationCertification?: InvestigationCertification;
   recordSha256: string;
 }
 export function nativeRunInputSchema(): Record<string, unknown> {
@@ -266,12 +293,18 @@ export async function observeNativeRun(
           stagingDirectoryName: String(started.payload.stagingDirectoryName ?? ""),
         };
       }
+      await assertInvestigationCertificationRequired(root, projectId, input, events);
       await assertRunWindow(root, project, input);
       const config = await loadWorkspaceConfig(root);
+      const { wallSeconds: reservedWall } = await investigationWallReservations(
+        root,
+        projectId,
+        events,
+      );
       const timeoutSeconds = Math.min(
         input.timeoutSeconds,
         config.budget.packageMaxWallSeconds.analyze,
-        config.budget.maxWallSeconds - project.usage.wallSeconds,
+        config.budget.maxWallSeconds - project.usage.wallSeconds - reservedWall,
       );
       if (timeoutSeconds < input.timeoutSeconds)
         throw error(
@@ -288,23 +321,33 @@ export async function observeNativeRun(
       if (!(await lstat(runtimePath)).isFile())
         throw error("The selected interpreter is not a regular executable file.");
       const binarySha256 = await sha256File(runtimePath);
-      const version = await captureProcess(
-        input.runtime.path,
-        ["--version"],
-        working,
-        { PATH: dirname(input.runtime.path) },
-        5,
+      const certification = await prepareInvestigationCertification(
+        root,
+        project,
+        input,
+        binarySha256,
+        events,
       );
-      const reportedVersion = version.stdout.trim() || version.stderr.trim();
-      if (
-        version.exitCode !== 0 ||
-        !(input.runtime.kind === "node" ? /^v\d+\.\d+\.\d+$/u : /^Python \d+\.\d+\.\d+$/u).test(
-          reportedVersion,
-        )
-      )
-        throw error(
-          "The selected executable is not the declared ordinary Node/Python runtime. Agent CLI launchers are not supported.",
+      let reportedVersion = "";
+      if (!certification) {
+        const version = await captureProcess(
+          input.runtime.path,
+          ["--version"],
+          working,
+          { PATH: dirname(input.runtime.path) },
+          5,
         );
+        reportedVersion = version.stdout.trim() || version.stderr.trim();
+        if (
+          version.exitCode !== 0 ||
+          !(input.runtime.kind === "node" ? /^v\d+\.\d+\.\d+$/u : /^Python \d+\.\d+\.\d+$/u).test(
+            reportedVersion,
+          )
+        )
+          throw error(
+            "The selected executable is not the declared ordinary Node/Python runtime. Agent CLI launchers are not supported.",
+          );
+      }
       const acquisition = await loadCurrentEvidenceSnapshot(root, projectId);
       const selected = input.inputs.map((item) => {
         const artifact = acquisition.artifacts.find(
@@ -331,7 +374,14 @@ export async function observeNativeRun(
       const staging = await mkdtemp(join(working, `.tiangong-run-${input.runId}-`));
       const privateHome = join(staging, "home");
       await mkdir(privateHome, { mode: 0o700 });
-      const scriptFile = join(staging, basename(input.scriptPath));
+      const scriptFile = join(
+        staging,
+        certification
+          ? input.runtime.kind === "node"
+            ? "program.mjs"
+            : "program.py"
+          : basename(input.scriptPath),
+      );
       await copyExact(
         resolveContained(workspacePaths(root).control, script.objectLocator),
         scriptFile,
@@ -376,6 +426,31 @@ export async function observeNativeRun(
         projectId,
         resolveContained(workspacePaths(root).control, environment.objectLocator),
       );
+      if (
+        certification &&
+        (sourceScript.sha256 !== certification.promotion.plan.recipe.script.sha256 ||
+          environmentLock.sha256 !== certification.promotion.plan.recipe.environmentLock.sha256)
+      )
+        throw error(
+          "The staged certification bytes changed after promotion scope validation.",
+          "RESEARCH_INVESTIGATION_CERTIFICATION_INVALID",
+        );
+      const invocation = certification
+        ? await createCalculationSandboxInvocation({
+            binary: runtimePath,
+            args: [scriptFile, ...args],
+            capsuleRoot: staging,
+            workspaceRoot: root,
+          })
+        : null;
+      const versionInvocation = certification
+        ? await createCalculationSandboxInvocation({
+            binary: runtimePath,
+            args: ["--version"],
+            capsuleRoot: staging,
+            workspaceRoot: root,
+          })
+        : null;
       await appendJournalEvent(
         workspacePaths(root).journal,
         "project.task.run.started",
@@ -390,10 +465,19 @@ export async function observeNativeRun(
           runtimeBinarySha256: binarySha256,
           nativePacketSha256,
           stagingDirectoryName: basename(staging),
+          ...(certification
+            ? {
+                investigationPromotionSha256: certification.promotion.recordSha256,
+                certificationReservedWallSeconds: timeoutSeconds,
+              }
+            : {}),
         },
       );
       return {
         project,
+        certification,
+        invocation,
+        versionInvocation,
         runtimePath,
         binarySha256,
         reportedVersion,
@@ -415,22 +499,79 @@ export async function observeNativeRun(
         replayed: true,
         stagingDirectoryName: prepared.stagingDirectoryName,
       };
-    // No workspace lease is held during the native calculation.
-    const observed = await captureProcess(
-      input.runtime.path,
-      [prepared.scriptFile, ...prepared.args],
-      prepared.staging,
-      {
-        PATH: dirname(input.runtime.path),
-        HOME: prepared.privateHome,
-        TMPDIR: prepared.staging,
-        LANG: "C.UTF-8",
-        TZ: "UTC",
-        PYTHONDONTWRITEBYTECODE: "1",
-        PYTHONNOUSERSITE: "1",
-      },
-      prepared.timeoutSeconds,
+    // No workspace lease is held during either the certification runtime probe
+    // or the calculation. Its one-use start is durable before either process.
+    const environment = {
+      PATH: dirname(input.runtime.path),
+      HOME: prepared.privateHome,
+      TMPDIR: prepared.staging,
+      LANG: "C.UTF-8",
+      TZ: "UTC",
+      PYTHONDONTWRITEBYTECODE: "1",
+      PYTHONNOUSERSITE: "1",
+    };
+    const probe = prepared.versionInvocation
+      ? await captureProcess(
+          prepared.versionInvocation.binary,
+          prepared.versionInvocation.args,
+          prepared.staging,
+          environment,
+          Math.min(5, prepared.timeoutSeconds),
+          { maxBytes: prepared.certification!.promotion.plan.certification.maxOutputBytes },
+          investigationObserverRoute(
+            root,
+            projectId,
+            requestSha256,
+            "runtime-probe",
+            prepared.staging,
+          ),
+        )
+      : null;
+    const probeVersion = probe
+      ? probe.stdout.trim() || probe.stderr.trim()
+      : prepared.reportedVersion;
+    const runtimeValid =
+      !probe ||
+      (probe.exitCode === 0 &&
+        !probe.outputLimitExceeded &&
+        !probe.timedOut &&
+        !probe.cancelled &&
+        probeVersion === prepared.certification!.promotion.plan.recipe.runtime.version);
+    const availableSeconds = prepared.timeoutSeconds - (probe?.wallSeconds ?? 0);
+    const availableOutput = prepared.certification
+      ? prepared.certification.promotion.plan.certification.maxOutputBytes -
+        (probe?.observedOutputBytes ?? 0)
+      : Number.POSITIVE_INFINITY;
+    const observed =
+      probe && (!runtimeValid || availableSeconds <= 0 || availableOutput <= 0)
+        ? probe
+        : await captureProcess(
+            prepared.invocation?.binary ?? input.runtime.path,
+            prepared.invocation?.args ?? [prepared.scriptFile, ...prepared.args],
+            prepared.staging,
+            environment,
+            availableSeconds,
+            prepared.certification
+              ? { maxBytes: availableOutput, paths: [...prepared.outputPaths.values()] }
+              : undefined,
+            prepared.certification
+              ? investigationObserverRoute(
+                  root,
+                  projectId,
+                  requestSha256,
+                  "calculation",
+                  prepared.staging,
+                )
+              : undefined,
+          );
+    const wallSeconds =
+      observed.wallSeconds + (probe && observed !== probe ? probe.wallSeconds : 0);
+    const outputLimitExceeded = Boolean(
+      probe?.outputLimitExceeded || observed.outputLimitExceeded || availableOutput <= 0,
     );
+    const observedOutputBytes =
+      (observed.observedOutputBytes ?? 0) +
+      (probe && probe !== observed ? (probe.observedOutputBytes ?? 0) : 0);
     return await withWorkspaceLock(root, "research.task.run.commit", async () => {
       const project = await loadProject(root, projectId);
       let status: NativeRunRecord["status"] = observed.cancelled
@@ -440,8 +581,20 @@ export async function observeNativeRun(
           : observed.exitCode === 0
             ? "succeeded"
             : "failed";
+      if (!runtimeValid) status = "failed";
+      if (outputLimitExceeded) status = "output-limit-exceeded";
       try {
         await assertRunWindow(root, project, input);
+        if (
+          prepared.certification &&
+          (await frozenPromotionView(
+            root,
+            project,
+            prepared.certification.promotion,
+            await readVerifiedJournal(workspacePaths(root).journal),
+          )) !== prepared.certification.effectiveDesignSha256
+        )
+          status = "stale";
         if (
           (await nativePacketBinding(root, project, input.nativeSessionId)) !==
             prepared.nativePacketSha256 ||
@@ -473,12 +626,17 @@ export async function observeNativeRun(
       if (!stable || (await realpath(input.runtime.path)) !== prepared.runtimePath)
         status = "inputs-changed";
       const outputs: NativeRunRecord["outputs"] = [];
-      for (const output of input.outputs) {
+      for (const output of outputLimitExceeded ? [] : input.outputs) {
         const path = prepared.outputPaths.get(output.id)!;
         try {
           const info = await lstat(path);
-          if (!info.isFile() || info.isSymbolicLink())
-            throw error("Calculation output is not a regular file.");
+          if (
+            !info.isFile() ||
+            info.isSymbolicLink() ||
+            (prepared.certification &&
+              info.size > prepared.certification.promotion.plan.certification.maxOutputBytes)
+          )
+            throw error("Calculation output is not a regular file within its approved byte bound.");
           if (output.mediaType === "application/json") JSON.parse(await readFile(path, "utf8"));
           outputs.push({
             id: output.id,
@@ -489,6 +647,19 @@ export async function observeNativeRun(
           if (status === "succeeded") status = "invalid-output";
         }
       }
+      const investigationCertification = prepared.certification
+        ? await certificationAssessment(
+            root,
+            projectId,
+            prepared.certification,
+            status,
+            outputs,
+            probe!,
+            prepared.invocation!.isolation,
+            prepared.versionInvocation!.isolation,
+            { observedOutputBytes, outputLimitExceeded },
+          )
+        : undefined;
       const core = {
         schemaVersion: 1 as const,
         kind: "tiangong-native-run" as const,
@@ -506,7 +677,7 @@ export async function observeNativeRun(
         environmentVerification: "declared-lock-not-attested" as const,
         runtime: {
           kind: input.runtime.kind,
-          version: prepared.reportedVersion,
+          version: runtimeValid ? probeVersion : "unverified",
           binarySha256: prepared.binarySha256,
           platform: platform(),
           architecture: arch(),
@@ -520,24 +691,63 @@ export async function observeNativeRun(
         process: {
           exitCode: observed.exitCode,
           signal: observed.signal,
-          startedAt: observed.startedAt,
+          startedAt: probe?.startedAt ?? observed.startedAt,
           finishedAt: observed.finishedAt,
-          wallSeconds: observed.wallSeconds,
+          wallSeconds,
           stdoutSha256: observed.stdoutSha256,
           stderrSha256: observed.stderrSha256,
           stdoutBytes: observed.stdoutBytes,
           stderrBytes: observed.stderrBytes,
           diagnostic: safeDiagnostic(observed.stderr, observed.truncated),
+          ...(prepared.certification ? { observedOutputBytes, outputLimitExceeded } : {}),
         },
+        ...(investigationCertification ? { investigationCertification } : {}),
       };
       const record: NativeRunRecord = { ...core, recordSha256: sha256Text(canonicalJson(core)) };
       await writeTaskObject(root, projectId, "runs", record.recordSha256, record);
-      await appendJournalEvent(
-        workspacePaths(root).journal,
-        "project.task.run.completed",
-        projectId,
-        { runId: input.runId, requestSha256, recordSha256: record.recordSha256, status },
-      );
+      if (prepared.certification) {
+        let mutation = await beginProjectMutation(
+          root,
+          "investigation-certification",
+          project,
+          record.recordSha256,
+        );
+        try {
+          settleProjectCost(
+            project,
+            `investigation-certification-${prepared.certification.promotion.recordSha256}`,
+            prepared.certification.promotion.plan.certification.maxCostUsd,
+            "allocated-upper-bound",
+          );
+          project.usage.wallSeconds += wallSeconds;
+          project.updatedAt = new Date().toISOString();
+          mutation = await prepareProjectMutation(root, mutation, project);
+          await appendJournalEvent(
+            workspacePaths(root).journal,
+            "project.task.run.completed",
+            projectId,
+            {
+              projectId,
+              runId: input.runId,
+              requestSha256,
+              recordSha256: record.recordSha256,
+              status,
+              mutation: projectMutationBinding(mutation),
+            },
+          );
+          await settleProjectMutation(root, mutation);
+        } catch (error) {
+          await settleProjectMutation(root, mutation);
+          throw error;
+        }
+      } else {
+        await appendJournalEvent(
+          workspacePaths(root).journal,
+          "project.task.run.completed",
+          projectId,
+          { runId: input.runId, requestSha256, recordSha256: record.recordSha256, status },
+        );
+      }
       return { record, replayed: false, stagingDirectoryName: basename(prepared.staging) };
     });
   } catch (caught) {
@@ -569,7 +779,11 @@ async function assertRunWindow(root: string, project: ProjectState, input: Nativ
     );
   await nativePacketBinding(root, project, input.nativeSessionId);
 }
-async function nativePacketBinding(root: string, project: ProjectState, sessionId: string | null) {
+export async function nativePacketBinding(
+  root: string,
+  project: ProjectState,
+  sessionId: string | null,
+) {
   const active = await pathExists(
     join(workspacePaths(root).projects, project.id, "native/active.json"),
   );
@@ -590,7 +804,7 @@ async function exactDirectory(path: string) {
   // Canonicalize parent aliases such as macOS /var before containment checks.
   return realpath(path);
 }
-async function copyExact(source: string, target: string, sha256: string) {
+export async function copyExact(source: string, target: string, sha256: string) {
   const info = await lstat(source);
   if (!info.isFile() || info.isSymbolicLink() || (await sha256File(source)) !== sha256)
     throw error("A bound calculation file is missing, linked or changed.");
@@ -599,7 +813,7 @@ async function copyExact(source: string, target: string, sha256: string) {
   if ((await sha256File(target)) !== sha256)
     throw error("Calculation bytes changed during staging.");
 }
-async function storeRunObject(
+export async function storeRunObject(
   root: string,
   projectId: string,
   source: string,
@@ -644,20 +858,69 @@ export async function inspectNativeRun(root: string, projectId: string, runId: s
   const completed = completedRunEvent(events, projectId, runId);
   if (completed)
     return { record: await readNativeRun(root, projectId, String(completed.payload.recordSha256)) };
+  const started = events.find(
+    (event) =>
+      event.scope === projectId &&
+      event.type === "project.task.run.started" &&
+      event.payload.runId === runId,
+  );
   return {
     projectId,
     runId,
-    status: events.some(
-      (event) =>
-        event.scope === projectId &&
-        event.type === "project.task.run.started" &&
-        event.payload.runId === runId,
-    )
-      ? "incomplete"
-      : "not-found",
+    status: started ? "incomplete" : "not-found",
     automaticRetry: false,
+    ...(started?.payload.investigationPromotionSha256
+      ? {
+          observer: await inspectInvestigationObserver(
+            root,
+            projectId,
+            String(started.payload.requestSha256),
+          ),
+        }
+      : {}),
   };
 }
+type NativeRunEventBinding = Pick<JournalEvent, "scope" | "type" | "payload" | "sequence">;
+/** Shared by live inspection and portable audit, including ordinary histories
+ * that contain no investigation records to trigger a separate verifier. */
+export function assertNativeRunJournalBinding(
+  record: NativeRunRecord,
+  started: NativeRunEventBinding | undefined,
+  completed: NativeRunEventBinding | undefined,
+): void {
+  const certification = record.investigationCertification;
+  if (
+    !started ||
+    !completed ||
+    started.scope !== record.projectId ||
+    completed.scope !== record.projectId ||
+    started.type !== "project.task.run.started" ||
+    completed.type !== "project.task.run.completed" ||
+    started.payload.runId !== record.runId ||
+    completed.payload.runId !== record.runId ||
+    completed.payload.recordSha256 !== record.recordSha256 ||
+    completed.payload.requestSha256 !== record.requestSha256 ||
+    started.payload.requestSha256 !== record.requestSha256 ||
+    started.payload.requirementId !== record.requirementId ||
+    started.payload.requirementSha256 !== record.requirementSha256 ||
+    started.payload.scriptSha256 !== record.script.sha256 ||
+    started.payload.runtimeBinarySha256 !== record.runtime.binarySha256 ||
+    started.payload.environmentLockSha256 !== record.environmentLock.sha256 ||
+    started.payload.nativePacketSha256 !== record.nativePacketSha256 ||
+    (certification !== undefined &&
+      (!isObject(certification) ||
+        typeof certification.promotionSha256 !== "string" ||
+        !HASH.test(certification.promotionSha256))) ||
+    started.payload.investigationPromotionSha256 !== certification?.promotionSha256 ||
+    completed.payload.status !== record.status ||
+    started.sequence >= completed.sequence
+  )
+    throw error(
+      "Native run does not match its committed start and completion.",
+      "RESEARCH_NATIVE_RUN_BINDING_INVALID",
+    );
+}
+
 export async function readNativeRun(
   root: string,
   projectId: string,
@@ -676,21 +939,7 @@ export async function readNativeRun(
       event.type === "project.task.run.started" &&
       event.payload.runId === record.runId,
   );
-  if (
-    completed?.payload.recordSha256 !== hash ||
-    completed.payload.requestSha256 !== record.requestSha256 ||
-    started?.payload.requestSha256 !== record.requestSha256 ||
-    started.payload.scriptSha256 !== record.script.sha256 ||
-    started.payload.runtimeBinarySha256 !== record.runtime.binarySha256 ||
-    started.payload.environmentLockSha256 !== record.environmentLock.sha256 ||
-    started.payload.nativePacketSha256 !== record.nativePacketSha256 ||
-    completed.payload.status !== record.status ||
-    started.sequence >= completed.sequence
-  )
-    throw error(
-      "Native run does not match its committed start and completion.",
-      "RESEARCH_NATIVE_RUN_BINDING_INVALID",
-    );
+  assertNativeRunJournalBinding(record, started, completed);
   await taskDirectory(root, projectId, "run-objects", false);
   for (const object of [
     record.script,
@@ -783,13 +1032,17 @@ function safeDiagnostic(text: string, truncated: boolean) {
     .replace(/[A-Za-z]:\\[^\s"']+/gu, "[host-path]")
     .slice(0, 2000);
 }
-async function captureProcess(
+export async function captureProcess(
   binary: string,
   args: string[],
   cwd: string,
   env: NodeJS.ProcessEnv,
   timeoutSeconds: number,
+  outputLimit?: { maxBytes: number; paths?: string[] },
+  observation?: { title: string; onSpawn: (pid: number) => Promise<void> },
 ) {
+  if (outputLimit && (!Number.isSafeInteger(outputLimit.maxBytes) || outputLimit.maxBytes < 1))
+    throw error("Observed output budget must be a positive finite byte count.");
   const startedAt = new Date().toISOString();
   const start = process.hrtime.bigint();
   return new Promise<{
@@ -807,14 +1060,77 @@ async function captureProcess(
     truncated: boolean;
     timedOut: boolean;
     cancelled: boolean;
+    outputLimitExceeded?: boolean;
+    observedOutputBytes?: number;
   }>((resolvePromise) => {
-    const child = spawn(binary, args, {
-      cwd,
-      env,
-      shell: false,
-      detached: platform() !== "win32",
-      stdio: ["ignore", "pipe", "pipe"],
-    });
+    const supervised = Boolean(outputLimit);
+    const sourceRuntime = import.meta.url.endsWith(".ts");
+    const supervisorPath = fileURLToPath(
+      new URL(
+        sourceRuntime ? "./native-process-supervisor.ts" : "./native-process-supervisor.js",
+        import.meta.url,
+      ),
+    );
+    const child = supervised
+      ? fork(supervisorPath, [], {
+          cwd,
+          env,
+          detached: platform() !== "win32",
+          execArgv: [
+            ...(sourceRuntime ? ["--import", import.meta.resolve("tsx")] : []),
+            ...(observation ? [`--title=${observation.title}`] : []),
+          ],
+          stdio: ["ignore", "pipe", "pipe", "ipc"],
+        })
+      : spawn(binary, args, {
+          cwd,
+          env,
+          shell: false,
+          detached: platform() !== "win32",
+          stdio: ["ignore", "pipe", "pipe"],
+        });
+    let supervisorResult: {
+      exitCode: number | null;
+      signal: string | null;
+      timedOut: boolean;
+    } | null = null;
+    if (supervised) {
+      child.on("message", (value: unknown) => {
+        if (
+          isObject(value) &&
+          value.kind === "result" &&
+          (value.exitCode === null || Number.isInteger(value.exitCode)) &&
+          (value.signal === null || typeof value.signal === "string") &&
+          typeof value.timedOut === "boolean"
+        )
+          supervisorResult = {
+            exitCode: value.exitCode as number | null,
+            signal: value.signal as string | null,
+            timedOut: value.timedOut,
+          };
+      });
+      void (async () => {
+        if (observation) {
+          if (!child.pid) throw new Error("Observer was not spawned");
+          await observation.onSpawn(child.pid);
+        }
+        child.send(
+          {
+            kind: "start",
+            binary,
+            args,
+            env,
+            deadlineNs: (start + BigInt(Math.ceil(timeoutSeconds * 1e9))).toString(),
+          },
+          (error) => {
+            if (error) child.kill("SIGTERM");
+          },
+        );
+      })().catch(() => {
+        spawnFailed = true;
+        child.kill("SIGTERM");
+      });
+    }
     const out = createHash("sha256"),
       err = createHash("sha256");
     const stdout: Buffer[] = [],
@@ -826,14 +1142,57 @@ async function captureProcess(
       cancelled = false,
       spawnFailed = false;
     const terminate = (signal: NodeJS.Signals) => {
-      if (!child.pid || child.exitCode !== null || child.signalCode !== null) return;
+      if (!child.pid) return;
+      if (supervised) {
+        if (child.connected)
+          child.send(
+            { kind: "stop", reason: timedOut ? "timeout" : cancelled ? "cancel" : "output-limit" },
+            (error) => {
+              if (error && child.exitCode === null) child.kill("SIGTERM");
+            },
+          );
+        else if (child.exitCode === null) child.kill("SIGTERM");
+        return;
+      }
+      if (!outputLimit && (child.exitCode !== null || child.signalCode !== null)) return;
       try {
         if (platform() === "win32") child.kill(signal);
         else process.kill(-child.pid, signal);
       } catch {
-        child.kill(signal);
+        if (child.exitCode === null && child.signalCode === null) child.kill(signal);
       }
     };
+
+    let outputLimitExceeded = false;
+    const filePeaks = new Map<string, number>();
+    let pendingScan: Promise<void> | null = null;
+    const outputBytes = () =>
+      stdoutBytes + stderrBytes + [...filePeaks.values()].reduce((sum, n) => sum + n, 0);
+    const checkOutput = () => {
+      if (outputLimit && outputBytes() > outputLimit.maxBytes) {
+        outputLimitExceeded = true;
+        terminate("SIGKILL");
+      }
+    };
+    const scanOutputFiles = async () => {
+      if (!outputLimit) return;
+      await Promise.all(
+        (outputLimit.paths ?? []).map(async (path) => {
+          const info = await lstat(path).catch(() => null);
+          if (info?.isFile() && !info.isSymbolicLink())
+            filePeaks.set(path, Math.max(filePeaks.get(path) ?? 0, info.size));
+        }),
+      );
+      checkOutput();
+    };
+    const outputTimer = outputLimit?.paths?.length
+      ? setInterval(() => {
+          if (pendingScan) return;
+          pendingScan = scanOutputFiles().finally(() => {
+            pendingScan = null;
+          });
+        }, 250)
+      : null;
     const cancel = () => {
       cancelled = true;
       terminate("SIGKILL");
@@ -844,28 +1203,39 @@ async function captureProcess(
       timedOut = true;
       terminate("SIGKILL");
     }, timeoutSeconds * 1000);
-    child.stdout.on("data", (chunk: Buffer) => {
+    child.stdout!.on("data", (chunk: Buffer) => {
       out.update(chunk);
       stdoutBytes += chunk.length;
-      if (stdoutBytes <= 1024 * 1024) stdout.push(chunk);
+      if (
+        outputLimit ? stdoutBytes + stderrBytes <= outputLimit.maxBytes : stdoutBytes <= 1024 * 1024
+      )
+        stdout.push(chunk);
       else truncated = true;
+      checkOutput();
     });
-    child.stderr.on("data", (chunk: Buffer) => {
+    child.stderr!.on("data", (chunk: Buffer) => {
       err.update(chunk);
       stderrBytes += chunk.length;
-      if (stderrBytes <= 1024 * 1024) stderr.push(chunk);
+      if (
+        outputLimit ? stdoutBytes + stderrBytes <= outputLimit.maxBytes : stderrBytes <= 1024 * 1024
+      )
+        stderr.push(chunk);
       else truncated = true;
+      checkOutput();
     });
     child.on("error", () => {
       spawnFailed = true;
     });
-    child.on("close", (exitCode, signal) => {
+    child.on("close", async (exitCode, signal) => {
       clearTimeout(timer);
+      if (outputTimer) clearInterval(outputTimer);
+      if (pendingScan) await pendingScan;
+      await scanOutputFiles();
       process.off("SIGINT", cancel);
       process.off("SIGTERM", cancel);
       resolvePromise({
-        exitCode: spawnFailed ? null : exitCode,
-        signal,
+        exitCode: supervised ? (supervisorResult?.exitCode ?? null) : spawnFailed ? null : exitCode,
+        signal: supervised ? (supervisorResult?.signal ?? signal) : signal,
         startedAt,
         finishedAt: new Date().toISOString(),
         wallSeconds: Number(process.hrtime.bigint() - start) / 1e9,
@@ -876,8 +1246,9 @@ async function captureProcess(
         stdoutBytes,
         stderrBytes,
         truncated,
-        timedOut,
+        timedOut: timedOut || Boolean(supervisorResult?.timedOut),
         cancelled,
+        ...(outputLimit ? { outputLimitExceeded, observedOutputBytes: outputBytes() } : {}),
       });
     });
   });

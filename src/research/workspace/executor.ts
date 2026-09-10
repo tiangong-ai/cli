@@ -668,12 +668,14 @@ async function sandboxInvocation(
   projectRoot: string,
   workspaceRoot: string,
   targetBinary: string,
+  mode: "review" | "calculation" = "review",
 ): Promise<{
   binary: string;
   args: string[];
   isolation: Pick<ReviewIsolationFingerprint, "provider" | "policySha256">;
 }> {
   const configuredCredentialPath = join(workspaceRoot, ".tiangong-research", ".env");
+  const workspaceReal = mode === "calculation" ? await realpath(workspaceRoot) : workspaceRoot;
   const workspaceCredentialPath = await realpath(configuredCredentialPath).catch(
     () => configuredCredentialPath,
   );
@@ -689,9 +691,11 @@ async function sandboxInvocation(
       "(version 1)",
       "(deny default)",
       "(allow process*)",
-      "(allow network*)",
+      ...(mode === "review" ? ["(allow network*)"] : []),
       "(allow file-read-metadata)",
-      `(allow file-read* ${readClauses} (literal "/") (literal "/var") (literal "/dev/dtracehelper") (literal "/dev/null") (literal "/dev/urandom"))`,
+      mode === "calculation"
+        ? `(allow file-read* (require-all (require-any ${readClauses} (literal "/") (literal "/var") (literal "/dev/dtracehelper") (literal "/dev/null") (literal "/dev/urandom")) (require-not (subpath ${sandboxString(workspaceReal)})) (require-not (literal ${sandboxString(workspaceCredentialPath)}))))`
+        : `(allow file-read* ${readClauses} (literal "/") (literal "/var") (literal "/dev/dtracehelper") (literal "/dev/null") (literal "/dev/urandom"))`,
       `(deny file-read* (literal ${sandboxString(workspaceCredentialPath)}))`,
       '(allow file-ioctl (literal "/dev/dtracehelper"))',
       "(allow sysctl-read)",
@@ -719,7 +723,12 @@ async function sandboxInvocation(
         exitCode: 3,
       });
     }
+    // Review keeps its original argument order verbatim (the credential
+    // /dev/null mask must stay AFTER the capsule bind, or a capsule containing
+    // the credential path would re-expose it and shift the policy hash);
+    // calculation-only branches append namespaces and the workspace mask.
     const sandboxArgs = ["--die-with-parent", "--new-session"];
+    if (mode === "calculation") sandboxArgs.push("--unshare-net", "--unshare-pid");
     const systemRoots = await existingLinuxSystemRoots();
     for (const path of systemRoots) {
       sandboxArgs.push("--ro-bind", path, path);
@@ -738,8 +747,17 @@ async function sandboxInvocation(
         continue;
       }
       await appendBubblewrapParentDirectories(sandboxArgs, runtimeRoot, createdDirectories);
+      // Bound unconditionally: when the workspace sits beneath a runtime root,
+      // the calculation-mode workspace mask below shadows only that subtree
+      // and the rest of the runtime stays available.
       sandboxArgs.push("--ro-bind", runtimeRoot, runtimeRoot);
       createdDirectories.add(runtimeRoot);
+    }
+    if (mode === "calculation") {
+      // A private read-only tmpfs hides workspace data even beneath an allowed
+      // runtime/system root. No writable host alias can populate this mask.
+      await appendBubblewrapParentDirectories(sandboxArgs, workspaceReal, createdDirectories);
+      sandboxArgs.push("--tmpfs", workspaceReal, "--remount-ro", workspaceReal);
     }
     await appendBubblewrapParentDirectories(sandboxArgs, capsuleRoot, createdDirectories);
     sandboxArgs.push(
@@ -754,6 +772,7 @@ async function sandboxInvocation(
       projectRoot,
     );
     if (
+      mode === "review" &&
       workspaceCredentialPath.startsWith(`${capsuleRoot}/`) &&
       (await pathIsReadable(workspaceCredentialPath))
     ) {
@@ -1800,5 +1819,71 @@ export function sameRuntimeFingerprint(
     actual.platform === expected.platform &&
     actual.architecture === expected.architecture &&
     actual.providerRouting?.configurationSha256 === expected.providerRouting?.configurationSha256
+  );
+}
+
+/** A prepared calculation launch whose confinement has already been built. */
+export interface CalculationSandboxInvocation {
+  binary: string;
+  args: string[];
+  isolation: { provider: string; policySha256: string };
+}
+
+function calculationUnsupported(detail: string): CliError {
+  return new CliError(`This platform cannot enforce the calculation boundary: ${detail}`, {
+    code: "RESEARCH_SANDBOX_UNAVAILABLE",
+    exitCode: 3,
+  });
+}
+
+function covers(child: string, parent: string): boolean {
+  return (
+    child === parent || (parent === "/" ? child.startsWith("/") : child.startsWith(`${parent}/`))
+  );
+}
+
+/**
+ * Build the confinement for one observed calculation attempt. The capsule is
+ * the only writable/readable project surface, runtime and system roots are
+ * read-only, and the workspace tree (data, holdout, external outputs) plus
+ * host network and host process view are denied. Unsupported platforms and
+ * unsupported overlaps are refused before execution; no raw fallback exists.
+ */
+export async function createCalculationSandboxInvocation(input: {
+  binary: string;
+  args: string[];
+  capsuleRoot: string;
+  workspaceRoot: string;
+}): Promise<CalculationSandboxInvocation> {
+  const provider = researchPlatformCapabilities(platform()).nativeIsolationProvider;
+  if (provider !== "sandbox-exec" && provider !== "bubblewrap")
+    throw calculationUnsupported("no sandbox-exec or Bubblewrap provider on this platform");
+  const capsuleRoot = await realpath(input.capsuleRoot).catch(() => {
+    throw calculationUnsupported("capsule root is missing or symbolic");
+  });
+  const workspaceRoot =
+    (await realpath(input.workspaceRoot).catch(() => undefined)) ?? resolve(input.workspaceRoot);
+  const binary = await realpath(input.binary).catch(() => {
+    throw calculationUnsupported("calculation runtime is missing or symbolic");
+  });
+  if (!(await lstat(binary)).isFile())
+    throw calculationUnsupported("calculation runtime is not a regular file");
+  const runtimeRoot = executableReadRoot(binary);
+  if (runtimeRoot === "/" || covers("/", runtimeRoot))
+    throw calculationUnsupported("runtime read root would expose the whole filesystem");
+  if (covers(runtimeRoot, workspaceRoot))
+    throw calculationUnsupported(
+      "runtime distribution lives inside the denied workspace tree; masking it would break the runtime",
+    );
+  if (covers(capsuleRoot, workspaceRoot) || covers(workspaceRoot, capsuleRoot))
+    throw calculationUnsupported("use a scratch capsule outside the research workspace tree");
+  return sandboxInvocation(
+    binary,
+    input.args,
+    capsuleRoot,
+    capsuleRoot,
+    workspaceRoot,
+    binary,
+    "calculation",
   );
 }

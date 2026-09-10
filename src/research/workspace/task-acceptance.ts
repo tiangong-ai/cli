@@ -1,3 +1,4 @@
+import { investigatedRequirementHashes } from "./investigation-requirements.js";
 import {
   loadScientificAmendmentImpact,
   requirementAmendmentBinding,
@@ -140,6 +141,7 @@ export interface TaskAcceptanceContext {
       status: string;
       record: TaskAcceptanceRecord | null;
       requiredDesignAmendmentSha256?: string;
+      requiresInvestigationCertification?: true;
     }
   >;
   results: OutputRecord[];
@@ -214,6 +216,25 @@ export async function recordProjectTaskAcceptance(
       throw taskError(
         "Acceptance must bind its own observed successful run, not another requirement or a failed process.",
       );
+    if (
+      requirement.checkKind === "computation" &&
+      ["satisfied", "negative-result"].includes(String(value.outcome))
+    ) {
+      const investigated = await investigatedRequirementHashes(
+        projectId,
+        events,
+        <T>(group: string, hash: string, field: string) =>
+          readTaskObject<T>(root, projectId, group, hash, field),
+      );
+      if (
+        investigated.has(String(value.requirementSha256)) &&
+        nativeRun?.investigationCertification?.status !== "passed"
+      )
+        throw taskError(
+          "An investigated computation needs a passed fresh certification of its approved promoted recipe; retain diagnostic or old observations as non-answers.",
+          "RESEARCH_INVESTIGATION_CERTIFICATION_REQUIRED",
+        );
+    }
     const sourceBindings = bindReferences(value.sourceIds as string[], references.sources);
     const atomBindings = bindReferences(value.evidenceAtomIds as string[], references.atoms);
     const findingBindings = bindReferences(
@@ -342,7 +363,14 @@ export async function compileTaskAcceptanceContext(
   const amendmentImpact = latest.size
     ? await loadScientificAmendmentImpact(root, project, view.events)
     : undefined;
+  const investigated = await investigatedRequirementHashes(
+    project.id,
+    view.events,
+    <T>(group: string, hash: string, field: string) =>
+      readTaskObject<T>(root, project.id, group, hash, field),
+  );
   for (const [hash, row] of rows) {
+    if (investigated.has(hash)) row.requiresInvestigationCertification = true;
     const event = latest.get(hash);
     if (!event) continue;
     const record = await readAcceptance(root, project.id, String(event.payload.recordSha256));
@@ -359,7 +387,13 @@ export async function compileTaskAcceptanceContext(
     }
     const amendmentBinding = requirementAmendmentBinding(row, amendmentImpact);
     if (amendmentBinding) row.requiredDesignAmendmentSha256 = amendmentBinding;
-    row.status = taskRecordStatus(record, references!, project, amendmentBinding);
+    row.status = taskRecordStatus(
+      record,
+      references!,
+      project,
+      amendmentBinding,
+      Boolean(row.requiresInvestigationCertification),
+    );
     for (const result of record.results) {
       if (results.has(result.sha256)) continue;
       if (result.path.startsWith("task/run-objects/")) {
@@ -416,6 +450,7 @@ export function taskRecordStatus(
   references: ReferenceView,
   project: ProjectState,
   amendmentBinding: string | null = null,
+  requiresInvestigationCertification = false,
 ) {
   const current =
     references.ready &&
@@ -432,9 +467,13 @@ export function taskRecordStatus(
   return !current
     ? "stale"
     : ["satisfied", "negative-result"].includes(record.outcome)
-      ? record.checkKind === "computation" && !record.nativeRunSha256
-        ? "unverified-execution"
-        : "recorded"
+      ? record.checkKind === "computation" &&
+        requiresInvestigationCertification &&
+        record.nativeRun?.investigationCertification?.status !== "passed"
+        ? "unverified-certification"
+        : record.checkKind === "computation" && !record.nativeRunSha256
+          ? "unverified-execution"
+          : "recorded"
       : record.outcome;
 }
 
@@ -585,6 +624,9 @@ export async function inspectProjectTask(
         requirementSha256: row.requirementSha256,
         outcome: row.record?.outcome ?? null,
         recordSha256: row.record?.recordSha256 ?? null,
+        ...(row.requiresInvestigationCertification
+          ? { requiresInvestigationCertification: true }
+          : {}),
         status: answered.has(row.requirementSha256)
           ? "reviewed"
           : row.status === "unanswered" && kind === "original" && !row.current

@@ -18,8 +18,8 @@ checkPaths:
   - scripts/**
   - test/**
   - .github/workflows/**
-lastReviewedAt: 2026-09-10
-lastReviewedCommit: 8fa13b4e4428d7b8d75ea3f193998cb789daff3a
+lastReviewedAt: 2026-09-11
+lastReviewedCommit: 29a8ed0
 ---
 
 # Repo Validation
@@ -798,3 +798,29 @@ The portable verifier shares the producer's atom parser, including its deliberat
 exclusion of registration time from the atom content hash. Unamended design
 reads are checked to avoid full-journal rereads. Fresh container RED/GREEN is
 authoritative; these protocol cases do not claim live scientific qualification.
+
+Investigation regressions use real synthetic frozen sources and ordinary local
+processes. They cover one exact envelope, four diagnostic outcomes, missing
+required solver telemetry, parent/configuration links, idempotent replay,
+interrupted result storage, closure and allocation release, and competing
+investigation/certification time reservations. Separate confinement probes test
+workspace reads/writes, symlink escape, host network access and Linux process-root
+access with both disjoint roots and a workspace beneath a runtime root.
+
+The scientific fixture exercises a selected recipe, separate promotion,
+predeclared fulfillment, fresh certification, rejection of old ordinary results,
+and a real reviewed recovery fork with its own certification. Source and
+successor audit bundles verify after deleting the workspace; recomputed manifests
+cannot erase the selected candidate or graft certification purpose onto ordinary
+runs. Output cases exercise stream/file/combined overflow, cumulative exhaustion,
+failed certification and inherited-worker cleanup. One-shot supervisor tests
+kill the actual observer after the calculation starts, using both source and
+compiled entrypoints, and verify that it cannot outlive the bound. They also
+exercise stop-before-start ordering and prevent program output or inherited IPC
+from fabricating supervisor success. Live status and direct run inspection are
+checked during the calculation phase, separately from its short runtime probe;
+reused PIDs and local routing exclusion are exercised. Rehashed audit mutations
+of the effective scientific view or moving fulfillment after certification start
+must fail temporal validation. These fixtures do not prove scientific
+correctness, provider invoices, arbitrary daemon containment or reconstruction of
+uncommitted results; qualify those claims separately before making them.

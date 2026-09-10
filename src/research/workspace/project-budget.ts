@@ -283,7 +283,9 @@ export function isProjectBudgetState(value: unknown): value is ProjectBudgetStat
       typeof entry.sourceProjectId !== "string" ||
       !entry.id ||
       ids.has(entry.id) ||
-      !["native-stage", "review", "provider-operation"].includes(String(entry.kind)) ||
+      !["native-stage", "review", "provider-operation", "investigation"].includes(
+        String(entry.kind),
+      ) ||
       typeof entry.reference !== "string" ||
       !Number.isSafeInteger(entry.authorizationRevision) ||
       (entry.authorizationRevision as number) < 1 ||

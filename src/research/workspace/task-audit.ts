@@ -1,3 +1,10 @@
+import type { ScientificAuditHistory } from "./scientific-fulfillment-audit.js";
+import {
+  loadInvestigationAudit,
+  type InvestigationProofEvent,
+  type InvestigationAuditSummary,
+} from "./investigation-audit.js";
+import { investigatedRequirementHashes } from "./investigation-requirements.js";
 import {
   requirementAmendmentBinding,
   type ScientificAmendmentImpact,
@@ -7,7 +14,11 @@ import { join } from "node:path";
 
 import { CliError } from "../../errors.js";
 import { unrecordedRequestProvenance } from "./request-provenance.js";
-import { validateNativeRunRecord, type NativeRunRecord } from "./native-run.js";
+import {
+  assertNativeRunJournalBinding,
+  validateNativeRunRecord,
+  type NativeRunRecord,
+} from "./native-run.js";
 import {
   compileTaskAcceptanceContext,
   taskRecordStatus,
@@ -32,7 +43,7 @@ import {
   sha256Text,
   writeJsonAtomic,
 } from "./storage.js";
-import type { JournalEvent, OutputRecord, ProjectState } from "./types.js";
+import type { OutputRecord, ProjectState } from "./types.js";
 
 const HASH = /^[a-f0-9]{64}$/;
 export interface TaskAuditBinding {
@@ -40,9 +51,7 @@ export interface TaskAuditBinding {
   originalContractSha256: string;
   contextSha256: string;
 }
-type ProofEvent = Pick<JournalEvent, "scope" | "type" | "payload"> & {
-  sourcePayloadSha256: string;
-};
+type ProofEvent = InvestigationProofEvent;
 
 /** Derived export view, not a second mutable task state. */
 export async function writeTaskAuditContext(
@@ -67,7 +76,11 @@ export async function verifyTaskAudit(
   binding: TaskAuditBinding | undefined,
   files: Array<OutputRecord>,
   amendmentImpact?: ScientificAmendmentImpact,
-): Promise<(TaskAuditBinding & { executionCertified: false }) | undefined> {
+  scientificHistory?: ScientificAuditHistory,
+): Promise<
+  | (TaskAuditBinding & { executionCertified: false; investigations?: InvestigationAuditSummary })
+  | undefined
+> {
   const indexed = new Map(files.map((file) => [file.path, file]));
   const json = new Map<string, unknown>();
   const read = async <T>(path: string): Promise<T> => {
@@ -89,6 +102,13 @@ export async function verifyTaskAudit(
   const proof = await read<{ events: ProofEvent[] }>("state/journal-event-proofs.json");
   if (!Array.isArray(proof.events)) throw invalid("Task audit requires its journal proof view.");
   const events = proof.events.filter((event) => event.scope === projectId);
+  const investigations = await loadInvestigationAudit(
+    bundle,
+    projectId,
+    files,
+    proof.events,
+    scientificHistory,
+  );
   const currentBinding = latestTaskBinding(events, projectId);
   if (!currentBinding) {
     if (
@@ -107,7 +127,15 @@ export async function verifyTaskAudit(
     hashField: string,
   ) => {
     if (
-      !["contracts", "proposals", "acceptance", "request-sources", "runs"].includes(group) ||
+      ![
+        "contracts",
+        "proposals",
+        "acceptance",
+        "request-sources",
+        "runs",
+        "investigations",
+        "investigation-promotions",
+      ].includes(group) ||
       !HASH.test(hash)
     )
       throw invalid("Task audit object address is invalid.");
@@ -172,23 +200,9 @@ export async function verifyTaskAudit(
         projectId,
       );
       const started = runStarts.get(run.runId);
-      if (
-        !started ||
-        nativeRuns.has(hash) ||
-        event.payload.runId !== run.runId ||
-        event.payload.requestSha256 !== run.requestSha256 ||
-        event.payload.status !== run.status ||
-        started.payload.requestSha256 !== run.requestSha256 ||
-        started.payload.requirementSha256 !== run.requirementSha256 ||
-        started.payload.requirementId !== run.requirementId ||
-        started.payload.scriptSha256 !== run.script.sha256 ||
-        started.payload.environmentLockSha256 !== run.environmentLock.sha256 ||
-        started.payload.runtimeBinarySha256 !== run.runtime.binarySha256 ||
-        started.payload.nativePacketSha256 !== run.nativePacketSha256
-      )
-        throw invalid(
-          "Native run completion does not bind its exact observed start and artifacts.",
-        );
+      if (!started || nativeRuns.has(hash))
+        throw invalid("Native run completion has no unique start.");
+      assertNativeRunJournalBinding(run, started, event);
       for (const object of [run.script, run.environmentLock, ...run.inputs, ...run.outputs]) {
         const file = indexed.get(`project/${object.path}`);
         if (!file || file.sha256 !== object.sha256 || file.bytes !== object.bytes)
@@ -196,6 +210,7 @@ export async function verifyTaskAudit(
             "Native run program, input, environment or output bytes are absent or inconsistent.",
           );
       }
+      await investigations?.verifyRun(run, started);
       nativeRuns.set(hash, run);
       continue;
     }
@@ -308,13 +323,21 @@ export async function verifyTaskAudit(
   }
   const expectedRows = taskRequirementRows(history);
   const results = new Map<string, OutputRecord>();
+  const investigated = await investigatedRequirementHashes(projectId, events, objectReader);
   for (const [hash, row] of expectedRows) {
+    if (investigated.has(hash)) row.requiresInvestigationCertification = true;
     const record = latest.get(hash);
     if (!record) continue;
     row.record = record;
     const amendmentBinding = requirementAmendmentBinding(row, amendmentImpact);
     if (amendmentBinding) row.requiredDesignAmendmentSha256 = amendmentBinding;
-    row.status = taskRecordStatus(record, references, project, amendmentBinding);
+    row.status = taskRecordStatus(
+      record,
+      references,
+      project,
+      amendmentBinding,
+      Boolean(row.requiresInvestigationCertification),
+    );
     for (const result of record.results) results.set(result.sha256, result);
   }
   if (
@@ -351,7 +374,11 @@ export async function verifyTaskAudit(
       throw invalid("Audit review task context is stale.");
     validateTaskReview(review, context);
   }
-  return { ...binding, executionCertified: false };
+  return {
+    ...binding,
+    executionCertified: false,
+    ...(investigations ? { investigations: investigations.report() } : {}),
+  };
 }
 
 function invalid(message: string): CliError {

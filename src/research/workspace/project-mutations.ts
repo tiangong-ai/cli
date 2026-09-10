@@ -21,7 +21,12 @@ interface MutationIdentity {
     | "acquisition-revision"
     | "task-scope"
     | "scientific-fulfillment"
-    | "scientific-amendment";
+    | "scientific-amendment"
+    | "investigation-approval"
+    | "investigation-attempt"
+    | "investigation-promotion"
+    | "investigation-certification"
+    | "investigation-closure";
   operationId: string;
   sourceProjectId: string;
   targetProjectId: string | null;
@@ -127,6 +132,11 @@ async function readRecord(path: string): Promise<ProjectMutation> {
       "task-scope",
       "scientific-fulfillment",
       "scientific-amendment",
+      "investigation-approval",
+      "investigation-attempt",
+      "investigation-promotion",
+      "investigation-certification",
+      "investigation-closure",
     ].includes(String(identity.kind)) ||
     typeof identity.operationId !== "string" ||
     !UUID.test(identity.operationId) ||
@@ -282,7 +292,17 @@ function committedEvent(events: JournalEvent[], record: ProjectMutation): Journa
                 ? "scientific.fulfillment.recorded"
                 : record.identity.kind === "scientific-amendment"
                   ? "scientific.amendment.recorded"
-                  : "project.task.scope.approved") &&
+                  : record.identity.kind === "investigation-approval"
+                    ? "investigation.approved"
+                    : record.identity.kind === "investigation-attempt"
+                      ? "investigation.attempt.completed"
+                      : record.identity.kind === "investigation-promotion"
+                        ? "investigation.promotion.approved"
+                        : record.identity.kind === "investigation-certification"
+                          ? "project.task.run.completed"
+                          : record.identity.kind === "investigation-closure"
+                            ? "investigation.closed"
+                            : "project.task.scope.approved") &&
       isObject(event.payload.mutation) &&
       event.payload.mutation.operationId === record.identity.operationId,
   );
@@ -435,7 +455,7 @@ export async function recoverProjectMutations(root: string): Promise<void> {
   const directory = await privateDirectory(root, ["pending-project-mutations"], false);
   if (!directory) return;
   const files = (await readdir(directory)).filter((name) =>
-    /^(?:fork|retry|acquisition-revision|task-scope|scientific-fulfillment|scientific-amendment)-[a-z0-9][a-z0-9-]{2,63}\.json$/.test(
+    /^(?:fork|retry|acquisition-revision|task-scope|scientific-fulfillment|scientific-amendment|investigation-approval|investigation-attempt|investigation-promotion|investigation-certification|investigation-closure)-[a-z0-9][a-z0-9-]{2,63}\.json$/.test(
       name,
     ),
   );

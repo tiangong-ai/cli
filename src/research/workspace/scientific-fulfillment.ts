@@ -405,9 +405,19 @@ async function assertObjectRecords(
         }
   }
 }
+/** The pure projector needs scientific values, not registration/commit metadata. */
+export interface ScientificFulfillmentProjection {
+  modelImplementations: Array<
+    Omit<ScientificFulfillmentRecord["modelImplementations"][number], "recordSha256">
+  >;
+  environmentLocks: Array<
+    Omit<ScientificFulfillmentRecord["environmentLocks"][number], "recordSha256">
+  >;
+  parameterStates: ScientificFulfillmentRecord["parameterStates"];
+}
 export function applyScientificFulfillmentRecord(
   design: ScientificDesignContract,
-  record: ScientificFulfillmentRecord,
+  record: ScientificFulfillmentProjection,
   throughGate?: ScientificReviewRole,
 ) {
   const include = (gate: DeferredGate) => !throughGate || rank(gate) <= rank(throughGate);
