@@ -436,6 +436,25 @@ await writeFile(process.argv[3],JSON.stringify({schemaVersion:1,solverReached:va
       assert.equal(interruptedStatus.remaining.runs, 4);
       assert.equal(interruptedStatus.remaining.wallSeconds, 7170);
       assert.equal(interruptedStatus.attempts[0].recordSha256, null);
+      assert.notEqual(interruptedStatus.attempts[0].observer.state, "observing");
+      const routePath = join(
+        workspacePaths(fx.root).control,
+        interruptedStatus.attempts[0].observer.localRoute,
+      );
+      const originalRoute = await readFile(routePath, "utf8");
+      const reusedPid = JSON.parse(originalRoute);
+      reusedPid.pid = process.pid;
+      await writeFile(routePath, JSON.stringify(reusedPid));
+      const mismatchedObserver = JSON.parse(
+        (await command("status", ["--investigation", "interrupted-diagnosis"])).stdout,
+      );
+      assert.equal(
+        mismatchedObserver.attempts[0].observer.state,
+        "not-matching",
+        "A live reused PID is not evidence that this observer still runs",
+      );
+      await writeFile(routePath, originalRoute);
+
       await writeFile(
         closePath,
         JSON.stringify({

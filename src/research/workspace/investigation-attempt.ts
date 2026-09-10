@@ -1,3 +1,4 @@
+import { investigationObserverRoute } from "./investigation-observer.js";
 import { investigationWallReservations } from "./investigation-resources.js";
 import { localInvestigationReadStore, type InvestigationReadStore } from "./investigation-store.js";
 import { arch, platform, tmpdir } from "node:os";
@@ -696,6 +697,13 @@ async function observeInvestigationAttemptInternal(
     env,
     Math.min(5, start.timeoutSeconds),
     { maxBytes: start.maxOutputBytes },
+    investigationObserverRoute(
+      root,
+      projectId,
+      start.recordSha256,
+      "runtime-probe",
+      prepared.staging,
+    ),
   );
   const version = probe.stdout.trim() || probe.stderr.trim();
   const validRuntime =
@@ -717,6 +725,13 @@ async function observeInvestigationAttemptInternal(
           env,
           available,
           { maxBytes: availableOutput, paths: [...prepared.outputPaths.values()] },
+          investigationObserverRoute(
+            root,
+            projectId,
+            start.recordSha256,
+            "calculation",
+            prepared.staging,
+          ),
         )
       : probe;
   return withWorkspaceLock(root, "research.investigation.attempt.commit", async () => {

@@ -588,6 +588,47 @@ await writeFile(process.argv[3],JSON.stringify({schemaVersion:1,solverReached:tr
       false,
       "The first actual process must still be in flight for this concurrency regression",
     );
+    let observedSupervisor = false;
+    const observerDeadline = Date.now() + 10000;
+    while (Date.now() < observerDeadline && !firstFinished) {
+      const view = await must(
+        await command(["status"], ["--investigation", envelope.investigationId]),
+      );
+      if (
+        view.promotions.some(
+          (p: { runId: string; observer?: { state: string } }) =>
+            p.runId === "certification-one" && p.observer?.state === "observing",
+        )
+      ) {
+        observedSupervisor = true;
+        break;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    assert.equal(
+      observedSupervisor,
+      true,
+      "Status must identify the actual matching live observer without relying on chat history",
+    );
+    const liveRun = await must(
+      await cli([
+        "research",
+        "project",
+        "task",
+        "run",
+        "inspect",
+        projectId,
+        "--run",
+        "certification-one",
+        "--workspace",
+        fx.root,
+        "--json",
+      ]),
+    );
+    assert.equal(liveRun.status, "incomplete");
+    assert.equal(liveRun.observer.state, "observing");
+    assert.equal(liveRun.automaticRetry, false);
+
     const [competing, competingInvestigation] = await Promise.all([
       observe(parallelRunPath),
       command(["attempt"], ["--input", competingInvestigationPath]),
@@ -958,6 +999,11 @@ await writeFile(process.argv[3],JSON.stringify({schemaVersion:1,solverReached:tr
       ),
       false,
     );
+    assert.equal(
+      targetManifest.files.some((f: { path: string }) => f.path.includes("calculation-observers")),
+      false,
+    );
+
     await rm(fx.root, { recursive: true, force: true });
     const verify = () =>
       cli(["research", "project", "audit", "verify", "--bundle", bundle, "--json"]);

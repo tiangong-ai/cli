@@ -697,6 +697,7 @@ export async function inspectInvestigation(root: string, projectId: string, id: 
   const { frozenPromotionView } = await import("./investigation-certification.js");
   const { readNativeRun } = await import("./native-run.js");
   const { investigationWallReservations } = await import("./investigation-resources.js");
+  const { inspectInvestigationObserver } = await import("./investigation-observer.js");
   const history = await investigationAttemptHistory(root, projectId, definition, events);
   const remaining = investigationRemaining(definition, history);
   const candidates = await loadInvestigationCandidates(
@@ -716,6 +717,7 @@ export async function inspectInvestigation(root: string, projectId: string, id: 
     certification: "not-started" | "incomplete" | "failed" | "passed";
     scopeCurrent: boolean;
     frozen: boolean;
+    observer?: Awaited<ReturnType<typeof inspectInvestigationObserver>>;
   }> = [];
   for (const event of events) {
     if (
@@ -771,8 +773,24 @@ export async function inspectInvestigation(root: string, projectId: string, id: 
           : "not-started",
       scopeCurrent,
       frozen,
+      ...(started && !completed
+        ? {
+            observer: await inspectInvestigationObserver(
+              root,
+              event.scope,
+              String(started.payload.requestSha256),
+            ),
+          }
+        : {}),
     });
   }
+  const observers = new Map<string, Awaited<ReturnType<typeof inspectInvestigationObserver>>>();
+  for (const attempt of history)
+    if (!attempt.record)
+      observers.set(
+        attempt.start.recordSha256,
+        await inspectInvestigationObserver(root, projectId, attempt.start.recordSha256),
+      );
   const passed = promotions.findLast((p) => p.certification === "passed" && p.scopeCurrent);
   const pending = promotions.findLast((p) => p.certification === "incomplete");
   const lastPromotion = promotions.at(-1);
@@ -880,6 +898,9 @@ export async function inspectInvestigation(root: string, projectId: string, id: 
       configuration: a.start.configuration,
       parentAttemptSha256: a.start.parentAttemptSha256,
       changes: a.start.changes,
+      ...(observers.has(a.start.recordSha256)
+        ? { observer: observers.get(a.start.recordSha256) }
+        : {}),
       conclusion: a.record?.diagnostic?.conclusion ?? a.record?.outcome ?? "unresolved",
     })),
     executionBoundary: "calculation-sandbox-required",

@@ -1,3 +1,7 @@
+import {
+  investigationObserverRoute,
+  inspectInvestigationObserver,
+} from "./investigation-observer.js";
 import { investigationWallReservations } from "./investigation-resources.js";
 import { createCalculationSandboxInvocation } from "./executor.js";
 import {
@@ -514,6 +518,13 @@ export async function observeNativeRun(
           environment,
           Math.min(5, prepared.timeoutSeconds),
           { maxBytes: prepared.certification!.promotion.plan.certification.maxOutputBytes },
+          investigationObserverRoute(
+            root,
+            projectId,
+            requestSha256,
+            "runtime-probe",
+            prepared.staging,
+          ),
         )
       : null;
     const probeVersion = probe
@@ -542,6 +553,15 @@ export async function observeNativeRun(
             availableSeconds,
             prepared.certification
               ? { maxBytes: availableOutput, paths: [...prepared.outputPaths.values()] }
+              : undefined,
+            prepared.certification
+              ? investigationObserverRoute(
+                  root,
+                  projectId,
+                  requestSha256,
+                  "calculation",
+                  prepared.staging,
+                )
               : undefined,
           );
     const wallSeconds =
@@ -838,18 +858,26 @@ export async function inspectNativeRun(root: string, projectId: string, runId: s
   const completed = completedRunEvent(events, projectId, runId);
   if (completed)
     return { record: await readNativeRun(root, projectId, String(completed.payload.recordSha256)) };
+  const started = events.find(
+    (event) =>
+      event.scope === projectId &&
+      event.type === "project.task.run.started" &&
+      event.payload.runId === runId,
+  );
   return {
     projectId,
     runId,
-    status: events.some(
-      (event) =>
-        event.scope === projectId &&
-        event.type === "project.task.run.started" &&
-        event.payload.runId === runId,
-    )
-      ? "incomplete"
-      : "not-found",
+    status: started ? "incomplete" : "not-found",
     automaticRetry: false,
+    ...(started?.payload.investigationPromotionSha256
+      ? {
+          observer: await inspectInvestigationObserver(
+            root,
+            projectId,
+            String(started.payload.requestSha256),
+          ),
+        }
+      : {}),
   };
 }
 type NativeRunEventBinding = Pick<JournalEvent, "scope" | "type" | "payload" | "sequence">;
@@ -1011,6 +1039,7 @@ export async function captureProcess(
   env: NodeJS.ProcessEnv,
   timeoutSeconds: number,
   outputLimit?: { maxBytes: number; paths?: string[] },
+  observation?: { title: string; onSpawn: (pid: number) => Promise<void> },
 ) {
   if (outputLimit && (!Number.isSafeInteger(outputLimit.maxBytes) || outputLimit.maxBytes < 1))
     throw error("Observed output budget must be a positive finite byte count.");
@@ -1047,7 +1076,10 @@ export async function captureProcess(
           cwd,
           env,
           detached: platform() !== "win32",
-          execArgv: sourceRuntime ? ["--import", import.meta.resolve("tsx")] : [],
+          execArgv: [
+            ...(sourceRuntime ? ["--import", import.meta.resolve("tsx")] : []),
+            ...(observation ? [`--title=${observation.title}`] : []),
+          ],
           stdio: ["ignore", "pipe", "pipe", "ipc"],
         })
       : spawn(binary, args, {
@@ -1077,18 +1109,27 @@ export async function captureProcess(
             timedOut: value.timedOut,
           };
       });
-      child.send(
-        {
-          kind: "start",
-          binary,
-          args,
-          env,
-          deadlineNs: (start + BigInt(Math.ceil(timeoutSeconds * 1e9))).toString(),
-        },
-        (error) => {
-          if (error) child.kill("SIGTERM");
-        },
-      );
+      void (async () => {
+        if (observation) {
+          if (!child.pid) throw new Error("Observer was not spawned");
+          await observation.onSpawn(child.pid);
+        }
+        child.send(
+          {
+            kind: "start",
+            binary,
+            args,
+            env,
+            deadlineNs: (start + BigInt(Math.ceil(timeoutSeconds * 1e9))).toString(),
+          },
+          (error) => {
+            if (error) child.kill("SIGTERM");
+          },
+        );
+      })().catch(() => {
+        spawnFailed = true;
+        child.kill("SIGTERM");
+      });
     }
     const out = createHash("sha256"),
       err = createHash("sha256");
