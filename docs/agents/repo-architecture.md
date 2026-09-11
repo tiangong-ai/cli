@@ -13,7 +13,7 @@ checkPaths:
   - src/**
   - bin/**
 lastReviewedAt: 2026-09-11
-lastReviewedCommit: 8e5c4d92bb04583cb842829fd77244548c572982
+lastReviewedCommit: f0dc2ee
 ---
 
 # Repo Architecture
@@ -602,6 +602,13 @@ independent-review validation, and this predicate is not a trusted execution
 receipt. Acquisition forecast reuses the artifact media predicate and already
 verified input hashes, so local binaries without readable text are not counted
 as atom-eligible merely because an admitted full file exists.
+
+Native producer preparation compiles the existing task-acceptance view once and
+passes it into shared capsule staging. The legacy task definition remains in
+`taskContract`/`inputs/task-context.json`; an additive `taskAcceptance` field and
+`inputs/task-acceptance.json` expose check records and exact result artifacts.
+The existing artifact directory controls reads. No independent task ledger or
+new completion authority is created, and old saved packets remain replayable.
 
 `native-run.ts` observes one explicitly requested ordinary Node/Python calculation,
 not an AI producer or workflow. It snapshots exact program/frozen input bytes,

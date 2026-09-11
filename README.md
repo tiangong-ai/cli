@@ -13,7 +13,7 @@ checkPaths:
   - bin/**
   - src/**
 lastReviewedAt: 2026-09-11
-lastReviewedCommit: 8e5c4d92bb04583cb842829fd77244548c572982
+lastReviewedCommit: f0dc2ee
 ---
 
 # Tiangong AI CLI
@@ -1917,6 +1917,14 @@ current task completion separately from workflow completion and publication verd
 A completed workflow or approved reduced scope must not be described as satisfying
 unanswered original requirements. Use the selected runtime's help/schema discovery
 once before adopting these commands; they are not an implicit runtime upgrade.
+
+Native producer stage packets preserve the original `taskContract` and also
+carry `taskAcceptance`, compiled from the same authoritative check view used by
+status/review. Recorded, failed, stale and unanswered rows remain distinct. The
+packet artifact directory exposes `inputs/task-acceptance.json` and its exact
+check result files for on-demand reading, including non-calculation results.
+Compilation occurs during fresh preparation; replay returns the existing packet.
+A recorded check still requires the existing independent review for acceptance.
 
 ## Bounded computational investigations
 
