@@ -51,6 +51,117 @@ import type { ResearchPolicyBinding } from "../src/research/workspace/types.js";
 import { inspectScientificReviewStatus } from "../src/research/workspace/scientific-review.js";
 
 describe("lightweight original task and authorized scope", () => {
+  for (const outcome of ["negative-result", "failed"]) {
+    it(`carries ${outcome} checks and unresolved obligations into a fresh producer packet`, async () => {
+      const fx = await acquiredFixture();
+      try {
+        const resultPath = join(fx.files, "prior-check.txt");
+        const content =
+          "Existing check details must remain readable; the other original question is unanswered.\n";
+        await writeFile(resultPath, content);
+        const accepted = await recordAcceptance(
+          fx,
+          acceptanceInput(fx.rows[0]!, fx.atom.atomId, [resultPath], outcome),
+        );
+        assert.equal(accepted.exitCode, 0, accepted.stderr);
+        const record = JSON.parse(accepted.stdout);
+        const packet = await prepareNativeResearchStage({
+          root: fx.root,
+          projectId: "task-project",
+          stage: "analyze",
+          hostAgent: "codex",
+        });
+        const checks = (
+          packet as unknown as {
+            taskAcceptance?: {
+              contextSha256: string;
+              requirements: Array<{
+                id: string;
+                status: string;
+                record: { recordSha256: string } | null;
+              }>;
+            };
+          }
+        ).taskAcceptance;
+        assert.ok(
+          checks,
+          "The producer must receive the existing authoritative task-check context, not only task definitions",
+        );
+        assert.equal(
+          checks.requirements.find((r) => r.id === fx.rows[0]!.id)?.status,
+          outcome === "negative-result" ? "recorded" : "failed",
+        );
+        assert.equal(
+          checks.requirements.find((r) => r.id === fx.rows[0]!.id)?.record?.recordSha256,
+          record.recordSha256,
+        );
+        assert.equal(
+          checks.requirements.find((r) => r.id === fx.rows[1]!.id)?.status,
+          "unanswered",
+        );
+        assert.equal(packet.taskContract?.originalRequest, contractInput().originalRequest);
+        const list = await cli([
+          "research",
+          "project",
+          "stage",
+          "artifacts",
+          "task-project",
+          "--session",
+          packet.sessionId,
+          "--workspace",
+          fx.root,
+          "--json",
+        ]);
+        assert.equal(list.exitCode, 0, list.stderr);
+        const items = JSON.parse(list.stdout).items as Array<{
+          path: string;
+          objectId: string;
+          sha256: string;
+        }>;
+        for (const path of [
+          "inputs/task-context.json",
+          "inputs/task-acceptance.json",
+          record.results[0].path,
+        ]) {
+          assert.ok(
+            items.some((i) => i.path === path),
+            `Missing current packet artifact ${path}`,
+          );
+        }
+        const artifact = items.find((i) => i.path === record.results[0].path)!;
+        const read = await cli([
+          "research",
+          "project",
+          "stage",
+          "read",
+          "task-project",
+          "--session",
+          packet.sessionId,
+          "--artifact",
+          artifact.objectId,
+          "--length",
+          "all",
+          "--workspace",
+          fx.root,
+          "--json",
+        ]);
+        assert.equal(read.exitCode, 0, read.stderr);
+        assert.equal(JSON.parse(read.stdout).content, content);
+        const replay = await prepareNativeResearchStage({
+          root: fx.root,
+          projectId: "task-project",
+          stage: "analyze",
+          hostAgent: "codex",
+        });
+        assert.deepEqual(replay, packet);
+        const status = JSON.parse((await fx.task(["status"])).stdout);
+        assert.equal(status.currentScope.status, "incomplete");
+      } finally {
+        await fx.cleanup();
+      }
+    });
+  }
+
   it("ignores unrelated investigation IDs that merely equal the exported project name", async () => {
     const fx = await acquiredFixture("computation");
     try {
