@@ -51,6 +51,60 @@ import type { ResearchPolicyBinding } from "../src/research/workspace/types.js";
 import { inspectScientificReviewStatus } from "../src/research/workspace/scientific-review.js";
 
 describe("lightweight original task and authorized scope", () => {
+  it("retains stale checks for diagnosis after supported acquisition revision", async () => {
+    const fx = await acquiredFixture();
+    try {
+      const file = join(fx.files, "prior-source-check.txt");
+      await writeFile(
+        file,
+        "A check of the prior acquisition, not approval of a later snapshot.\n",
+      );
+      const recorded = await recordAcceptance(
+        fx,
+        acceptanceInput(fx.rows[0]!, fx.atom.atomId, [file], "satisfied"),
+      );
+      assert.equal(recorded.exitCode, 0, recorded.stderr);
+      const snapshot = await loadCurrentEvidenceSnapshot(fx.root, "task-project");
+      const revised = await cli([
+        "research",
+        "project",
+        "evidence",
+        "acquisition",
+        "revise",
+        "task-project",
+        "--expected-snapshot",
+        snapshot.snapshotSha256,
+        "--reason",
+        "Add a missing readable source without changing the original task.",
+        "--workspace",
+        fx.root,
+        "--json",
+      ]);
+      assert.equal(revised.exitCode, 0, revised.stderr);
+      const packet = await prepareNativeResearchStage({
+        root: fx.root,
+        projectId: "task-project",
+        stage: "acquire",
+        hostAgent: "codex",
+      });
+      assert.equal(
+        packet.taskAcceptance?.requirements.find((r) => r.id === fx.rows[0]!.id)?.status,
+        "stale",
+      );
+      assert.equal(
+        packet.taskAcceptance?.requirements.find((r) => r.id === fx.rows[1]!.id)?.status,
+        "unanswered",
+      );
+      assert.ok(packet.taskAcceptance?.requirements.every((r) => r.original && r.current));
+      assert.equal(
+        packet.taskAcceptance?.results[0]?.sha256,
+        JSON.parse(recorded.stdout).results[0].sha256,
+      );
+    } finally {
+      await fx.cleanup();
+    }
+  });
+
   for (const outcome of ["negative-result", "failed"]) {
     it(`carries ${outcome} checks and unresolved obligations into a fresh producer packet`, async () => {
       const fx = await acquiredFixture();
