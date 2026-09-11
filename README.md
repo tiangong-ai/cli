@@ -1918,6 +1918,14 @@ A completed workflow or approved reduced scope must not be described as satisfyi
 unanswered original requirements. Use the selected runtime's help/schema discovery
 once before adopting these commands; they are not an implicit runtime upgrade.
 
+Native producer stage packets preserve the original `taskContract` and also
+carry `taskAcceptance`, compiled from the same authoritative check view used by
+status/review. Recorded, failed, stale and unanswered rows remain distinct. The
+packet artifact directory exposes `inputs/task-acceptance.json` and its exact
+check result files for on-demand reading, including non-calculation results.
+Compilation occurs during fresh preparation; replay returns the existing packet.
+A recorded check still requires the existing independent review for acceptance.
+
 ## Bounded computational investigations
 
 Use an investigation for a still-unanswered computational requirement when the

@@ -824,3 +824,10 @@ of the effective scientific view or moving fulfillment after certification start
 must fail temporal validation. These fixtures do not prove scientific
 correctness, provider invoices, arbitrary daemon containment or reconstruction of
 uncommitted results; qualify those claims separately before making them.
+
+Native continuation regressions record real synthetic evidence checks through
+public commands, prepare a fresh producer, and read the exact check result via
+the packet artifact channel. They distinguish recorded/failed/unanswered rows,
+retain stale checks after supported acquisition revision and preserve replay
+and legacy taskContract. They qualify packet delivery, not scientific correctness
+or automatic instruction loading by every host session.
