@@ -126,7 +126,7 @@ describe("research source organization migration", () => {
     const source = setupSource("tiangong-ai-skills");
     assert.equal(source.repository, "tiangong-ai/agent-skills");
     assert.equal(source.locator, canonical);
-    assert.equal(source.immutableRef, "c5f8fe3ff43313f69b8deb4d970261c4013c5310");
+    assert.equal(source.immutableRef, "8516fbb974d35dd930262d4e83b1a21d87369496");
   });
 
   it("verifies a legacy installed capability and upgrades its source through configuration", async () => {

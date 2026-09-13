@@ -115,7 +115,7 @@ export const RESEARCH_SETUP_SELECTION_GUIDANCE = {
 } as const;
 
 const BRAVE_COMMIT = "3e088af66eb61f1c207c22b2be0278ca8744d1d1";
-const TIANGONG_SKILLS_COMMIT = "c5f8fe3ff43313f69b8deb4d970261c4013c5310";
+const TIANGONG_SKILLS_COMMIT = "8516fbb974d35dd930262d4e83b1a21d87369496";
 const ANTHROPIC_SKILLS_COMMIT = "f17010c9bb483898c1d9c9f42dde2b3a98889434";
 const PPT_MASTER_COMMIT = "4343bd8bfc91e79dfb9680681a378476cc38a280";
 
@@ -418,7 +418,7 @@ export const RESEARCH_SETUP_SKILLS: readonly ResearchSetupSkill[] = [
     skillName: "tiangong-auto-research",
     sourceId: "tiangong-ai-skills",
     sourceRelativePath: "tiangong-auto-research",
-    expectedTreeSha256: "98098cca54f18db899bb7b56d89215dd89a8a2f0138fc39d32639678d52ce07b",
+    expectedTreeSha256: "81ece5090223733a37bd3aa52bf2c7f44b0dba5335ea75e3a30a46dc474f0e1d",
     tier: "orchestrator",
     role: "orchestrator",
     purpose:
@@ -565,7 +565,7 @@ export const RESEARCH_SETUP_SKILLS: readonly ResearchSetupSkill[] = [
     skillName: "tiangong-kb-sci-search",
     sourceId: "tiangong-ai-skills",
     sourceRelativePath: "tiangong-kb-sci-search",
-    expectedTreeSha256: "7308e5d88e5dbae113da7e401b8ecaf4b8e798bfe52ad10b99d188b2bd408b30",
+    expectedTreeSha256: "934f4ce1808b7d9a041a6d7b343b153cd529b77d7a9dd80a83689322bbd9c6c4",
     tier: "enhanced",
     role: "evidence-capability",
     purpose: "Owner-authorized Tiangong SCI database discovery through a bounded JSON POST broker.",
@@ -577,7 +577,7 @@ export const RESEARCH_SETUP_SKILLS: readonly ResearchSetupSkill[] = [
     license: MIT_TIANGONG,
     conflictGroup: null,
     capabilityKind: "tiangong-sci",
-    standaloneTestedCliVersion: "0.0.30",
+    standaloneTestedCliVersion: "0.0.62",
     bundled: false,
     userInitiatedOnly: true,
   },
@@ -586,7 +586,7 @@ export const RESEARCH_SETUP_SKILLS: readonly ResearchSetupSkill[] = [
     skillName: "tiangong-kb-report-search",
     sourceId: "tiangong-ai-skills",
     sourceRelativePath: "tiangong-kb-report-search",
-    expectedTreeSha256: "d7f9eba27d965260edbe2760dc28352514d87d660b7a9f20bd6f44035f68f600",
+    expectedTreeSha256: "c2cd1c2e62bede4f0d83c98bb7218422afea6a167c1ee34e21a4161aa1d3bb22",
     tier: "enhanced",
     role: "evidence-capability",
     purpose:
@@ -599,7 +599,7 @@ export const RESEARCH_SETUP_SKILLS: readonly ResearchSetupSkill[] = [
     license: MIT_TIANGONG,
     conflictGroup: null,
     capabilityKind: "tiangong-report",
-    standaloneTestedCliVersion: "0.0.30",
+    standaloneTestedCliVersion: "0.0.62",
     bundled: false,
     userInitiatedOnly: true,
   },
@@ -608,7 +608,7 @@ export const RESEARCH_SETUP_SKILLS: readonly ResearchSetupSkill[] = [
     skillName: "tiangong-kb-patent-search",
     sourceId: "tiangong-ai-skills",
     sourceRelativePath: "tiangong-kb-patent-search",
-    expectedTreeSha256: "3dfabe32d50709f728595e7f482da4f42a7f149cc7cfb239e9ae98de93bcbcd6",
+    expectedTreeSha256: "59579e900190cda9b9af75e9d1eb70de1f189da7226513bf6c94149a7aa28cc4",
     tier: "enhanced",
     role: "evidence-capability",
     purpose:
@@ -621,7 +621,7 @@ export const RESEARCH_SETUP_SKILLS: readonly ResearchSetupSkill[] = [
     license: MIT_TIANGONG,
     conflictGroup: null,
     capabilityKind: "tiangong-patent",
-    standaloneTestedCliVersion: "0.0.30",
+    standaloneTestedCliVersion: "0.0.62",
     bundled: false,
     userInitiatedOnly: true,
   },

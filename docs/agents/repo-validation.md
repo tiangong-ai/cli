@@ -380,7 +380,7 @@ mandatory scientific-design, early-review, and real-record canary invariants.
 It is required locally for a pin change and in release CI.
 
 Release CI additionally sets `TIANGONG_RESEARCH_REQUIRE_SKILLS_MAIN=1`; the
-audit then requires the first-party `tiangong-ai/skills` pin to be reachable
+audit then requires the first-party `tiangong-ai/agent-skills` pin to be reachable
 from remote `main`. This makes a merged Skills change a prerequisite for CLI
 release and prevents publishing a catalog from an unmerged branch while still
 allowing the catalog to retain the exact reviewed commit beneath a merge commit.
