@@ -7,7 +7,7 @@ catalog:
   repos:
     - id: cli
       path: .
-      canonicalRepo: tiangong-ai/cli
+      canonicalRepo: tiangong-ai/cli-toolkit
       entryDoc: AGENTS.md
       workflowDocs:
         - docs/agents/repo-validation.md

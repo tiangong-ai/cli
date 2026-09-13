@@ -841,3 +841,11 @@ locators or modified installed bytes. The external importer test retains the
 legacy reserved-source rejection and adds the renamed source. These tests run
 through the existing clean-container suite; they do not replace full managed
 workspace upgrade, source-cache, immutable-pin or final publication acceptance.
+
+The source-cache regression exercises the same `sourceCacheWorkspace` path used
+by managed upgrades, preserves a legacy-origin cache, and requires a separate
+canonical checkout. The managed-generation fixture also creates a valid prior
+plan with the legacy repository and applies a canonical candidate through the
+real upgrade transaction while retaining owner notes and budget settings. These
+synthetic factories are offline integration evidence, not a released-binary
+upgrade or publication claim.

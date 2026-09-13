@@ -340,6 +340,11 @@ immutable ref, installed-tree hash or existing-lock verification. Both repositor
 paths are reserved from the external-capability importer, including misleading
 query variants. Repository migration does not change the npm package or command.
 
+The renamed first-party source uses a locator-qualified cache directory, so an
+upgrade can pin the same commit without rewriting the legacy checkout origin.
+Legacy source caches and third-party cache paths remain untouched; cached
+origins, commits and installed tree hashes still require exact verification.
+
 Managed setup upgrades use a separate candidate and an upgrade-specific
 transaction, without adding work to ordinary research execution. The candidate
 binds the immediate parent plan, exact runtime/config/marker hashes and the

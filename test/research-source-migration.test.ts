@@ -1,12 +1,20 @@
 import assert from "node:assert/strict";
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { cp, mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, it } from "node:test";
 
 import { verifyCapabilities } from "../src/research/workspace/capabilities.js";
 import { configureTiangongSciCapability } from "../src/research/workspace/external-skills.js";
-import { setupSource } from "../src/research/workspace/setup-catalog.js";
+import {
+  RESEARCH_SETUP_INSTALLER,
+  setupSkill,
+  setupSource,
+} from "../src/research/workspace/setup-catalog.js";
+import {
+  applyResearchSetupPlan,
+  createResearchSetupPlan,
+} from "../src/research/workspace/setup.js";
 import { hashRegularTree, workspacePaths } from "../src/research/workspace/storage.js";
 import { initializeResearchWorkspace } from "../src/research/workspace/workspace.js";
 
@@ -14,6 +22,106 @@ const legacy = "https://github.com/tiangong-ai/skills.git";
 const canonical = "https://github.com/tiangong-ai/agent-skills.git";
 
 describe("research source organization migration", () => {
+  it("prepares through the upgrade source-cache path without rewriting a legacy origin", async () => {
+    const root = await realpath(await mkdtemp(join(tmpdir(), "source-cache-migration-")));
+    const skill = setupSkill("tiangong.kb-sci-search");
+    const originalHash = skill.expectedTreeSha256;
+    try {
+      await initializeResearchWorkspace(root, undefined);
+      const source = setupSource(skill.sourceId);
+      const oldCheckout = join(
+        workspacePaths(root).setupSources,
+        `${source.id}-${source.immutableRef.slice(0, 12)}`,
+      );
+      await mkdir(oldCheckout, { recursive: true });
+      await writeFile(join(oldCheckout, "preserve.txt"), "Owner's verified legacy cache\n");
+      const fixture = join(root, "fixture-sci");
+      await mkdir(fixture);
+      await writeFile(
+        join(fixture, "SKILL.md"),
+        "---\nname: tiangong-kb-sci-search\ndescription: Search SCI evidence.\n---\n",
+      );
+      skill.expectedTreeSha256 = await hashRegularTree(fixture);
+      const stage = join(root, "upgrade-stage");
+      await mkdir(stage);
+      const plan = await createResearchSetupPlan({
+        workspace: stage,
+        mode: "smoke-test",
+        evidenceProfile: "none",
+        skillIds: [skill.id],
+        acceptedLicenseIds: [skill.license.id],
+        confirmNetworkDownloads: true,
+        settings: { "tiangong.sci.endpoint": "https://database.example.test/sci" },
+        credentialEnvironment: { "tiangong.sci.api-key": "MIGRATION_SCI_API_KEY" },
+      });
+      const origins = new Map([[oldCheckout, legacy]]);
+      const ready = new Set([oldCheckout]);
+      const initialized: string[] = [];
+      const result = await applyResearchSetupPlan(workspacePaths(stage).setupPlan, {
+        sourceCacheWorkspace: root,
+        skipDoctor: true,
+        environment: { PATH: process.env.PATH, MIGRATION_SCI_API_KEY: "offline-fixture-key" },
+        runner: async ({ command, args }) => {
+          if (command === "npm") {
+            return {
+              exitCode: 0,
+              stdout: JSON.stringify({
+                version: RESEARCH_SETUP_INSTALLER.version,
+                "dist.integrity": RESEARCH_SETUP_INSTALLER.npmIntegrity,
+                gitHead: RESEARCH_SETUP_INSTALLER.gitHead,
+              }),
+              stderr: "",
+            };
+          }
+          if (command === "git" && args[0] === "init") {
+            const checkout = args.at(-1)!;
+            assert.notEqual(checkout, oldCheckout);
+            initialized.push(checkout);
+            await mkdir(checkout, { recursive: true });
+          } else if (command === "git") {
+            const checkout = args[1]!;
+            if (args[2] === "remote" && args[3] === "get-url") {
+              return { exitCode: 0, stdout: origins.get(checkout) ?? "", stderr: "" };
+            }
+            if (args[2] === "rev-parse") {
+              return {
+                exitCode: ready.has(checkout) ? 0 : 1,
+                stdout: ready.has(checkout) ? source.immutableRef : "",
+                stderr: "",
+              };
+            }
+            assert.notEqual(checkout, oldCheckout, "legacy cache must remain untouched");
+            if (args[2] === "remote" && args[3] === "add") {
+              assert.equal(args.at(-1), canonical);
+              origins.set(checkout, canonical);
+            }
+            if (args[2] === "checkout") {
+              await cp(fixture, join(checkout, skill.sourceRelativePath), { recursive: true });
+              ready.add(checkout);
+            }
+          } else if (command === "npx") {
+            await cp(fixture, join(plan.install.targets[0]!.root, skill.skillName), {
+              recursive: true,
+            });
+          } else {
+            throw new Error(`Unexpected setup command: ${command}`);
+          }
+          return { exitCode: 0, stdout: "", stderr: "" };
+        },
+      });
+      assert.ok(result.state.completedSteps.includes("source-checkout"));
+      assert.equal(initialized.length, 1);
+      assert.equal(origins.get(oldCheckout), legacy);
+      assert.equal(
+        await readFile(join(oldCheckout, "preserve.txt"), "utf8"),
+        "Owner's verified legacy cache\n",
+      );
+    } finally {
+      skill.expectedTreeSha256 = originalHash;
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
   it("uses the final repository for new plans without changing the reviewed content pin", () => {
     const source = setupSource("tiangong-ai-skills");
     assert.equal(source.repository, "tiangong-ai/agent-skills");

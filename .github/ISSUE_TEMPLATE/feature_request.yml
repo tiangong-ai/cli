@@ -7,7 +7,7 @@ body:
       value: |
         Chinese and English reports are welcome. Search existing issues and report one problem or capability per issue.
         支持中文和英文；先搜索已有反馈，一条 Issue 聚焦一个问题或能力。Unknown / Not applicable is accepted with a reason.
-        [Reporting principles](https://github.com/tiangong-ai/workspace/blob/main/_docs/contracts/issue-reporting-policy.md) · [Contribution guide](https://github.com/tiangong-ai/cli/blob/main/CONTRIBUTING.md)
+        [Reporting principles](https://github.com/tiangong-ai/workspace-suite/blob/main/_docs/contracts/issue-reporting-policy.md) · [Contribution guide](https://github.com/tiangong-ai/cli-toolkit/blob/main/CONTRIBUTING.md)
   - type: input
     id: summary
     attributes:
