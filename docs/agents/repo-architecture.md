@@ -333,6 +333,13 @@ variable names, and declared mutations. It never installs a Skill from a
 research package, resolves system/Python dependencies, silently updates a pin,
 or overwrites drift.
 
+New setup catalog entries use `tiangong-ai/agent-skills`. The exact legacy
+`tiangong-ai/skills.git` locator remains recognized for installed first-party
+capabilities. Recognition does not bypass the capability catalog identity,
+immutable ref, installed-tree hash or existing-lock verification. Both repository
+paths are reserved from the external-capability importer, including misleading
+query variants. Repository migration does not change the npm package or command.
+
 Managed setup upgrades use a separate candidate and an upgrade-specific
 transaction, without adding work to ordinary research execution. The candidate
 binds the immediate parent plan, exact runtime/config/marker hashes and the

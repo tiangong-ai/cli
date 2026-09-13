@@ -831,3 +831,13 @@ the packet artifact channel. They distinguish recorded/failed/unanswered rows,
 retain stale checks after supported acquisition revision and preserve replay
 and legacy taskContract. They qualify packet delivery, not scientific correctness
 or automatic instruction loading by every host session.
+
+## Repository migration regression
+
+`research-source-migration.test.ts` checks the final first-party catalog URL,
+legacy installed capability verification, supported source reconfiguration,
+unchanged content pins/hashes, and rejection without lock writes for untrusted
+locators or modified installed bytes. The external importer test retains the
+legacy reserved-source rejection and adds the renamed source. These tests run
+through the existing clean-container suite; they do not replace full managed
+workspace upgrade, source-cache, immutable-pin or final publication acceptance.

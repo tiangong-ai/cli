@@ -3,7 +3,7 @@ import { homedir } from "node:os";
 import { isAbsolute, join, relative, resolve, sep } from "node:path";
 
 import { CliError } from "../../errors.js";
-import { EXTERNAL_SKILLS_CLI_VERSION } from "./external-skills.js";
+import { EXTERNAL_SKILLS_CLI_VERSION, TIANGONG_SKILLS_REPOSITORY } from "./external-skills.js";
 import { sanitizeResearchText } from "./sanitization.js";
 import { hashRegularTree, pathExists } from "./storage.js";
 
@@ -140,8 +140,8 @@ export const RESEARCH_SETUP_SOURCES: readonly ResearchSetupSource[] = [
   },
   {
     id: "tiangong-ai-skills",
-    repository: "tiangong-ai/skills",
-    locator: "https://github.com/tiangong-ai/skills.git",
+    repository: TIANGONG_SKILLS_REPOSITORY,
+    locator: `https://github.com/${TIANGONG_SKILLS_REPOSITORY}.git`,
     immutableRef: TIANGONG_SKILLS_COMMIT,
     bundled: false,
     userInitiatedOnly: true,
@@ -175,7 +175,7 @@ const MIT_BRAVE: ResearchSetupLicense = {
 const MIT_TIANGONG: ResearchSetupLicense = {
   id: "tiangong-ai-skills:MIT",
   label: "MIT",
-  url: `https://github.com/tiangong-ai/skills/blob/${TIANGONG_SKILLS_COMMIT}/LICENSE`,
+  url: `https://github.com/${TIANGONG_SKILLS_REPOSITORY}/blob/${TIANGONG_SKILLS_COMMIT}/LICENSE`,
   notice: "Tiangong Skills are separately sourced under the MIT license.",
   requiresExplicitAcceptance: true,
 };
