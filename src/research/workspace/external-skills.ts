@@ -32,6 +32,8 @@ import type {
 } from "./types.js";
 
 export const EXTERNAL_SKILLS_CLI_VERSION = "1.5.22";
+export const TIANGONG_SKILLS_REPOSITORY = "tiangong-ai/agent-skills";
+const TIANGONG_SKILLS_REPOSITORIES = [TIANGONG_SKILLS_REPOSITORY, "tiangong-ai/skills"];
 export const EXTERNAL_SKILL_PROFILE = "internet-research";
 export const EXTERNAL_SKILL_CONTEXT_PROFILE = "internet-research-with-context";
 export const EXTERNAL_SKILL_MEDIA_PROFILE = "internet-research-with-media";
@@ -713,7 +715,10 @@ export async function configureTiangongDatabaseCapability(input: {
   await requireExistingCapabilitiesVerified(workspace);
   if (
     input.source.type !== "git" ||
-    input.source.locator.replace(/\/+$/, "") !== "https://github.com/tiangong-ai/skills.git" ||
+    !TIANGONG_SKILLS_REPOSITORIES.some(
+      (repository) =>
+        input.source.locator.replace(/\/+$/, "") === `https://github.com/${repository}.git`,
+    ) ||
     input.source.catalogId !== spec.catalogId
   ) {
     throw new CliError(
@@ -1618,7 +1623,7 @@ function isExternalCapabilitySource(
       .toLowerCase();
     if (
       locator.hostname.toLowerCase() === "github.com" &&
-      repositoryPath === "/tiangong-ai/skills"
+      TIANGONG_SKILLS_REPOSITORIES.some((repository) => repositoryPath === `/${repository}`)
     ) {
       return false;
     }

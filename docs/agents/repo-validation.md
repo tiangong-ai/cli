@@ -380,7 +380,7 @@ mandatory scientific-design, early-review, and real-record canary invariants.
 It is required locally for a pin change and in release CI.
 
 Release CI additionally sets `TIANGONG_RESEARCH_REQUIRE_SKILLS_MAIN=1`; the
-audit then requires the first-party `tiangong-ai/skills` pin to be reachable
+audit then requires the first-party `tiangong-ai/agent-skills` pin to be reachable
 from remote `main`. This makes a merged Skills change a prerequisite for CLI
 release and prevents publishing a catalog from an unmerged branch while still
 allowing the catalog to retain the exact reviewed commit beneath a merge commit.
@@ -831,3 +831,21 @@ the packet artifact channel. They distinguish recorded/failed/unanswered rows,
 retain stale checks after supported acquisition revision and preserve replay
 and legacy taskContract. They qualify packet delivery, not scientific correctness
 or automatic instruction loading by every host session.
+
+## Repository migration regression
+
+`research-source-migration.test.ts` checks the final first-party catalog URL,
+legacy installed capability verification, supported source reconfiguration,
+unchanged content pins/hashes, and rejection without lock writes for untrusted
+locators or modified installed bytes. The external importer test retains the
+legacy reserved-source rejection and adds the renamed source. These tests run
+through the existing clean-container suite; they do not replace full managed
+workspace upgrade, source-cache, immutable-pin or final publication acceptance.
+
+The source-cache regression exercises the same `sourceCacheWorkspace` path used
+by managed upgrades, preserves a legacy-origin cache, and requires a separate
+canonical checkout. The managed-generation fixture also creates a valid prior
+plan with the legacy repository and applies a canonical candidate through the
+real upgrade transaction while retaining owner notes and budget settings. These
+synthetic factories are offline integration evidence, not a released-binary
+upgrade or publication claim.

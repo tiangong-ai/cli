@@ -51,6 +51,38 @@ import {
 // Two synthetic catalog generations, each installed through the real plan/apply
 // factory. Their hashes are computed from actual regular trees, not forged plans.
 describe("managed setup upgrade generations", () => {
+  it("upgrades a factory-created legacy repository generation without changing owner data", async () => {
+    const f = await fixture(undefined, true);
+    try {
+      assert.equal(
+        f.prior.sources.find((source) => source.id === "tiangong-ai-skills")?.locator,
+        "https://github.com/tiangong-ai/skills.git",
+      );
+      const candidate = await f.candidate();
+      assert.equal(
+        candidate.sources.find((source) => source.id === "tiangong-ai-skills")?.locator,
+        "https://github.com/tiangong-ai/agent-skills.git",
+      );
+      await applyResearchSetupPlan(candidatePath(f.root, candidate.planSha256), {
+        runner: f.runner,
+        skipDoctor: true,
+      });
+      const active = await loadAndVerifyResearchSetupPlan(workspacePaths(f.root).setupPlan);
+      assert.equal(
+        active.sources.find((source) => source.id === "tiangong-ai-skills")?.locator,
+        "https://github.com/tiangong-ai/agent-skills.git",
+      );
+      assert.equal((await loadWorkspaceConfig(f.root)).budget.maxCostUsd, 23);
+      assert.equal(
+        await readFile(join(f.root, "research-notes.txt"), "utf8"),
+        "Owner evidence remains unchanged.\n",
+      );
+      assert.equal(f.installs.length, 2);
+    } finally {
+      await f.cleanup();
+    }
+  });
+
   it("reports unavailable release discovery as unknown rather than no update through the public CLI", async () => {
     const root = await realpath(await mkdtemp(join(tmpdir(), "upgrade-offline-query-")));
     try {
@@ -751,14 +783,14 @@ async function controlBytes(root: string) {
   );
 }
 
-async function fixture(priorVersion?: string) {
+async function fixture(priorVersion?: string, legacyRepository = false) {
   const root = await realpath(await mkdtemp(join(tmpdir(), "tiangong-upgrade-test-")));
   const skill = RESEARCH_SETUP_SKILLS.find((x) => x.id === "tiangong.auto-research")!;
   const catalogHash = skill.expectedTreeSha256;
   const sourceDef = RESEARCH_SETUP_SOURCES.find((x) => x.id === skill.sourceId)!;
   const sourceRoot = join(
     workspacePaths(root).setupSources,
-    `${sourceDef.id}-${sourceDef.immutableRef.slice(0, 12)}`,
+    `${sourceDef.id}-${sourceDef.immutableRef.slice(0, 12)}-${sha256Text(sourceDef.locator).slice(0, 12)}`,
   );
   const source = join(sourceRoot, skill.sourceRelativePath);
   const makeTree = async (directory: string, text: string) => {
@@ -796,9 +828,23 @@ async function fixture(priorVersion?: string) {
       });
       return prior;
     };
+    const currentLocator = sourceDef.locator;
+    const currentRepository = sourceDef.repository;
+    const buildPriorSource = async () => {
+      try {
+        if (legacyRepository) {
+          sourceDef.locator = "https://github.com/tiangong-ai/skills.git";
+          sourceDef.repository = "tiangong-ai/skills";
+        }
+        return await buildPrior();
+      } finally {
+        sourceDef.locator = currentLocator;
+        sourceDef.repository = currentRepository;
+      }
+    };
     const prior = priorVersion
-      ? await withFactoryVersion(priorVersion, buildPrior)
-      : await buildPrior();
+      ? await withFactoryVersion(priorVersion, buildPriorSource)
+      : await buildPriorSource();
     const config = await loadWorkspaceConfig(root);
     config.budget.maxCostUsd = 23;
     await writeJsonAtomic(workspacePaths(root).config, config);

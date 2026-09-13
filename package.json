@@ -1,14 +1,14 @@
 {
   "name": "@tiangong-ai/cli",
-  "version": "0.0.62",
+  "version": "0.0.63",
   "description": "Tiangong AI command-line interface.",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/tiangong-ai/cli.git"
+    "url": "git+https://github.com/tiangong-ai/cli-toolkit.git"
   },
-  "homepage": "https://github.com/tiangong-ai/cli#readme",
+  "homepage": "https://github.com/tiangong-ai/cli-toolkit#readme",
   "bugs": {
-    "url": "https://github.com/tiangong-ai/cli/issues"
+    "url": "https://github.com/tiangong-ai/cli-toolkit/issues"
   },
   "type": "module",
   "bin": {

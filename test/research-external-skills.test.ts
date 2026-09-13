@@ -753,12 +753,17 @@ describe("external database capability admission and doctor", () => {
         unknown
       >;
       const source = definition.source as Record<string, unknown>;
-      source.locator = "https://github.com/tiangong-ai/skills.git?ref=external-looking";
-      await writeFile(definitionPath, `${JSON.stringify(definition, null, 2)}\n`);
-      await assert.rejects(
-        importExternalCapability({ workspace: root, definitionPath }),
-        /external Skill source/,
-      );
+      for (const locator of [
+        "https://github.com/tiangong-ai/skills.git?ref=external-looking",
+        "https://github.com/tiangong-ai/agent-skills.git?ref=external-looking",
+      ]) {
+        source.locator = locator;
+        await writeFile(definitionPath, `${JSON.stringify(definition, null, 2)}\n`);
+        await assert.rejects(
+          importExternalCapability({ workspace: root, definitionPath }),
+          /external Skill source/,
+        );
+      }
 
       source.locator = "https://github.com/acme/database-search-skill.git";
       const healthCheck = definition.healthCheck as Record<string, unknown>;

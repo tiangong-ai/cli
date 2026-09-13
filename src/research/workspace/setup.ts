@@ -38,6 +38,7 @@ import {
   EXTERNAL_SKILL_CONTEXT_PROFILE,
   EXTERNAL_SKILL_MEDIA_PROFILE,
   EXTERNAL_SKILL_PROFILE,
+  TIANGONG_SKILLS_REPOSITORY,
   reconcileSetupManagedCapabilities,
 } from "./external-skills.js";
 import { appendJournalEvent } from "./journal.js";
@@ -3591,9 +3592,16 @@ async function ensureSetupSourceCheckout(
 function setupSourceCheckoutPath(plan: ResearchSetupPlan, sourceId: string): string {
   const source = plan.sources.find((candidate) => candidate.id === sourceId);
   if (!source) throw planCatalogDrift(`missing source ${sourceId}`);
+  // A renamed first-party source can pin the same commit as an existing legacy
+  // checkout. Use a distinct cache; never rewrite that checkout's origin.
+  const locatorSuffix =
+    source.id === "tiangong-ai-skills" &&
+    source.locator === `https://github.com/${TIANGONG_SKILLS_REPOSITORY}.git`
+      ? `-${sha256Text(source.locator).slice(0, 12)}`
+      : "";
   return join(
     workspacePaths(plan.workspace.path).setupSources,
-    `${source.id}-${source.immutableRef.slice(0, 12)}`,
+    `${source.id}-${source.immutableRef.slice(0, 12)}${locatorSuffix}`,
   );
 }
 

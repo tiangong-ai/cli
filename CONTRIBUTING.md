@@ -18,17 +18,17 @@ lastReviewedCommit: 4472738acc78eab396fb1f4c7f5e76af9ac703be
 # Contributing Feedback / 提交反馈
 
 Chinese and English reports are welcome. Start with the
-[Bug report](https://github.com/tiangong-ai/cli/issues/new?template=bug_report.yml)
-or [Feature request](https://github.com/tiangong-ai/cli/issues/new?template=feature_request.yml).
-These implement the shared [reporting contract v1](https://github.com/tiangong-ai/workspace/blob/main/_docs/contracts/issue-reporting-policy.md).
+[Bug report](https://github.com/tiangong-ai/cli-toolkit/issues/new?template=bug_report.yml)
+or [Feature request](https://github.com/tiangong-ai/cli-toolkit/issues/new?template=feature_request.yml).
+These implement the shared [reporting contract v1](https://github.com/tiangong-ai/workspace-suite/blob/main/_docs/contracts/issue-reporting-policy.md).
 本仓库与另一个项目使用同一套核心字段；可以用中文或英文填写。
 
 ## Where To Report / 提交到哪里
 
 - Skill instructions, prompt orchestration, references, and agent routing:
-  [Skills](https://github.com/tiangong-ai/skills/issues/new/choose).
+  [Skills](https://github.com/tiangong-ai/agent-skills/issues/new/choose).
 - Commands, setup/install failures, runtime errors, locks, and package issues:
-  [CLI](https://github.com/tiangong-ai/cli/issues/new/choose).
+  [CLI](https://github.com/tiangong-ai/cli-toolkit/issues/new/choose).
 - Uncertain or cross-component problems: use CLI and select `Unsure / 不确定`
   when the component is unknown. Maintainers handle transfers or linked tasks.
   无法判断归属时提交到 CLI；不需要在两个仓库重复提交。

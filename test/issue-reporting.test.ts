@@ -9,8 +9,8 @@ import { parse } from "yaml";
 import { runCli } from "../src/cli.js";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
-const bugs = "https://github.com/tiangong-ai/cli/issues/new/choose";
-const guide = "https://github.com/tiangong-ai/cli/blob/main/CONTRIBUTING.md";
+const bugs = "https://github.com/tiangong-ai/cli-toolkit/issues/new/choose";
+const guide = "https://github.com/tiangong-ai/cli-toolkit/blob/main/CONTRIBUTING.md";
 
 test("offline help exposes the reporting form and standalone guide", async () => {
   let stdout = "";

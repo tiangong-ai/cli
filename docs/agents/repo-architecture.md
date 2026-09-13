@@ -12,8 +12,8 @@ checkPaths:
   - README.md
   - src/**
   - bin/**
-lastReviewedAt: 2026-09-11
-lastReviewedCommit: 79da7e3
+lastReviewedAt: 2026-09-14
+lastReviewedCommit: facc1b0aaac8a353ddae6773e68bcdb267d1a5ea
 ---
 
 # Repo Architecture
@@ -332,6 +332,18 @@ source commit, whole-tree SHA-256, exact destination, settings, credential
 variable names, and declared mutations. It never installs a Skill from a
 research package, resolves system/Python dependencies, silently updates a pin,
 or overwrites drift.
+
+New setup catalog entries use `tiangong-ai/agent-skills`. The exact legacy
+`tiangong-ai/skills.git` locator remains recognized for installed first-party
+capabilities. Recognition does not bypass the capability catalog identity,
+immutable ref, installed-tree hash or existing-lock verification. Both repository
+paths are reserved from the external-capability importer, including misleading
+query variants. Repository migration does not change the npm package or command.
+
+The renamed first-party source uses a locator-qualified cache directory, so an
+upgrade can pin the same commit without rewriting the legacy checkout origin.
+Legacy source caches and third-party cache paths remain untouched; cached
+origins, commits and installed tree hashes still require exact verification.
 
 Managed setup upgrades use a separate candidate and an upgrade-specific
 transaction, without adding work to ordinary research execution. The candidate

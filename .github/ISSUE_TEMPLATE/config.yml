@@ -1,5 +1,5 @@
 blank_issues_enabled: false
 contact_links:
   - name: Skill instructions and orchestration / Skill 指令与编排
-    url: https://github.com/tiangong-ai/skills/issues/new/choose
+    url: https://github.com/tiangong-ai/agent-skills/issues/new/choose
     about: Choose the related component when known; uncertain reports are accepted by CLI.

@@ -3582,9 +3582,9 @@ Run "tiangong-ai research --help" for research options.
 Run "tiangong-ai education --help" for education options.
 
 Report a problem or suggest a capability:
-  https://github.com/tiangong-ai/cli/issues/new/choose
+  https://github.com/tiangong-ai/cli-toolkit/issues/new/choose
 Reporting guide:
-  https://github.com/tiangong-ai/cli/blob/main/CONTRIBUTING.md
+  https://github.com/tiangong-ai/cli-toolkit/blob/main/CONTRIBUTING.md
 `;
 }
 

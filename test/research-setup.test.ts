@@ -92,11 +92,11 @@ describe("research setup catalog and immutable plans", () => {
       assert.ok(catalog.sources.every((source) => /^[0-9a-f]{40}$/.test(source.immutableRef)));
       assert.equal(
         catalog.sources.find((source) => source.id === "tiangong-ai-skills")?.immutableRef,
-        "c5f8fe3ff43313f69b8deb4d970261c4013c5310",
+        "8516fbb974d35dd930262d4e83b1a21d87369496",
       );
       assert.equal(
         catalog.entries.find((entry) => entry.id === "tiangong.auto-research")?.expectedTreeSha256,
-        "98098cca54f18db899bb7b56d89215dd89a8a2f0138fc39d32639678d52ce07b",
+        "81ece5090223733a37bd3aa52bf2c7f44b0dba5335ea75e3a30a46dc474f0e1d",
       );
       assert.ok(catalog.roles.evidenceCapabilities.includes("tiangong.kb-sci-search"));
       assert.ok(catalog.roles.evidenceCapabilities.includes("tiangong.kb-report-search"));
@@ -112,7 +112,7 @@ describe("research setup catalog and immutable plans", () => {
       assert.equal(
         catalog.entries.find((entry) => entry.id === "tiangong.kb-report-search")
           ?.standaloneTestedCliVersion,
-        "0.0.30",
+        "0.0.62",
       );
       assert.deepEqual(catalog.roles.orchestrators, [
         "tiangong.auto-research",
